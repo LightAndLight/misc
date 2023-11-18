@@ -2,6 +2,8 @@
 
 *2023-11-18*
 
+Status: not a bug. See the [discussion on GitLab](https://gitlab.haskell.org/ghc/ghc/-/issues/19666#note_536055).
+
 [Source file](./src/Lib.hs)
 
 `getIndex Nil Z` and `getIndex Nil S{}` are recognised as inaccessible pattern matches, but when
