@@ -2,15 +2,17 @@
 
 *2023-11-18*
 
+[Source file](./src/Lib.hs)
+
+`getIndex Nil Z` and `getIndex Nil S{}` are recognised as inaccessible pattern matches, but when
+they are omitted GHC reports an incomplete pattern match.
+
 ```
 $ nix develop
 
 $ ghc --version
 The Glorious Glasgow Haskell Compilation System, version 9.6.3
 ```
-
-`getIndex Nil Z` and `getIndex Nil S{}` are recognised as inaccessible pattern matches, but when
-they are omitted GHC reports an incomplete pattern match.
 
 ```
 $ cabal build
