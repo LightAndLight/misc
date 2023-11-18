@@ -1,0 +1,13 @@
+--- src/Lib.hs.old	2023-11-18 11:16:30.214054654 +1000
++++ src/Lib.hs	2023-11-18 11:16:35.267175421 +1000
+@@ -18,5 +18,6 @@
+ getIndex :: Context f ctx -> Index ctx a -> f a
+ getIndex (Cons a _) Z = a
+ getIndex (Cons _ as) (S ix) = getIndex as ix
+-getIndex Nil Z = undefined
+-getIndex Nil S{} = undefined
+\ No newline at end of file
++
++-- getIndex Nil Z = undefined
++-- getIndex Nil S{} = undefined
+\ No newline at end of file
