@@ -15,18 +15,17 @@ If I evaluate this on my NixOS installation, I get `11`, but on Windows I get `2
 The meaning of this program depends on the system on which it's evaluated.
 In contrast, `7 * 4 :: Integer` gives `28` no matter where I evaluate it.
 
-I think context-dependency of values like `System.Info.os` should be described by coeffects.
+I think the context-dependency of values like `System.Info.os` should be described by coeffects.
+We use functions of type `Monad m => a -> m b` as `a -> b`s having effect `m`, and dually we can use
+functions of type
+`Comonad w => w a -> b` as `a -> b`s under coeffect `w`.
+`if System.Info.os == "linux" then 7 + 4 else 7 * 4` becomes
+`if osName osInfo == "linux" then 7 + 4 else 7 * 4` where `osInfo :: OsInfo a` and
+`osName :: OsInfo a -> String`. `OsInfo` is a comonad, and an `OsInfo a` is an `a` that has been
+under in the `OsInfo` context. While each platform provides a different `osInfo :: OsInfo ()`, the
+meaning of `if osName osInfo == "linux" then 7 + 4 else 7 * 4`  stays the same.
 
-* `Monad m => a -> m b` are `a -> b` with effect `m`
-* `Comonad w => w a -> b` are `a -> b` with coeffect `w`
-* `if System.Info.os == "linux" then 7 + 4 else 7 * 4` becomes
-  `\(osInfo :: OsInfo a) -> if osName osInfo == "linux" then 7 + 4 else 7 * 4`
-  * Perhaps even `if osName osInfo == "linux" then 7 + 4 else 7 * 4`, with `osInfo`a
-    being global value. When it's a global value, it's like every definition has an extra `OsInfo
-    ()` argument.
-  * In distributed programs, `OsInfo a` can't be transferred between computers, but functions
-    `OsInfo a -> b` can. A computer that recieves an `OsInfo a -> b` is forced to supply its native
-    `OsInfo a` context.
+## References
 
 [^1]: Petricek, T. (2017). Context-aware programming languages (No. UCAM-CL-TR-906). University of
 Cambridge, Computer Laboratory.
