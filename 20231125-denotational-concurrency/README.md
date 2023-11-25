@@ -104,18 +104,46 @@ Returning to the original question of shared state, maybe this is a start:
 [[ State s a ]] = s -> (s, a)
 [[ SharedState s a ]] = s -> [(s, a)]
 
+perturb :: s -> [s]
+[[ perturb s ]] = [ f s | f \in s -> s ]
+
+pure :: a -> SharedState s a
+[[ pure a ]] = \s -> do
+  s' <- perturb s
+  pure (s', a)
+
+(>>=) :: SharedState s a -> (a -> SharedState s b) -> SharedState s b
+[[ ma >>= f ]] = \s -> do
+  (s', a) <- [[ ma ]] s
+  (s'', b) <- [[ f a ]] s'
+  pure (s'', b)
+
 get :: s -> SharedState s s
-[[ get ]] = \inState -> (inState, inState) : [ (state, state) | state \in s ]
+[[ get ]] = \s -> do
+  s' <- perturb s
+  let a = s'
+  s'' <- perturb s'
+  pure (s'', a)
 
 put :: s -> SharedState s ()
-[[ put state ]] = \_ -> [(state, ())]
-
-modify :: (s -> s) -> SharedState s ()
-[[ modify f ]] = \inState -> (f inState, ()) : [ (f state, ()) | state \in s ]
+[[ put s ]] = \_ -> do
+  s' <- perturb s
+  pure (s', ())
 
 atomically :: State s a -> SharedState s a
-[[ atomically m ]] = \inState -> [ [[ m ]] s ]
+[[ atomically m ]] = \s -> do
+  s' <- perturb s
+  let (s'', a) = [[ m ]] s'
+  s''' <- perturb s''
+  pure (s''', a)
 ```
+
+`State` represents a deterministic state transitions, and `SharedState` represents nondeterministic
+state transitions. Nondeterminism is introduced by `perturb`, which represents all possible state changes
+including "no concurrent change". It's non-constructive, but that might be okay for a denotation.
+Every primitive is bracketed by `perturb`s to cover all the possible interleavings of concurrent state
+changes. `atomically` "lifts" a single-threaded / deterministic state computation into the shared state
+context.
 
 [^1]: Moggi, E. (1991). Notions of computation and monads. Information and computation, 93(1),
     55-92.
