@@ -23,6 +23,8 @@ module Env (
   withEnv,
 
   -- * Effect
+
+  -- ** Interface
   MonadEnviron (..),
   EnvironStateT (..),
 
@@ -201,6 +203,10 @@ unescapeValueLinux str = withFrozenCallStack (go str)
   go (c : s) = c : go s
   go "" = ""
 
+{- | This instance is only valid under single-threaded environment variable manipulation.
+
+When multiple threads modify the environment, the interface becomes nondeterministic.
+-}
 instance MonadEnviron IO where
   getEnviron =
     Map.fromList
