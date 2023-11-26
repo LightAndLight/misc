@@ -1,0 +1,4 @@
+packages:
+  .
+  ./commutative-monoid
+  ./commutative-monoid-containers
