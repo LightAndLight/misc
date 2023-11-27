@@ -35,6 +35,12 @@ module Env (
   -- * Internals
   HasVar,
   KnownSymbols,
+
+  -- ** Escaping rules #escaping#
+
+  -- *** Linux
+  escapeKeyLinux,
+  unescapeKeyLinux,
 ) where
 
 import Control.Comonad (Comonad (..))
@@ -181,7 +187,7 @@ unescapeKeyLinux str = withFrozenCallStack (go str)
   go ('\\' : 'x' : '0' : s) = '\0' : go s
   go ('\\' : 'e' : 'q' : 'u' : 'a' : 'l' : 's' : s) = '=' : go s
   go s@('\\' : _) =
-    error $ "unexpected characters in environment variable key: " <> show s
+    error $ "unexpected characters \"" <> s <> "\" in environment variable key \"" <> s <> "\""
   go (c : s) = c : go s
   go "" = ""
 
@@ -199,13 +205,19 @@ unescapeValueLinux str = withFrozenCallStack (go str)
   go ('\\' : '\\' : s) = '\\' : go s
   go ('\\' : 'x' : '0' : s) = '\0' : go s
   go s@('\\' : _) =
-    error $ "unexpected characters in environment variable value: " <> show s
+    error $ "unexpected characters \"" <> s <> "\" in environment variable value \"" <> str <> "\""
   go (c : s) = c : go s
   go "" = ""
 
-{- | This instance is only valid under single-threaded environment variable manipulation.
+{- | Caveats:
 
-When multiple threads modify the environment, the interface becomes nondeterministic.
+* This instance is only valid under single-threaded environment variable manipulation.
+
+  When multiple threads modify the environment, the interface becomes nondeterministic (you might
+  not get back what you put in).
+
+* Assumes that the preexisting environment variables are escaped according to the platform's
+  [escaping rules](#g:escaping).
 -}
 instance MonadEnviron IO where
   getEnviron =
