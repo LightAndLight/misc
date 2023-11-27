@@ -5,8 +5,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -19,6 +19,7 @@ module Env (
   Env,
   Var (..),
   Env.get,
+  Env.lookup,
   withEnvM,
   withEnv,
 
@@ -33,8 +34,9 @@ module Env (
   runEnvironT,
 
   -- * Internals
-  HasVar,
-  KnownSymbols,
+  GetVar,
+  LookupVar,
+  KnownVars,
 
   -- ** Escaping rules #escaping#
 
@@ -44,7 +46,7 @@ module Env (
 ) where
 
 import Control.Comonad (Comonad (..))
-import Control.Monad (unless)
+import Control.Monad.Except (ExceptT (..), runExceptT)
 import Control.Monad.IO.Class (MonadIO)
 import qualified Control.Monad.Reader
 import Control.Monad.Reader.Class (MonadReader)
@@ -55,7 +57,6 @@ import Control.Monad.Trans (MonadTrans, lift)
 import Control.Monad.Writer.Class (MonadWriter)
 import qualified Control.Monad.Writer.Strict
 import Data.Bifunctor (bimap)
-import Data.Either (partitionEithers)
 import Data.Foldable (for_)
 import Data.Kind (Type)
 import Data.List (intercalate)
@@ -68,8 +69,39 @@ import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import qualified System.Environment (lookupEnv)
 import qualified System.Environment.Blank as System.Environment
 
-data Env :: Type -> [Symbol] -> Type -> Type where
-  Env :: [String] -> a -> Env s vars a
+data Demand a = Required a | Optional a
+
+data DemandedValue :: Demand a -> Type -> Type where
+  RequiredValue :: x -> DemandedValue (Required val) x
+  OptionalValue :: Maybe x -> DemandedValue (Optional val) x
+
+data Vars :: [Demand Symbol] -> Type where
+  Nil :: Vars '[]
+  Cons :: DemandedValue var String -> Vars vars -> Vars (var ': vars)
+
+class GetVar var vars where
+  get' :: Var var -> Vars vars -> String
+
+instance GetVar var (Required var ': vars) where
+  get' _ (Cons (RequiredValue value) _) = value
+
+instance {-# OVERLAPPABLE #-} (GetVar var vars) => GetVar var (var' ': vars) where
+  get' key (Cons _ values) = Env.get' @var @vars key values
+
+class LookupVar var vars where
+  lookup' :: Var var -> Vars vars -> Maybe String
+
+instance LookupVar var (Required var ': vars) where
+  lookup' _ (Cons (RequiredValue value) _) = Just value
+
+instance LookupVar var (Optional var ': vars) where
+  lookup' _ (Cons (OptionalValue value) _) = value
+
+instance {-# OVERLAPPABLE #-} (LookupVar var vars) => LookupVar var (var' ': vars) where
+  lookup' key (Cons _ values) = Env.lookup' @var @vars key values
+
+data Env :: Type -> [Demand Symbol] -> Type -> Type where
+  Env :: Vars vars -> a -> Env s vars a
 
 deriving instance Functor (Env s vars)
 
@@ -77,55 +109,72 @@ instance Comonad (Env s vars) where
   extract (Env _ a) = a
   duplicate (Env vars a) = Env vars (Env vars a)
 
+get :: (GetVar var vars) => Var var -> Env s vars a -> String
+get var (Env vars _) = get' var vars
+
+lookup :: (LookupVar var vars) => Var var -> Env s vars a -> Maybe String
+lookup var (Env vars _) = lookup' var vars
+
 data Var :: Symbol -> Type where
   Var :: (KnownSymbol s) => Var s
 
 instance (KnownSymbol s, s ~ s') => IsLabel s' (Var s) where
   fromLabel = Var @s
 
-class HasVar var vars where
-  get :: Var var -> Env s vars a -> String
+class KnownVars (vars :: [Demand Symbol]) where
+  loadVars :: (MonadEnviron m) => m (Either [String] (Vars vars))
 
-instance {-# OVERLAPPING #-} HasVar var (var ': vars) where
-  get _ (Env (value : _) _) = value
-  get _ (Env _ _) = undefined
+instance KnownVars '[] where
+  loadVars = pure (Right Nil)
 
-instance (HasVar var vars) => HasVar var (var' ': vars) where
-  get key (Env (_ : values) a) = Env.get @var @vars key (Env values a)
-  get _ (Env _ _) = undefined
+instance (KnownSymbol a, KnownVars as) => KnownVars (Required a ': as) where
+  loadVars = do
+    let k = symbolVal (Proxy :: Proxy a)
+    mv <- getVar k
+    case mv of
+      Nothing -> do
+        rest <- loadVars @as
+        case rest of
+          Left ks ->
+            pure $ Left (k : ks)
+          Right _ ->
+            pure $ Left [k]
+      Just v -> runExceptT $ do
+        rest <- ExceptT $ loadVars @as
+        pure $ Cons (RequiredValue v) rest
 
-class KnownSymbols (syms :: [Symbol]) where
-  symbolVals :: [String]
-
-instance KnownSymbols '[] where
-  symbolVals = []
-
-instance (KnownSymbol a, KnownSymbols as) => KnownSymbols (a ': as) where
-  symbolVals = symbolVal (Proxy :: Proxy a) : symbolVals @as
+instance (KnownSymbol a, KnownVars as) => KnownVars (Optional a ': as) where
+  loadVars = do
+    let k = symbolVal (Proxy :: Proxy a)
+    mv <- getVar k
+    runExceptT $ case mv of
+      Nothing -> do
+        rest <- ExceptT $ loadVars @as
+        pure $ Cons (OptionalValue Nothing) rest
+      Just v -> do
+        rest <- ExceptT $ loadVars @as
+        pure $ Cons (OptionalValue $ Just v) rest
 
 withEnvM ::
   forall vars m b.
-  (KnownSymbols vars, MonadEnviron m) =>
+  (KnownVars vars, MonadEnviron m) =>
   (forall s. Env s vars () -> m b) ->
   m b
 withEnvM f = do
-  let vars = symbolVals @vars
-  (notFoundKeys, foundVars) <-
-    partitionEithers
-      <$> traverse
-        (\var -> maybe (Left var) Right <$> getVar var)
-        vars
-  unless (null notFoundKeys)
-    $ error
-    $ "environment variable"
-    <> (case notFoundKeys of [_] -> "s"; _ -> "")
-    <> " not found: "
-    <> intercalate ", " notFoundKeys
-  f (Env foundVars ())
+  result <- loadVars @vars
+  case result of
+    Left notFoundKeys ->
+      error
+        $ "environment variable"
+        <> (case notFoundKeys of [_] -> ""; _ -> "s")
+        <> " not found: "
+        <> intercalate ", " notFoundKeys
+    Right vars ->
+      f (Env vars ())
 
 withEnv ::
   forall vars m b.
-  (KnownSymbols vars, MonadEnviron m) =>
+  (KnownVars vars, MonadEnviron m) =>
   (forall s. Env s vars () -> b) ->
   m b
 withEnv f = withEnvM (pure . f)
