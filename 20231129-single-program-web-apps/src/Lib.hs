@@ -6,6 +6,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -19,23 +20,28 @@ module Lib (
   Interact,
   Event,
   Behavior,
+  Reactive,
   Element,
   html,
   element,
   textInput,
   domEvent,
   sample,
+  stepper,
   perform,
+  request,
   Html (..),
   DomEvent (..),
   module Network.HTTP.Types.Method,
 ) where
 
+import Control.Monad (void, (<=<))
 import Control.Monad.State (evalState)
 import Control.Monad.State.Class (MonadState, get, put)
-import Control.Monad.Writer (runWriterT)
+import Control.Monad.Trans
+import Control.Monad.Writer (WriterT, runWriterT)
 import Control.Monad.Writer.Class (MonadWriter, tell)
-import Data.Aeson (FromJSON)
+import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Json
 import Data.Bifunctor (bimap)
 import Data.ByteString (ByteString)
@@ -74,6 +80,7 @@ data Interact :: Type -> Type where
   Element :: Html -> Interact Element
   DomEvent :: DomEvent -> Element -> Interact (Event ())
   Perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
+  Request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
 
 instance Functor Interact where
   fmap f m = Pure f `Apply` m
@@ -99,6 +106,7 @@ textInput = TextInput
 data Event :: Type -> Type where
   FromDomEvent :: String -> DomEvent -> Event a
   Sample :: Event a -> Behavior b -> Event (a, b)
+  FromRequest :: Event a -> String -> Event b
 
 data Behavior a = Behavior String
 
@@ -108,39 +116,57 @@ domEvent de (MkElement elId _) = FromDomEvent elId de
 sample :: Event a -> Behavior b -> Event (a, b)
 sample = Sample
 
-class (FromJSON (SendTy a)) => Send a where
+data Reactive a = Stepper a (Event a)
+
+stepper :: a -> Event a -> Reactive a
+stepper = Stepper
+
+class (FromJSON (SendTy a), ToJSON (SendTy a)) => Send a where
   type SendTy a :: Type
   fromSendTy :: SendTy a -> a
+  toSendTy :: a -> SendTy a
 
 instance Send () where
   type SendTy () = ()
   fromSendTy = id
+  toSendTy = id
 
 instance Send String where
   type SendTy String = String
   fromSendTy = id
+  toSendTy = id
 
 instance (Send a, Send b) => Send (a, b) where
   type SendTy (a, b) = SendPair (SendTy a) (SendTy b)
   fromSendTy (SendPair a b) = (fromSendTy a, fromSendTy b)
+  toSendTy (a, b) = SendPair (toSendTy a) (toSendTy b)
 
 data SendPair a b = SendPair {fst :: a, snd :: b}
   deriving (Generic)
 instance (FromJSON a, FromJSON b) => FromJSON (SendPair a b)
+instance (ToJSON a, ToJSON b) => ToJSON (SendPair a b)
 
 decodeSend :: (Send a) => Lazy.ByteString -> Either String a
 decodeSend = fmap fromSendTy . Json.eitherDecode'
 
+encodeSend :: (Send a) => a -> Lazy.ByteString
+encodeSend = Json.encode . toSendTy
+
 perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
 perform = Perform
+
+request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
+request = Request
 
 data Page
   = Page Html
   | PageM (Interact Html)
 
-renderPage :: (MonadState Int m) => Path -> Page -> m (Map ByteString (Lazy.ByteString -> IO ()), Builder)
-renderPage path (Page html) = renderHtml path "<!-- no script -->" html
-renderPage path (PageM html) = renderInteractHtml path html
+newtype RPC = RPC (forall a. Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a)
+
+renderPage :: (MonadState Int m) => Path -> Page -> m (Map ByteString RPC, Builder)
+renderPage path (Page h) = renderHtml path "<!-- no script -->" h
+renderPage path (PageM h) = renderInteractHtml path h
 
 freshId :: (MonadState Int m) => m String
 freshId = do
@@ -152,7 +178,7 @@ setId :: String -> Html -> Html
 setId i (Node name attrs children) = Node name (("id", i) : attrs) children
 setId _ a = a
 
-renderInteractHtml :: (MonadState Int m) => Path -> Interact Html -> m (Map ByteString (Lazy.ByteString -> IO ()), Builder)
+renderInteractHtml :: (MonadState Int m) => Path -> Interact Html -> m (Map ByteString RPC, Builder)
 renderInteractHtml path x = do
   (h, (fns, script)) <- runWriterT $ go x
   (fns', content) <- renderHtml path script h
@@ -160,8 +186,8 @@ renderInteractHtml path x = do
  where
   -- uncurry (renderHtml path) . Tuple.swap . second Tuple.snd <=<
 
-  go :: (MonadState Int m, MonadWriter (Map ByteString (Lazy.ByteString -> IO ()), String) m) => Interact a -> m a
-  go (Pure html) = pure html
+  go :: (MonadState Int m, MonadWriter (Map ByteString RPC, String) m) => Interact a -> m a
+  go (Pure h) = pure h
   go (Apply mf ma) = go mf <*> go ma
   go (Bind ma f) = go ma >>= go . f
   go TextInput = do
@@ -189,20 +215,36 @@ renderInteractHtml path x = do
     pure $ FromDomEvent elId de
   go (Perform ea f) = do
     let
-      run :: Lazy.ByteString -> IO ()
-      run input =
+      run :: Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
+      run input resp =
         case decodeSend input of
-          Left err ->
+          Left err -> do
             hPutStrLn System.IO.stderr $ show err
-          Right a ->
+            undefined
+          Right a -> do
             f a
+            resp ""
     fnId <- ("function_" <>) <$> freshId
-    script <- foldMap (<> "\n") <$> performEventScript ea (fetch path fnId)
-    tell (Map.singleton (ByteString.Char8.pack fnId) run, script)
+    script <- foldMap (<> "\n") <$> performEventScript path ea (fetch path fnId)
+    tell (Map.singleton (ByteString.Char8.pack fnId) (RPC run), script)
     pure ()
+  go (Request ea f) = do
+    let
+      run :: Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
+      run input resp =
+        case decodeSend input of
+          Left err -> do
+            hPutStrLn System.IO.stderr $ show err
+            undefined
+          Right a -> do
+            b <- f a
+            resp (encodeSend b)
+    fnId <- ("function_" <>) <$> freshId
+    tell (Map.singleton (ByteString.Char8.pack fnId) (RPC run), mempty)
+    pure $ FromRequest ea fnId
 
-performEventScript :: (MonadState Int m) => Event a -> (String -> [String]) -> m [String]
-performEventScript e code =
+performEventScript :: (MonadState Int m) => Path -> Event a -> (String -> [String]) -> m [String]
+performEventScript path e code =
   case e of
     FromDomEvent elId de ->
       pure
@@ -217,14 +259,36 @@ performEventScript e code =
     Sample e' (Behavior var) -> do
       temp <- ("temp_" <>) <$> freshId
       performEventScript
+        path
         e'
         (\target -> ["const " <> temp <> " = { fst: " <> target <> ", snd: " <> var <> "};"] <> code temp)
+    FromRequest e' fnId -> do
+      result <- ("result_" <>) <$> freshId
+      temp <- ("temp_" <>) <$> freshId
+      performEventScript
+        path
+        e'
+        ( \target ->
+            [ "    fetch("
+            , "      \"" <> renderPath path <> "\","
+            , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> target <> " })}"
+            , "    ).then("
+            , "      (" <> result <> ") => {"
+            , "        " <> result <> ".json().then((" <> temp <> ") => {"
+            ]
+              <> code temp
+              <> [ "        });"
+                 , "      }"
+                 , "    );"
+                 ]
+        )
 
 data Html
   = Html [Html]
   | Node String [(String, String)] [Html]
   | WithScript Html String
   | Text String
+  | ReactiveText (Reactive String)
   | OnEvent Html (DomEvent, IO ())
 
 data DomEvent
@@ -244,25 +308,25 @@ renderPath (Path segments) = go segments
     fromString b <> "/" <> go bs
 
 fetch :: (IsString s, Monoid s) => Path -> s -> s -> [s]
-fetch path fnId arg =
+fetch path fnId a =
   [ "    fetch("
   , "      \"" <> renderPath path <> "\","
-  , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> arg <> " })}"
+  , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> a <> " })}"
   , "    );"
   ]
 
-renderHtml :: (MonadState Int m) => Path -> String -> Html -> m (Map ByteString (Lazy.ByteString -> IO ()), Builder)
-renderHtml path postScript = fmap Tuple.swap . runWriterT . go Nothing
+renderHtml :: (MonadState Int m) => Path -> String -> Html -> m (Map ByteString RPC, Builder)
+renderHtml path postScript = fmap Tuple.swap . runWriterT . fmap Tuple.fst . runWriterT . go Nothing
  where
-  go :: (MonadState Int m, MonadWriter (Map ByteString (Lazy.ByteString -> IO ())) m) => Maybe Builder -> Html -> m Builder
+  go :: (MonadState Int m, MonadWriter (Map ByteString RPC) m) => Maybe String -> Html -> WriterT String m Builder
   go _ (Html children) = do
-    children' <- fold <$> traverse (go Nothing) children
+    (children', postScript') <- lift . runWriterT $ fold <$> traverse (go Nothing) children
     pure
       $ "<!doctype html>\n"
       <> "<html>\n"
       <> children'
       <> "<script>\n"
-      <> Builder.byteString (ByteString.Char8.pack postScript)
+      <> Builder.byteString (ByteString.Char8.pack $ postScript' <> postScript)
       <> "</script>"
       <> "</html>\n"
   go mId (Node name attrs children) = do
@@ -273,7 +337,7 @@ renderHtml path postScript = fmap Tuple.swap . runWriterT . go Nothing
       <> Builder.byteString nameBytes
       <> foldMap
         (\(attrName, attrValue) -> " " <> attrName <> "=\"" <> attrValue <> "\"")
-        ( maybe [] (pure . (,) "id") mId
+        ( maybe [] (pure . (,) "id" . fromString) mId
             <> fmap
               ( bimap
                   (Builder.byteString . ByteString.Char8.pack)
@@ -291,16 +355,16 @@ renderHtml path postScript = fmap Tuple.swap . runWriterT . go Nothing
     -- TODO: escape text
     pure $ Builder.byteString (ByteString.Char8.pack t)
   go mId (OnEvent element (event, action)) = do
-    elId <- maybe (Builder.byteString . ByteString.Char8.pack . ("element_" <>) <$> freshId) pure mId
+    elId <- maybe (("element_" <>) <$> freshId) pure mId
     fnId <- ByteString.Char8.pack . ("function_" <>) <$> freshId
-    tell $ Map.singleton fnId (const action)
+    lift . tell $ Map.singleton fnId (RPC $ \_ resp -> action *> resp "")
     element' <- go (Just elId) element
     pure
       . (element' <>)
       . foldMap (<> "\n")
       $ [ "<script>"
-        , "const " <> elId <> " = document.getElementById(\"" <> elId <> "\");"
-        , elId <> ".addEventListener("
+        , "const " <> fromString elId <> " = document.getElementById(\"" <> fromString elId <> "\");"
+        , fromString elId <> ".addEventListener("
         , "  " <> renderDomEvent event <> ", "
         , "  (event) => { "
         ]
@@ -312,6 +376,16 @@ renderHtml path postScript = fmap Tuple.swap . runWriterT . go Nothing
   go mId (WithScript el script) = do
     el' <- go mId el
     pure $ el' <> "<script>\n" <> Builder.byteString (ByteString.Char8.pack script) <> "</script>\n"
+  go mId (ReactiveText (Stepper initial eString)) = do
+    textId <- maybe (("text_" <>) <$> freshId) pure mId
+    script <- performEventScript path eString $ \target -> [textId <> ".textContent = " <> target <> ";"]
+    let
+      script' =
+        foldMap (<> "\n")
+          $ ["const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");"]
+          <> fmap fromString script
+    tell script'
+    pure $ "<span id=\"" <> fromString textId <> "\">" <> fromString initial <> "</span>\n"
 
 -- | [[ App ]] = Path -> Maybe Page
 newtype App = App (Map Path Page)
@@ -331,7 +405,7 @@ instance FromJSON ActionRequest
 compile :: App -> Wai.Application
 compile (App paths) =
   let
-    actionsAndPages :: Map Path (Map Method (Either (Map ByteString (Lazy.ByteString -> IO ())) Builder))
+    actionsAndPages :: Map Path (Map Method (Either (Map ByteString RPC) Builder))
     actionsAndPages =
       Map.mapWithKey
         ( \path p ->
@@ -367,9 +441,8 @@ compile (App paths) =
                           case Map.lookup (ByteString.Char8.pack fn') pathActions of
                             Nothing ->
                               respond $ Wai.responseLBS badRequest400 [] "invalid action request"
-                            Just action -> do
-                              action (Json.encode arg)
-                              respond $ Wai.responseBuilder ok200 [] mempty
+                            Just (RPC action) -> do
+                              action (Json.encode arg) (respond . Wai.responseBuilder ok200 [] . Builder.lazyByteString)
                     Right contents ->
                       respond $ Wai.responseBuilder ok200 [] contents
  where
