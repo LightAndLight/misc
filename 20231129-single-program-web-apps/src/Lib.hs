@@ -27,7 +27,9 @@ module Lib (
   textInput,
   domEvent,
   sample,
+  current,
   stepper,
+  stepperM,
   perform,
   request,
   Html (..),
@@ -35,8 +37,8 @@ module Lib (
   module Network.HTTP.Types.Method,
 ) where
 
-import Control.Monad (void, (<=<))
-import Control.Monad.State (evalState)
+import Control.Monad.Fix (MonadFix (..))
+import Control.Monad.State (evalStateT)
 import Control.Monad.State.Class (MonadState, get, put)
 import Control.Monad.Trans
 import Control.Monad.Writer (WriterT, runWriterT)
@@ -81,6 +83,9 @@ data Interact :: Type -> Type where
   DomEvent :: DomEvent -> Element -> Interact (Event ())
   Perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
   Request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
+  Stepper :: a -> Event a -> Interact (Reactive a)
+  StepperM :: IO a -> Event a -> Interact (Reactive a)
+  MFix :: (a -> Interact a) -> Interact a
 
 instance Functor Interact where
   fmap f m = Pure f `Apply` m
@@ -91,6 +96,9 @@ instance Applicative Interact where
 
 instance Monad Interact where
   (>>=) = Bind
+
+instance MonadFix Interact where
+  mfix = MFix
 
 data Element = MkElement String Html
 
@@ -107,8 +115,14 @@ data Event :: Type -> Type where
   FromDomEvent :: String -> DomEvent -> Event a
   Sample :: Event a -> Behavior b -> Event (a, b)
   FromRequest :: Event a -> String -> Event b
+  FmapEvent :: (a -> b) -> Event a -> Event b
 
-data Behavior a = Behavior String
+instance Functor Event where
+  fmap = FmapEvent
+
+data Behavior a
+  = Behavior String
+  | Current (Reactive a)
 
 domEvent :: DomEvent -> Element -> Event ()
 domEvent de (MkElement elId _) = FromDomEvent elId de
@@ -116,10 +130,16 @@ domEvent de (MkElement elId _) = FromDomEvent elId de
 sample :: Event a -> Behavior b -> Event (a, b)
 sample = Sample
 
-data Reactive a = Stepper a (Event a)
+current :: Reactive a -> Behavior a
+current = Current
 
-stepper :: a -> Event a -> Reactive a
+data Reactive a = FromStepper a (Event a)
+
+stepper :: a -> Event a -> Interact (Reactive a)
 stepper = Stepper
+
+stepperM :: IO a -> Event a -> Interact (Reactive a)
+stepperM = StepperM
 
 class (FromJSON (SendTy a), ToJSON (SendTy a)) => Send a where
   type SendTy a :: Type
@@ -164,7 +184,7 @@ data Page
 
 newtype RPC = RPC (forall a. Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a)
 
-renderPage :: (MonadState Int m) => Path -> Page -> m (Map ByteString RPC, Builder)
+renderPage :: (MonadState Int m, MonadIO m, MonadFix m) => Path -> Page -> m (Map ByteString RPC, Builder)
 renderPage path (Page h) = renderHtml path "<!-- no script -->" h
 renderPage path (PageM h) = renderInteractHtml path h
 
@@ -178,7 +198,7 @@ setId :: String -> Html -> Html
 setId i (Node name attrs children) = Node name (("id", i) : attrs) children
 setId _ a = a
 
-renderInteractHtml :: (MonadState Int m) => Path -> Interact Html -> m (Map ByteString RPC, Builder)
+renderInteractHtml :: (MonadState Int m, MonadIO m, MonadFix m) => Path -> Interact Html -> m (Map ByteString RPC, Builder)
 renderInteractHtml path x = do
   (h, (fns, script)) <- runWriterT $ go x
   (fns', content) <- renderHtml path script h
@@ -186,7 +206,7 @@ renderInteractHtml path x = do
  where
   -- uncurry (renderHtml path) . Tuple.swap . second Tuple.snd <=<
 
-  go :: (MonadState Int m, MonadWriter (Map ByteString RPC, String) m) => Interact a -> m a
+  go :: (MonadState Int m, MonadWriter (Map ByteString RPC, String) m, MonadIO m, MonadFix m) => Interact a -> m a
   go (Pure h) = pure h
   go (Apply mf ma) = go mf <*> go ma
   go (Bind ma f) = go ma >>= go . f
@@ -242,6 +262,12 @@ renderInteractHtml path x = do
     fnId <- ("function_" <>) <$> freshId
     tell (Map.singleton (ByteString.Char8.pack fnId) (RPC run), mempty)
     pure $ FromRequest ea fnId
+  go (StepperM getInitial eUpdate) = do
+    initial <- liftIO getInitial
+    pure $ FromStepper initial eUpdate
+  go (Stepper initial eUpdate) = do
+    pure $ FromStepper initial eUpdate
+  go (MFix f) = mfix (go . f)
 
 performEventScript :: (MonadState Int m) => Path -> Event a -> (String -> [String]) -> m [String]
 performEventScript path e code =
@@ -376,7 +402,7 @@ renderHtml path postScript = fmap Tuple.swap . runWriterT . fmap Tuple.fst . run
   go mId (WithScript el script) = do
     el' <- go mId el
     pure $ el' <> "<script>\n" <> Builder.byteString (ByteString.Char8.pack script) <> "</script>\n"
-  go mId (ReactiveText (Stepper initial eString)) = do
+  go mId (ReactiveText (FromStepper initial eString)) = do
     textId <- maybe (("text_" <>) <$> freshId) pure mId
     script <- performEventScript path eString $ \target -> [textId <> ".textContent = " <> target <> ";"]
     let
@@ -402,49 +428,47 @@ data ActionRequest = ActionRequest {fn :: String, arg :: Json.Value}
 
 instance FromJSON ActionRequest
 
-compile :: App -> Wai.Application
-compile (App paths) =
-  let
-    actionsAndPages :: Map Path (Map Method (Either (Map ByteString RPC) Builder))
-    actionsAndPages =
-      Map.mapWithKey
-        ( \path p ->
-            let (actions, content) = flip evalState 0 $ renderPage ("" <> path) p
-             in if Map.null actions
-                  then Map.singleton methodGet (Right content)
-                  else Map.insert methodGet (Right content) $ Map.singleton methodPost (Left actions)
-        )
-        paths
-   in
-    \request respond -> do
-      let
-        requestPath :: Path
-        requestPath = Path . fmap Text.unpack $ Wai.pathInfo request
+compile :: App -> IO Wai.Application
+compile (App paths) = do
+  actionsAndPages <-
+    Map.traverseWithKey
+      ( \path p -> do
+          (actions, content) <- flip evalStateT 0 $ renderPage ("" <> path) p
+          pure
+            $ if Map.null actions
+              then Map.singleton methodGet (Right content)
+              else Map.insert methodGet (Right content) $ Map.singleton methodPost (Left actions)
+      )
+      paths
+  pure $ \request respond -> do
+    let
+      requestPath :: Path
+      requestPath = Path . fmap Text.unpack $ Wai.pathInfo request
 
-      case Map.lookup requestPath actionsAndPages of
-        Nothing ->
-          respond $ Wai.responseLBS notFound404 [] "not found"
-        Just methods ->
-          let method = Wai.requestMethod request
-           in case Map.lookup method methods of
-                Nothing ->
-                  respond . Wai.responseLBS badRequest400 [] $ "invalid method: " <> ByteString.Lazy.fromStrict method
-                Just actionOrPage ->
-                  case actionOrPage of
-                    Left pathActions -> do
-                      result <- decodeJsonBody @ActionRequest request
-                      case result of
-                        Left err -> do
-                          hPutStrLn System.IO.stderr $ show err
-                          respond $ Wai.responseBuilder badRequest400 [] "invalid action request"
-                        Right (ActionRequest fn' arg) -> do
-                          case Map.lookup (ByteString.Char8.pack fn') pathActions of
-                            Nothing ->
-                              respond $ Wai.responseLBS badRequest400 [] "invalid action request"
-                            Just (RPC action) -> do
-                              action (Json.encode arg) (respond . Wai.responseBuilder ok200 [] . Builder.lazyByteString)
-                    Right contents ->
-                      respond $ Wai.responseBuilder ok200 [] contents
+    case Map.lookup requestPath actionsAndPages of
+      Nothing ->
+        respond $ Wai.responseLBS notFound404 [] "not found"
+      Just methods ->
+        let method = Wai.requestMethod request
+         in case Map.lookup method methods of
+              Nothing ->
+                respond . Wai.responseLBS badRequest400 [] $ "invalid method: " <> ByteString.Lazy.fromStrict method
+              Just actionOrPage ->
+                case actionOrPage of
+                  Left pathActions -> do
+                    result <- decodeJsonBody @ActionRequest request
+                    case result of
+                      Left err -> do
+                        hPutStrLn System.IO.stderr $ show err
+                        respond $ Wai.responseBuilder badRequest400 [] "invalid action request"
+                      Right (ActionRequest fn' arg) -> do
+                        case Map.lookup (ByteString.Char8.pack fn') pathActions of
+                          Nothing ->
+                            respond $ Wai.responseLBS badRequest400 [] "invalid action request"
+                          Just (RPC action) -> do
+                            action (Json.encode arg) (respond . Wai.responseBuilder ok200 [] . Builder.lazyByteString)
+                  Right contents ->
+                    respond $ Wai.responseBuilder ok200 [] contents
  where
   decodeJsonBody :: (FromJSON a) => Wai.Request -> IO (Either String a)
   decodeJsonBody request = go mempty
@@ -459,4 +483,4 @@ serve :: App -> IO ()
 serve app = do
   let port = 8000
   putStrLn $ "app running on port " <> show port
-  Warp.run port (compile app)
+  Warp.run port =<< compile app
