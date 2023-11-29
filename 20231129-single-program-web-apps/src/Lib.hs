@@ -4,13 +4,11 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 
 module Lib (
   App,
@@ -27,7 +25,6 @@ module Lib (
   textInput,
   domEvent,
   sample,
-  current,
   stepper,
   stepperM,
   perform,
@@ -85,7 +82,6 @@ data Interact :: Type -> Type where
   Request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
   Stepper :: a -> Event a -> Interact (Reactive a)
   StepperM :: IO a -> Event a -> Interact (Reactive a)
-  MFix :: (a -> Interact a) -> Interact a
 
 instance Functor Interact where
   fmap f m = Pure f `Apply` m
@@ -96,9 +92,6 @@ instance Applicative Interact where
 
 instance Monad Interact where
   (>>=) = Bind
-
-instance MonadFix Interact where
-  mfix = MFix
 
 data Element = MkElement String Html
 
@@ -115,23 +108,15 @@ data Event :: Type -> Type where
   FromDomEvent :: String -> DomEvent -> Event a
   Sample :: Event a -> Behavior b -> Event (a, b)
   FromRequest :: Event a -> String -> Event b
-  FmapEvent :: (a -> b) -> Event a -> Event b
-
-instance Functor Event where
-  fmap = FmapEvent
 
 data Behavior a
   = Behavior String
-  | Current (Reactive a)
 
 domEvent :: DomEvent -> Element -> Event ()
 domEvent de (MkElement elId _) = FromDomEvent elId de
 
 sample :: Event a -> Behavior b -> Event (a, b)
 sample = Sample
-
-current :: Reactive a -> Behavior a
-current = Current
 
 data Reactive a = FromStepper a (Event a)
 
@@ -267,7 +252,6 @@ renderInteractHtml path x = do
     pure $ FromStepper initial eUpdate
   go (Stepper initial eUpdate) = do
     pure $ FromStepper initial eUpdate
-  go (MFix f) = mfix (go . f)
 
 performEventScript :: (MonadState Int m) => Path -> Event a -> (String -> [String]) -> m [String]
 performEventScript path e code =

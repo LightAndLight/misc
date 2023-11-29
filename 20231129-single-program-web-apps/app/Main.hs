@@ -65,30 +65,6 @@ app =
                     ]
                 ]
         )
-    , pageM
-        ("example" <> "count")
-        ( do
-            buttonEl <- element $ Node "button" [] [Text "Click me!"]
-            let eButtonClicked = domEvent Click buttonEl
-
-            eCurrentTime <- request eButtonClicked (\() -> show <$> getCurrentTime)
-            rCurrentTime <- stepperM (show <$> getCurrentTime) eCurrentTime
-
-            rec rNumClicks <- stepper (0 :: Int) $ fmap (\((), a) -> a + 1) (sample eButtonClicked (current rNumClicks))
-
-            pure
-              $ Html
-                [ Node "head" [] [Node "title" [] [Text "Example - click, send, receive, count"]]
-                , Node
-                    "body"
-                    []
-                    [ Node "p" [] [Text "When you click the button, an updated time will be fetched from the server."]
-                    , Text "Current time: "
-                    , ReactiveText rCurrentTime
-                    , html buttonEl
-                    ]
-                ]
-        )
     ]
 
 main :: IO ()

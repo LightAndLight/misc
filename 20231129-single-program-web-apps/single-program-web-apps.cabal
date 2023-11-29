@@ -19,7 +19,16 @@ library
     exposed-modules:  Lib
     -- other-modules:
     -- other-extensions:
-    build-depends:    aeson, base ^>=4.18.1.0, bytestring, containers, http-types, mtl, text, wai, warp
+    build-depends:    
+        aeson, 
+        base ^>=4.18.1.0,
+        bytestring,
+        containers,
+        http-types,
+        mtl,
+        text,
+        wai,
+        warp
     hs-source-dirs:   src
     default-language: Haskell2010
 
