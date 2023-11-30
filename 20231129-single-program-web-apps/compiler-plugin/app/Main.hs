@@ -5,6 +5,7 @@ module Main where
 
 import Compiler.Plugin.Interface (Quoted, quote)
 import qualified Compiler.Plugin.Interface as X
+import Data.Foldable (for_)
 
 -- import Other
 data Event a where
@@ -26,39 +27,36 @@ instance Applicative Event where
   {-# INLINE (<*>) #-}
   (<*>) a b = ApplyEvent a b
 
-three :: Int
-three = 1 + 2
+quoteId :: Quoted (a -> a)
+quoteId = quote (\x -> x)
 
-test1 :: Quoted (a -> a)
-test1 = quote (\x -> x)
+qualifiedQuoteInc :: Quoted (Int -> Int)
+qualifiedQuoteInc = X.quote (\x -> x + 1)
 
-test2 :: Quoted (a -> a)
-test2 = quote (\x -> x)
+fmapId :: Event Int
+fmapId = fmap (\x -> x) Dummy
 
-test2' :: Event Bool
-test2' = fmap (\x -> x) Dummy
+x = 1
 
-test2'' :: Event Bool
-test2'' = (\f x -> f x) <$> Dummy <*> Dummy
+fmapInc :: Event Int
+fmapInc = fmap (\x -> x + 1) Dummy
 
-test3 :: Event Bool
-test3 = fmap not Dummy
+applyAp :: Event Bool
+applyAp = (\f x -> f x) <$> Dummy <*> Dummy
 
-test4 :: Quoted (Int -> Int)
-test4 = X.quote (\x -> x + 1)
+fmapNot :: Event Bool
+fmapNot = fmap not Dummy
+
+examples :: [(String, String)]
+examples =
+  [ ("quoteId", show quoteId)
+  , ("qualifiedQuoteInc", show qualifiedQuoteInc)
+  , ("fmapId", show fmapId)
+  , ("fmapInc", show fmapInc)
+  , ("applyAp", show applyAp)
+  , ("fmapNot", show fmapNot)
+  ]
 
 main :: IO ()
-main = do
-  print three
-  putStrLn "test1"
-  print test1
-  putStrLn "test2"
-  print test2
-  putStrLn "test2'"
-  print test2'
-  putStrLn "test2''"
-  print test2''
-  putStrLn "test3"
-  print test3
-  putStrLn "test4"
-  print test4
+main =
+  for_ examples $ \(name, value) -> putStrLn $ name <> ": " <> value

@@ -23,6 +23,7 @@ library
         aeson, 
         base ^>=4.18.1.0,
         bytestring,
+        compiler-plugin,
         containers,
         http-types,
         mtl,
@@ -31,6 +32,7 @@ library
         warp
     hs-source-dirs:   src
     default-language: Haskell2010
+    ghc-options: -fplugin=Compiler.Plugin
 
 executable single-program-web-apps
     import:           warnings
@@ -39,11 +41,13 @@ executable single-program-web-apps
     -- other-extensions:
     build-depends:
         base ^>=4.18.1.0,
+        compiler-plugin,
         single-program-web-apps,
         time
 
     hs-source-dirs:   app
     default-language: Haskell2010
+    ghc-options: -fplugin=Compiler.Plugin
 
 test-suite single-program-web-apps-test
     import:           warnings

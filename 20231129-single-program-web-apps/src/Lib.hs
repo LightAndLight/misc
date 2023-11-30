@@ -1,4 +1,5 @@
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -34,6 +35,8 @@ module Lib (
   module Network.HTTP.Types.Method,
 ) where
 
+import Compiler.Plugin.Interface (Quoted (..), quote)
+import qualified Compiler.Plugin.Interface as Expr
 import Control.Monad.Fix (MonadFix (..))
 import Control.Monad.State (evalStateT)
 import Control.Monad.State.Class (MonadState, get, put)
@@ -51,6 +54,7 @@ import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.ByteString.Lazy as ByteString.Lazy
 import qualified Data.ByteString.Lazy as Lazy
 import Data.Foldable (fold)
+import Data.Functor.Const (Const (..))
 import Data.Kind (Type)
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -108,6 +112,11 @@ data Event :: Type -> Type where
   FromDomEvent :: String -> DomEvent -> Event a
   Sample :: Event a -> Behavior b -> Event (a, b)
   FromRequest :: Event a -> String -> Event b
+  FmapEvent :: Quoted (a -> b) -> Event a -> Event b
+
+instance Functor Event where
+  {-# INLINE fmap #-}
+  fmap f a = FmapEvent (quote f) a
 
 data Behavior a
   = Behavior String
@@ -133,6 +142,11 @@ class (FromJSON (SendTy a), ToJSON (SendTy a)) => Send a where
 
 instance Send () where
   type SendTy () = ()
+  fromSendTy = id
+  toSendTy = id
+
+instance Send Int where
+  type SendTy Int = Int
   fromSendTy = id
   toSendTy = id
 
@@ -292,6 +306,43 @@ performEventScript path e code =
                  , "    );"
                  ]
         )
+    FmapEvent (Quoted expr _) e' -> do
+      temp <- ("temp_" <>) <$> freshId
+      expr' <- exprToJavascript Expr.Nil expr
+      performEventScript
+        path
+        e'
+        ( \target ->
+            ["const " <> temp <> " = " <> expr' <> "(" <> target <> ");"]
+              <> code temp
+        )
+
+exprToJavascript :: (MonadState Int m) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m String
+exprToJavascript ctx expr =
+  case expr of
+    Expr.Var v -> do
+      let Const v' = Expr.getCtx v ctx
+      pure v'
+    Expr.Lam body -> do
+      arg <- ("arg_" <>) <$> freshId
+      body' <- exprToJavascript (Expr.Cons (Const arg) ctx) body
+      pure $ "((" <> arg <> ") => " <> body' <> ")"
+    Expr.App f x -> do
+      f' <- exprToJavascript ctx f
+      x' <- exprToJavascript ctx x
+      pure $ f' <> "(" <> x' <> ")"
+    Expr.Int i -> pure $ show i
+    Expr.Add a b -> do
+      a' <- exprToJavascript ctx a
+      b' <- exprToJavascript ctx b
+      pure $ "(" <> a' <> " + " <> b' <> ")"
+    Expr.Bool b ->
+      if b then pure "true" else pure "false"
+    Expr.IfThenElse cond t e -> do
+      cond' <- exprToJavascript ctx cond
+      t' <- exprToJavascript ctx t
+      e' <- exprToJavascript ctx e
+      pure $ "(" <> cond' <> " ? " <> t' <> " : " <> e' <> ")"
 
 data Html
   = Html [Html]

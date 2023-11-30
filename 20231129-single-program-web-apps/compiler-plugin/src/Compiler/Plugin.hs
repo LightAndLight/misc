@@ -17,6 +17,7 @@ import qualified GHC.Core as Core
 import GHC.Data.Maybe (MaybeT, fromMaybe, liftMaybeT, runMaybeT)
 import GHC.Plugins hiding (Expr)
 import GHC.Runtime.Loader (lookupRdrNameInModuleForPlugins)
+import GHC.Tc.Utils.TcType (isBoolTy, isIntTy)
 import GHC.Types.TyThing (lookupId)
 import Generics.SYB (everywhereM)
 import Prelude hiding (mod)
@@ -29,9 +30,12 @@ data Env = Env
   , exprLamCtor :: Id
   , exprAppCtor :: Id
   , exprVarCtor :: Id
+  , exprAddCtor :: Id
+  , exprIfThenElseCtor :: Id
+  , exprBoolCtor :: Id
   , indexZCtor :: Id
   , indexSCtor :: Id
-  , boxIntCtor :: Id
+  , primIntAdd :: Id
   }
 
 plugin :: Plugin
@@ -47,9 +51,12 @@ plugin =
         exprLamCtor <- findCtor "Compiler.Plugin.Interface" "Lam"
         exprAppCtor <- findCtor "Compiler.Plugin.Interface" "App"
         exprVarCtor <- findCtor "Compiler.Plugin.Interface" "Var"
+        exprAddCtor <- findCtor "Compiler.Plugin.Interface" "Add"
+        exprIfThenElseCtor <- findCtor "Compiler.Plugin.Interface" "IfThenElse"
+        exprBoolCtor <- findCtor "Compiler.Plugin.Interface" "Bool"
         indexZCtor <- findCtor "Compiler.Plugin.Interface" "Z"
         indexSCtor <- findCtor "Compiler.Plugin.Interface" "S"
-        boxIntCtor <- findCtor "GHC.Int" "I#"
+        primIntAdd <- findVar "GHC.Exts" "+#"
         let env =
               Env
                 { quoteVar
@@ -59,9 +66,12 @@ plugin =
                 , exprLamCtor
                 , exprAppCtor
                 , exprVarCtor
+                , exprAddCtor
+                , exprIfThenElseCtor
+                , exprBoolCtor
                 , indexZCtor
                 , indexSCtor
-                , boxIntCtor
+                , primIntAdd
                 }
         -- putMsg $ ppr todos
         pure $ todos ++ [CoreDoPluginPass "compiler-plugin-pass" (pass env)]
@@ -74,7 +84,7 @@ findCtor mod str = do
   mInfo <- liftIO (lookupRdrNameInModuleForPlugins hsc_env (mkModuleName mod) (Unqual (mkDataOcc str)))
   maybe (panic err) (lookupId . fst) mInfo
  where
-  err = "findId: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
+  err = "findCtor: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
 
 findVar :: String -> String -> CoreM Id
 findVar mod str = do
@@ -82,7 +92,7 @@ findVar mod str = do
   mInfo <- liftIO (lookupRdrNameInModuleForPlugins hsc_env (mkModuleName mod) (Unqual (mkVarOcc str)))
   maybe (panic err) (lookupId . fst) mInfo
  where
-  err = "findId: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
+  err = "findVar: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
 
 logBinds :: Bool -> (CoreBind -> CoreM CoreBind) -> CoreBind -> CoreM CoreBind
 logBinds cond f b = do
@@ -171,17 +181,30 @@ pass env = bindsOnlyPass $ \binds ->
           )
 
   quoteCoreExpr :: [CoreBind] -> [(CoreBndr, Type)] -> CoreExpr -> MaybeT CoreM CoreExpr
-  quoteCoreExpr localBinds context (Core.Var var) =
-    case lookupLocalBind localBinds var of
-      Nothing -> do
-        (ty, index) <- mkIndex context var
+  quoteCoreExpr _localBinds context expr@(Core.Var var)
+    | var == dataConWorkId trueDataCon || var == dataConWorkId falseDataCon =
         pure
           $ mkCoreApps
-            (Core.Var $ exprVarCtor env)
+            (Core.Var $ exprBoolCtor env)
             [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
-            , Core.Type ty
-            , index
+            , expr
             ]
+  quoteCoreExpr localBinds context (Core.Var var) =
+    case lookupLocalBind localBinds var of
+      Nothing ->
+        case expandUnfolding_maybe . unfoldingInfo $ idInfo var of
+          Nothing -> do
+            (ty, index) <- mkIndex context var
+            pure
+              $ mkCoreApps
+                (Core.Var $ exprVarCtor env)
+                [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+                , Core.Type ty
+                , index
+                ]
+          Just expr -> do
+            liftMaybeT . putMsg $ hcat [text "inlining ", ppr var, text " to ", ppr expr]
+            quoteCoreExpr localBinds context expr
       Just expr -> do
         liftMaybeT . putMsg $ hcat [text "inlining ", ppr var, text " to ", ppr expr]
         quoteCoreExpr localBinds context expr
@@ -208,6 +231,53 @@ pass env = bindsOnlyPass $ \binds ->
       else do
         body' <- quoteCoreExpr localBinds context body
         pure $ Core.Lam var body'
+  quoteCoreExpr _localBinds context expr@(Core.Lit (LitNumber LitNumInt _)) =
+    pure
+      $ mkCoreApps
+        (Core.Var $ exprIntCtor env)
+        [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+        , mkCoreConApps intDataCon [expr]
+        ]
+  quoteCoreExpr localBinds context expr@(Core.App (Core.Var var) x)
+    | var == dataConWorkId intDataCon =
+        case x of
+          Core.Lit (LitNumber LitNumInt _) ->
+            pure
+              $ mkCoreApps
+                (Core.Var $ exprIntCtor env)
+                [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+                , expr
+                ]
+          Core.App{}
+            | (Core.Var f, [a, b]) <- collectArgs x ->
+                do
+                  if f == primIntAdd env
+                    then do
+                      a' <- quoteCoreExpr localBinds context a
+                      b' <- quoteCoreExpr localBinds context b
+                      pure
+                        $ mkCoreApps
+                          (Core.Var $ exprAddCtor env)
+                          [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+                          , a'
+                          , b'
+                          ]
+                    else do
+                      liftMaybeT . putMsg $ hcat [text "unrecognised binop: ", hsep [ppr f, ppr a, ppr b]]
+                      pure
+                        $ mkCoreApps
+                          (Core.Var $ exprIntCtor env)
+                          [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+                          , mkCoreConApps intDataCon [Core.Lit $ LitNumber LitNumInt 999]
+                          ]
+          _ -> do
+            liftMaybeT . putMsg $ hcat [text "unrecognised Int expr: ", ppr x]
+            pure
+              $ mkCoreApps
+                (Core.Var $ exprIntCtor env)
+                [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+                , mkCoreConApps intDataCon [Core.Lit $ LitNumber LitNumInt 999]
+                ]
   quoteCoreExpr localBinds context expr@(Core.App f x) =
     if isValArg x
       then do
@@ -226,11 +296,32 @@ pass env = bindsOnlyPass $ \binds ->
       else do
         f' <- quoteCoreExpr localBinds context f
         pure $ Core.App f' x
-  quoteCoreExpr _localBinds context _expr =
-    -- TODO: the real work
+  quoteCoreExpr localBinds context (Core.Case val var ty branches)
+    | isIntTy $ varType var
+    , [Core.Alt (DataAlt ctor) [arg] body] <- branches
+    , ctor == intDataCon = do
+        quoteCoreExpr localBinds ((arg, intTy) : context) body
+    | isBoolTy $ varType var
+    , [Core.Alt (DataAlt ctor1) [] body1, Core.Alt DataAlt{} [] body2] <- branches = do
+        val' <- quoteCoreExpr localBinds context val
+        (trueCase, falseCase) <-
+          if ctor1 == trueDataCon
+            then (,) <$> quoteCoreExpr localBinds context body1 <*> quoteCoreExpr localBinds context body2
+            else (,) <$> quoteCoreExpr localBinds context body2 <*> quoteCoreExpr localBinds context body1
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprIfThenElseCtor env)
+            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+            , Core.Type ty
+            , val'
+            , trueCase
+            , falseCase
+            ]
+  quoteCoreExpr _localBinds context expr = do
+    liftMaybeT . putMsg $ hcat [text "warning: unrecognised expr: ", ppr expr]
     pure
       $ mkCoreApps
         (Core.Var $ exprIntCtor env)
         [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
-        , Core.App (Core.Var $ boxIntCtor env) (Core.Lit $ LitNumber LitNumInt 999)
+        , mkCoreConApps intDataCon [Core.Lit $ LitNumber LitNumInt 999]
         ]

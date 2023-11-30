@@ -5,7 +5,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Compiler.Plugin.Interface (Quoted (..), Expr (..), Index (..), quote) where
+module Compiler.Plugin.Interface (Quoted (..), Expr (..), Index (..), Ctx (..), getCtx, quote) where
 
 import Data.Kind (Type)
 import GHC.Exts (noinline)
@@ -16,6 +16,9 @@ data Expr :: [Type] -> Type -> Type where
   Lam :: forall ctx a b. Expr (a ': ctx) b -> Expr ctx (a -> b)
   App :: forall ctx a b. Expr ctx (a -> b) -> Expr ctx a -> Expr ctx b
   Int :: forall ctx. Int -> Expr ctx Int
+  Add :: forall ctx. Expr ctx Int -> Expr ctx Int -> Expr ctx Int
+  IfThenElse :: forall ctx a. Expr ctx Bool -> Expr ctx a -> Expr ctx a -> Expr ctx a
+  Bool :: forall ctx. Bool -> Expr ctx Bool
 
 deriving instance Show (Expr ctx a)
 
@@ -24,6 +27,14 @@ data Index :: [Type] -> Type -> Type where
   S :: forall ctx a b. Index ctx a -> Index (b ': ctx) a
 
 deriving instance Show (Index ctx a)
+
+data Ctx :: (Type -> Type) -> [Type] -> Type where
+  Nil :: Ctx f '[]
+  Cons :: f a -> Ctx f as -> Ctx f (a ': as)
+
+getCtx :: Index ctx a -> Ctx f ctx -> f a
+getCtx Z (Cons a _) = a
+getCtx (S ix) (Cons _ as) = getCtx ix as
 
 data Quoted a = Quoted (Expr '[] a) a
 
