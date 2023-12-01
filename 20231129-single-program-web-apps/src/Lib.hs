@@ -167,7 +167,6 @@ instance GCompare Addr where
       GT -> GGT
 
 data Reactive a where
-  FromStepper :: (Send a) => a -> Event a -> Reactive a
   FmapReactive :: Quoted (a -> b) -> Reactive a -> Reactive b
   AddrReactive :: Addr a -> Reactive a
 
@@ -412,23 +411,17 @@ renderInteractHtml path x = do
     pure $ AddrReactive addr
   go (MFix f) = mfix (go . f)
 
-behaviorVar :: (MonadState RenderState m, MonadIO m) => Path -> Behavior a -> m String
-behaviorVar _ (Behavior var) = pure var
-behaviorVar path (Current ra) = go (Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
+initBehavior :: (MonadState RenderState m, MonadIO m) => Path -> Behavior a -> m String
+initBehavior _ (Behavior var) = pure var
+initBehavior path (Current ra) = go (Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
  where
   go :: (MonadState RenderState m, MonadIO m, Send x) => Quoted (a -> x) -> Reactive a -> m String
   go g (FmapReactive f ra') =
     go (g `Expr.compose` f) ra'
-  go g (FromStepper a ea) = do
-    b <- ("behavior_" <>) <$> freshId
-    modify $ \s -> s{behaviors = Map.insert b (Json.encode $ toSendTy $ Expr.quotedValue g a) (behaviors s)}
-    subscribe <- performEventScript path $ FmapEvent g ea
-    subscribe $ Subscribers mempty [(\input -> Js [b <> " = " <> input <> ";"], mempty, mempty)]
-    pure b
   go g (AddrReactive addr) = do
     mVar <- gets $ DMap.lookup addr . currents
     case mVar of
-      -- without this caching, behaviorVar/performEventScript loop forever (mutually recursive)
+      -- without this caching, initBehavior/initEvent loop forever (mutually recursive)
       Just (Const var) ->
         pure var
       Nothing -> do
@@ -443,24 +436,24 @@ behaviorVar path (Current ra) = go (Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
                 { behaviors = Map.insert b (Json.encode $ toSendTy $ Expr.quotedValue g a) (behaviors s)
                 , currents = DMap.insert addr (Const b) (currents s)
                 }
-            subscribe <- performEventScript path $ FmapEvent g ea
+            subscribe <- initEvent path $ FmapEvent g ea
             subscribe $ Subscribers mempty [(\input -> Js [b <> " = " <> input <> ";"], mempty, mempty)]
             pure b
 
-performEventScript :: (MonadState RenderState m, MonadIO m) => Path -> Event a -> m (Subscribers -> m ())
-performEventScript path e =
+initEvent :: (MonadState RenderState m, MonadIO m) => Path -> Event a -> m (Subscribers -> m ())
+initEvent path e =
   case e of
     FromDomEvent elId de -> do
       pure $ \subs -> modify $ \s -> s{eventListeners = Map.insertWith (\new old -> old <> new) (elId, de) subs (eventListeners s)}
     FromRequest e' fnId -> do
       result <- ("result_" <>) <$> freshId
       temp <- ("temp_" <>) <$> freshId
-      subscribe <- performEventScript path e'
+      subscribe <- initEvent path e'
       pure $ \subs -> subscribe $ Subscribers (Map.singleton fnId (path, result, temp, subs)) mempty
     Sample e' b -> do
-      var <- behaviorVar path b
+      var <- initBehavior path b
       temp <- ("temp_" <>) <$> freshId
-      subscribe <- performEventScript path e'
+      subscribe <- initEvent path e'
       pure $ \subs ->
         subscribe
           $ Subscribers
@@ -475,7 +468,7 @@ performEventScript path e =
     FmapEvent (Quoted expr _) e' -> do
       temp <- ("temp_" <>) <$> freshId
       expr' <- exprToJavascript Expr.Nil expr
-      subscribe <- performEventScript path e'
+      subscribe <- initEvent path e'
       pure $ \subs ->
         subscribe
           $ Subscribers
@@ -727,13 +720,6 @@ renderHtml reactives path postScript h = do
     goReactive :: (MonadState RenderState m, MonadIO m) => Quoted (a -> String) -> Reactive a -> m Builder
     goReactive f (FmapReactive g r) =
       goReactive (f `Expr.compose` g) r
-    goReactive f (FromStepper initial eString) = do
-      textId <- maybe (("text_" <>) <$> freshId) pure mId
-      subscribe <- performEventScript path $ FmapEvent f eString
-      subscribe $ Subscribers mempty [(\target -> Js [textId <> ".textContent = " <> target <> ";"], mempty, mempty)]
-      pure
-        $ ("<span id=\"" <> fromString textId <> "\">" <> fromString (Expr.quotedValue f initial) <> "</span>\n")
-        <> ("<script>const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");</script>\n")
     goReactive f (AddrReactive addr) = do
       result <- gets $ DMap.lookup addr . getReactives
       case result of
@@ -742,7 +728,7 @@ renderHtml reactives path postScript h = do
         Just (StoredReactive getInitial eString) -> do
           textId <- maybe (("text_" <>) <$> freshId) pure mId
           initial <- liftIO getInitial
-          subscribe <- performEventScript path $ FmapEvent f eString
+          subscribe <- initEvent path $ FmapEvent f eString
           subscribe $ Subscribers mempty [(\target -> Js [textId <> ".textContent = " <> target <> ";"], mempty, mempty)]
           pure
             $ ("<span id=\"" <> fromString textId <> "\">" <> fromString (Expr.quotedValue f initial) <> "</span>\n")
