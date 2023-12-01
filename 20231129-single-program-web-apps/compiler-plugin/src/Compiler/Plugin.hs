@@ -16,7 +16,6 @@ import Data.Typeable (cast)
 import GHC.Builtin.Types.Prim (intPrimTy)
 import qualified GHC.Core as Core
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.TyCo.Rep (mkTyCoVarTy)
 import GHC.Data.Maybe (MaybeT, fromMaybe, liftMaybeT, runMaybeT)
 import GHC.Driver.Config.Diagnostic (initDiagOpts)
 import GHC.Driver.Errors.Types (GhcMessage (..))
@@ -24,7 +23,7 @@ import GHC.Plugins hiding (Expr)
 import GHC.Runtime.Loader (lookupRdrNameInModuleForPlugins)
 import GHC.Tc.Utils.TcType (isBoolTy, isIntTy)
 import GHC.Types.Error (DiagnosticMessage (..), UnknownDiagnostic (UnknownDiagnostic), mkSimpleDecorated)
-import GHC.Types.TyThing (lookupId)
+import GHC.Types.TyThing (MonadThings (lookupTyCon), lookupId)
 import GHC.Utils.Error (mkMsgEnvelope, pprLocMsgEnvelopeDefault)
 import Generics.SYB (everywhereM)
 import Prelude hiding (mod)
@@ -45,10 +44,12 @@ data Env = Env
   , exprCaseCtor :: Id
   , exprCharCtor :: Id
   , exprToStringCtor :: Id
-  , branchTyCon :: Id
+  , branchTyCon :: TyCon
   , branchBranchCtor :: Id
   , patternPDefaultCtor :: Id
   , patternPIntCtor :: Id
+  , patternPPairCtor :: Id
+  , patternPUnitCtor :: Id
   , indexZCtor :: Id
   , indexSCtor :: Id
   , primIntAdd :: Id
@@ -80,6 +81,8 @@ plugin =
         branchTyCon <- findTyCon "Compiler.Plugin.Interface" "Branch"
         patternPDefaultCtor <- findCtor "Compiler.Plugin.Interface" "PDefault"
         patternPIntCtor <- findCtor "Compiler.Plugin.Interface" "PInt"
+        patternPPairCtor <- findCtor "Compiler.Plugin.Interface" "PPair"
+        patternPUnitCtor <- findCtor "Compiler.Plugin.Interface" "PUnit"
         indexZCtor <- findCtor "Compiler.Plugin.Interface" "Z"
         indexSCtor <- findCtor "Compiler.Plugin.Interface" "S"
         primIntAdd <- findVar "GHC.Exts" "+#"
@@ -105,6 +108,8 @@ plugin =
                 , branchBranchCtor
                 , patternPDefaultCtor
                 , patternPIntCtor
+                , patternPPairCtor
+                , patternPUnitCtor
                 , indexZCtor
                 , indexSCtor
                 , primIntAdd
@@ -135,13 +140,13 @@ findVar mod str = do
  where
   err = "findVar: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
 
-findTyCon :: String -> String -> CoreM Id
+findTyCon :: String -> String -> CoreM TyCon
 findTyCon mod str = do
   hsc_env <- getHscEnv
   mInfo <- liftIO (lookupRdrNameInModuleForPlugins hsc_env (mkModuleName mod) (Unqual (mkTcOcc str)))
-  maybe (panic err) (lookupId . fst) mInfo
+  maybe (panic err) (lookupTyCon . fst) mInfo
  where
-  err = "findVar: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
+  err = "findTyCon: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
 
 logBinds :: Bool -> (CoreBind -> CoreM CoreBind) -> CoreBind -> CoreM CoreBind
 logBinds cond f b = do
@@ -362,6 +367,7 @@ pass env = bindsOnlyPass $ \binds ->
       else do
         f' <- quoteCoreExpr localBinds context f
         pure $ Core.App f' x
+  -- Pattern matching
   quoteCoreExpr localBinds context expr@(Core.Case val var ty branches)
     -- Int unboxing
     | isIntTy $ varType var
@@ -416,6 +422,74 @@ pass env = bindsOnlyPass $ \binds ->
             , trueCase
             , falseCase
             ]
+    -- Unpairing
+    | [Alt (DataAlt dcon) [a, b] body] <- branches
+    , dcon == tupleDataCon Boxed 2 = do
+        let ctxTy = mkPromotedListTy liftedTypeKind $ fmap snd context
+        let context' = (b, varType b) : (a, varType a) : context
+        let ctxTy' = mkPromotedListTy liftedTypeKind $ fmap snd context'
+        let aTy = exprType val
+        let bTy = ty
+        val' <- quoteCoreExpr localBinds context val
+        body' <- quoteCoreExpr localBinds context' body
+        let pat =
+              mkCoreApps
+                (Core.Var $ patternPPairCtor env)
+                [ Core.Type ctxTy
+                , Core.Type $ varType a
+                , Core.Type $ varType b
+                ]
+        let branch =
+              mkCoreApps
+                (Core.Var $ branchBranchCtor env)
+                [ Core.Type ctxTy
+                , Core.Type ctxTy'
+                , Core.Type aTy
+                , Core.Type bTy
+                , pat
+                , body'
+                ]
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprCaseCtor env)
+            [ Core.Type ctxTy
+            , Core.Type aTy
+            , Core.Type bTy
+            , val'
+            , mkSingletonList (mkAppTys (mkTyConTy $ branchTyCon env) [ctxTy, aTy, bTy]) branch
+            ]
+    -- Unit elimination
+    | [Alt (DataAlt dcon) [] body] <- branches
+    , dcon == unitDataCon = do
+        let ctxTy = mkPromotedListTy liftedTypeKind $ fmap snd context
+        let aTy = exprType val
+        let bTy = ty
+        val' <- quoteCoreExpr localBinds context val
+        body' <- quoteCoreExpr localBinds context body
+        let pat =
+              mkCoreApps
+                (Core.Var $ patternPUnitCtor env)
+                [ Core.Type ctxTy
+                ]
+        let branch =
+              mkCoreApps
+                (Core.Var $ branchBranchCtor env)
+                [ Core.Type ctxTy
+                , Core.Type ctxTy
+                , Core.Type aTy
+                , Core.Type bTy
+                , pat
+                , body'
+                ]
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprCaseCtor env)
+            [ Core.Type ctxTy
+            , Core.Type aTy
+            , Core.Type bTy
+            , val'
+            , mkSingletonList (mkAppTys (mkTyConTy $ branchTyCon env) [ctxTy, aTy, bTy]) branch
+            ]
     -- Pattern matching on literals
     | varType var `eqType` intPrimTy = do
         val' <- quoteCoreExpr localBinds context val
@@ -442,7 +516,7 @@ pass env = bindsOnlyPass $ \binds ->
       [CoreAlt] ->
       MaybeT CoreM CoreExpr
     quoteCoreBranches ctxTy aTy bTy _localBinds _context [] =
-      pure $ mkCoreConApps nilDataCon [Core.Type $ mkAppTys (mkTyCoVarTy $ branchTyCon env) [ctxTy, aTy, bTy]]
+      pure $ mkCoreConApps nilDataCon [Core.Type $ mkAppTys (mkTyConTy $ branchTyCon env) [ctxTy, aTy, bTy]]
     quoteCoreBranches ctxTy aTy bTy localBinds context (alt@(Alt pattern args body) : alts) = do
       alt' <- case pattern of
         DEFAULT
@@ -476,7 +550,7 @@ pass env = bindsOnlyPass $ \binds ->
           liftMaybeT . warnMsg $ text "unrecognised pattern branch: " <+> ppr alt
           Control.Applicative.empty
       alts' <- quoteCoreBranches ctxTy aTy bTy localBinds context alts
-      pure $ mkCoreConApps consDataCon [Core.Type $ mkAppTys (mkTyCoVarTy $ branchTyCon env) [ctxTy, aTy, bTy], alt', alts']
+      pure $ mkCoreConApps consDataCon [Core.Type $ mkAppTys (mkTyConTy $ branchTyCon env) [ctxTy, aTy, bTy], alt', alts']
   quoteCoreExpr _localBinds context expr = do
     liftMaybeT $ do
       namePprCtx <- getNamePprCtx
@@ -512,3 +586,6 @@ warnMsg sdoc = do
         , diagReason = WarningWithoutFlag
         , diagHints = []
         }
+
+mkSingletonList :: Type -> CoreExpr -> CoreExpr
+mkSingletonList ty el = mkCoreConApps consDataCon [Core.Type ty, el, mkCoreConApps nilDataCon [Core.Type ty]]

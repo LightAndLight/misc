@@ -51,6 +51,8 @@ deriving instance Show (Branch ctx a b)
 data Pattern :: [Type] -> Type -> [Type] -> Type where
   PDefault :: forall ctx a. Pattern ctx a ctx
   PInt :: forall ctx. Int -> Pattern ctx Int ctx
+  PPair :: forall ctx a b. Pattern ctx (a, b) (b ': a ': ctx)
+  PUnit :: forall ctx. Pattern ctx () ctx
 
 deriving instance Show (Pattern ctx a ctx')
 
