@@ -30,12 +30,13 @@ module Lib (
   stepperM,
   perform,
   request,
+  toString,
   Html (..),
   DomEvent (..),
   module Network.HTTP.Types.Method,
 ) where
 
-import Compiler.Plugin.Interface (Quoted (..), quote)
+import Compiler.Plugin.Interface (Quoted (..), quote, toString)
 import qualified Compiler.Plugin.Interface as Expr
 import Control.Monad.Fix (MonadFix (..))
 import Control.Monad.State (evalStateT)
@@ -58,6 +59,7 @@ import Data.Functor.Const (Const (..))
 import Data.Kind (Type)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Monoid (Any (..))
 import Data.String (IsString (..))
 import qualified Data.Text as Text
 import qualified Data.Tuple as Tuple
@@ -343,6 +345,50 @@ exprToJavascript ctx expr =
       t' <- exprToJavascript ctx t
       e' <- exprToJavascript ctx e
       pure $ "(" <> cond' <> " ? " <> t' <> " : " <> e' <> ")"
+    Expr.Lt a b -> do
+      a' <- exprToJavascript ctx a
+      b' <- exprToJavascript ctx b
+      pure $ "(" <> a' <> " < " <> b' <> ")"
+    Expr.Case a branches -> do
+      value <- ("value_" <>) <$> freshId
+      a' <- exprToJavascript ctx a
+      result <- ("result_" <>) <$> freshId
+      (branches', Any tagged) <- runWriterT $ traverse (branchToJavascript value result ctx) branches
+      pure
+        . unlines
+        $ [ "((" <> value <> (if tagged then ".tag" else "") <> ") => {"
+          , "switch (" <> value <> ") {"
+          ]
+        <> branches'
+        <> [ "};"
+           , "return " <> result <> ";"
+           ]
+        <> ["})(" <> a' <> ")"]
+     where
+      branchToJavascript :: (MonadState Int m) => String -> String -> Expr.Ctx (Const String) ctx -> Expr.Branch ctx a b -> WriterT Any m (String)
+      branchToJavascript value result ctx (Expr.Branch pattern body) =
+        case pattern of
+          Expr.PDefault -> do
+            body' <- lift $ exprToJavascript ctx body
+            pure
+              $ unlines
+                [ "default:"
+                , "  result = " <> body' <> ";"
+                , "  break;"
+                ]
+          Expr.PInt i -> do
+            body' <- lift $ exprToJavascript ctx body
+            pure
+              $ unlines
+                [ "case " <> show i <> ":"
+                , "  result = " <> body' <> ";"
+                , "  break;"
+                ]
+    Expr.Char c -> do
+      pure $ show c
+    Expr.ToString -> do
+      arg <- ("arg_" <>) <$> freshId
+      pure $ "((" <> arg <> ") => JSON.stringify(" <> arg <> "))"
 
 data Html
   = Html [Html]

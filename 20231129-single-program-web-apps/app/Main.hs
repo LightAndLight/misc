@@ -72,8 +72,7 @@ app =
                 let eButtonClicked = domEvent Click buttonEl
 
                 eZero <- request eButtonClicked (\() -> pure (0 :: Int))
-                -- TODO: overload `show` to toString or JSON.stringify or something
-                let eZeroPlusOne = fmap (show . (+ 1)) eZero
+                let eZeroPlusOne = fmap (toString . (+ 1)) eZero
                 rCurrentTime <- stepper "" eZeroPlusOne
 
                 pure

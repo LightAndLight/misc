@@ -13,18 +13,26 @@ import Data.Data (Data)
 import Data.Maybe (fromJust)
 import Data.Traversable (for)
 import Data.Typeable (cast)
+import GHC.Builtin.Types.Prim (intPrimTy)
 import qualified GHC.Core as Core
+import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.TyCo.Rep (mkTyCoVarTy)
 import GHC.Data.Maybe (MaybeT, fromMaybe, liftMaybeT, runMaybeT)
+import GHC.Driver.Config.Diagnostic (initDiagOpts)
+import GHC.Driver.Errors.Types (GhcMessage (..))
 import GHC.Plugins hiding (Expr)
 import GHC.Runtime.Loader (lookupRdrNameInModuleForPlugins)
 import GHC.Tc.Utils.TcType (isBoolTy, isIntTy)
+import GHC.Types.Error (DiagnosticMessage (..), UnknownDiagnostic (UnknownDiagnostic), mkSimpleDecorated)
 import GHC.Types.TyThing (lookupId)
+import GHC.Utils.Error (mkMsgEnvelope, pprLocMsgEnvelopeDefault)
 import Generics.SYB (everywhereM)
 import Prelude hiding (mod)
 
 data Env = Env
   { quoteVar :: Id
   , quotedCtor :: Id
+  , toStringVar :: Id
   , undefinedVar :: Id
   , exprIntCtor :: Id
   , exprLamCtor :: Id
@@ -33,9 +41,18 @@ data Env = Env
   , exprAddCtor :: Id
   , exprIfThenElseCtor :: Id
   , exprBoolCtor :: Id
+  , exprLtCtor :: Id
+  , exprCaseCtor :: Id
+  , exprCharCtor :: Id
+  , exprToStringCtor :: Id
+  , branchTyCon :: Id
+  , branchBranchCtor :: Id
+  , patternPDefaultCtor :: Id
+  , patternPIntCtor :: Id
   , indexZCtor :: Id
   , indexSCtor :: Id
   , primIntAdd :: Id
+  , primIntLt :: Id
   }
 
 plugin :: Plugin
@@ -47,6 +64,7 @@ plugin =
         undefinedVar <- findVar "Prelude" "undefined"
         quoteVar <- findVar "Compiler.Plugin.Interface" "quote"
         quotedCtor <- findCtor "Compiler.Plugin.Interface" "Quoted"
+        toStringVar <- findVar "Compiler.Plugin.Interface" "toString"
         exprIntCtor <- findCtor "Compiler.Plugin.Interface" "Int"
         exprLamCtor <- findCtor "Compiler.Plugin.Interface" "Lam"
         exprAppCtor <- findCtor "Compiler.Plugin.Interface" "App"
@@ -54,13 +72,23 @@ plugin =
         exprAddCtor <- findCtor "Compiler.Plugin.Interface" "Add"
         exprIfThenElseCtor <- findCtor "Compiler.Plugin.Interface" "IfThenElse"
         exprBoolCtor <- findCtor "Compiler.Plugin.Interface" "Bool"
+        exprLtCtor <- findCtor "Compiler.Plugin.Interface" "Lt"
+        exprCaseCtor <- findCtor "Compiler.Plugin.Interface" "Case"
+        exprCharCtor <- findCtor "Compiler.Plugin.Interface" "Char"
+        exprToStringCtor <- findCtor "Compiler.Plugin.Interface" "ToString"
+        branchBranchCtor <- findCtor "Compiler.Plugin.Interface" "Branch"
+        branchTyCon <- findTyCon "Compiler.Plugin.Interface" "Branch"
+        patternPDefaultCtor <- findCtor "Compiler.Plugin.Interface" "PDefault"
+        patternPIntCtor <- findCtor "Compiler.Plugin.Interface" "PInt"
         indexZCtor <- findCtor "Compiler.Plugin.Interface" "Z"
         indexSCtor <- findCtor "Compiler.Plugin.Interface" "S"
         primIntAdd <- findVar "GHC.Exts" "+#"
+        primIntLt <- findVar "GHC.Exts" "<#"
         let env =
               Env
                 { quoteVar
                 , quotedCtor
+                , toStringVar
                 , undefinedVar
                 , exprIntCtor
                 , exprLamCtor
@@ -69,12 +97,25 @@ plugin =
                 , exprAddCtor
                 , exprIfThenElseCtor
                 , exprBoolCtor
+                , exprLtCtor
+                , exprCaseCtor
+                , exprCharCtor
+                , exprToStringCtor
+                , branchTyCon
+                , branchBranchCtor
+                , patternPDefaultCtor
+                , patternPIntCtor
                 , indexZCtor
                 , indexSCtor
                 , primIntAdd
+                , primIntLt
                 }
-        -- putMsg $ ppr todos
-        pure $ todos ++ [CoreDoPluginPass "compiler-plugin-pass" (pass env)]
+        let todos' = todos ++ [CoreDoPluginPass "compiler-plugin-pass" (pass env)]
+        -- let todos' = CoreDoPluginPass "compiler-plugin-pass" (pass env) : todos
+        -- let todos' = take 1 todos ++ [CoreDoPluginPass "compiler-plugin-pass" (pass env)] ++ drop 1 todos
+        -- let todos' = take (length todos - 1) todos ++ [CoreDoPluginPass "compiler-plugin-pass" (pass env)] ++ drop (length todos - 1) todos
+        putMsg $ ppr todos'
+        pure todos'
     }
 
 -- Reference: https://github.com/compiling-to-categories/concat/blob/5d670b96cd770c6b96f55429bd3a830322ffaf16/inline/src/ConCat/Inline/Plugin.hs#L56
@@ -90,6 +131,14 @@ findVar :: String -> String -> CoreM Id
 findVar mod str = do
   hsc_env <- getHscEnv
   mInfo <- liftIO (lookupRdrNameInModuleForPlugins hsc_env (mkModuleName mod) (Unqual (mkVarOcc str)))
+  maybe (panic err) (lookupId . fst) mInfo
+ where
+  err = "findVar: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
+
+findTyCon :: String -> String -> CoreM Id
+findTyCon mod str = do
+  hsc_env <- getHscEnv
+  mInfo <- liftIO (lookupRdrNameInModuleForPlugins hsc_env (mkModuleName mod) (Unqual (mkTcOcc str)))
   maybe (panic err) (lookupId . fst) mInfo
  where
   err = "findVar: couldn't find " ++ str ++ " in " ++ moduleNameString (mkModuleName mod)
@@ -181,6 +230,7 @@ pass env = bindsOnlyPass $ \binds ->
           )
 
   quoteCoreExpr :: [CoreBind] -> [(CoreBndr, Type)] -> CoreExpr -> MaybeT CoreM CoreExpr
+  -- boolean literals
   quoteCoreExpr _localBinds context expr@(Core.Var var)
     | var == dataConWorkId trueDataCon || var == dataConWorkId falseDataCon =
         pure
@@ -189,48 +239,7 @@ pass env = bindsOnlyPass $ \binds ->
             [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
             , expr
             ]
-  quoteCoreExpr localBinds context (Core.Var var) =
-    case lookupLocalBind localBinds var of
-      Nothing ->
-        case expandUnfolding_maybe . unfoldingInfo $ idInfo var of
-          Nothing -> do
-            (ty, index) <- mkIndex context var
-            pure
-              $ mkCoreApps
-                (Core.Var $ exprVarCtor env)
-                [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
-                , Core.Type ty
-                , index
-                ]
-          Just expr -> do
-            liftMaybeT . putMsg $ hcat [text "inlining ", ppr var, text " to ", ppr expr]
-            quoteCoreExpr localBinds context expr
-      Just expr -> do
-        liftMaybeT . putMsg $ hcat [text "inlining ", ppr var, text " to ", ppr expr]
-        quoteCoreExpr localBinds context expr
-   where
-    lookupLocalBind :: [CoreBind] -> CoreBndr -> Maybe CoreExpr
-    lookupLocalBind [] _ = Nothing
-    lookupLocalBind (NonRec name value : rest) bndr =
-      if name == bndr then Just value else lookupLocalBind rest bndr
-    lookupLocalBind (Rec _ : rest) bndr =
-      -- TODO: handle inlining of recursive functions
-      lookupLocalBind rest bndr
-  quoteCoreExpr localBinds context (Core.Lam var body) =
-    if isVarOcc . occName $ varName var
-      then do
-        body' <- quoteCoreExpr localBinds ((var, varType var) : context) body
-        pure
-          $ mkCoreApps
-            (Core.Var $ exprLamCtor env)
-            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
-            , Core.Type $ varType var
-            , Core.Type $ exprType body
-            , body'
-            ]
-      else do
-        body' <- quoteCoreExpr localBinds context body
-        pure $ Core.Lam var body'
+  -- unboxed int literals
   quoteCoreExpr _localBinds context expr@(Core.Lit (LitNumber LitNumInt _)) =
     pure
       $ mkCoreApps
@@ -238,6 +247,7 @@ pass env = bindsOnlyPass $ \binds ->
         [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
         , mkCoreConApps intDataCon [expr]
         ]
+  -- boxed int literals
   quoteCoreExpr localBinds context expr@(Core.App (Core.Var var) x)
     | var == dataConWorkId intDataCon =
         case x of
@@ -278,6 +288,62 @@ pass env = bindsOnlyPass $ \binds ->
                 [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
                 , mkCoreConApps intDataCon [Core.Lit $ LitNumber LitNumInt 999]
                 ]
+  -- boxed char literals
+  quoteCoreExpr _localBinds context expr@(Core.App (Core.Var var) x)
+    | var == dataConWorkId charDataCon =
+        case x of
+          Core.Lit LitChar{} ->
+            pure
+              $ mkCoreApps
+                (Core.Var $ exprCharCtor env)
+                [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+                , expr
+                ]
+          _ -> do
+            liftMaybeT . putMsg $ hcat [text "unrecognised Char expr: ", ppr x]
+            Control.Applicative.empty
+  --  toString
+  quoteCoreExpr _localBinds context expr@Core.App{}
+    | (Core.Var f, [Core.Type ty, dict]) <- collectArgs expr
+    , f == toStringVar env = do
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprToStringCtor env)
+            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+            , Core.Type ty
+            , dict
+            ]
+  quoteCoreExpr localBinds context (Core.Var var) = do
+    let u = unfoldingInfo $ idInfo var
+    case expandUnfolding_maybe u of
+      Nothing -> do
+        liftMaybeT . warnMsg $ text "no unfolding for" <+> ppr var <+> parens (ppr u)
+        (ty, index) <- mkIndex context var
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprVarCtor env)
+            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+            , Core.Type ty
+            , index
+            ]
+      Just expr -> do
+        liftMaybeT . putMsg $ hcat [text "inlining ", ppr var, text " to ", ppr expr]
+        quoteCoreExpr localBinds context expr
+  quoteCoreExpr localBinds context (Core.Lam var body) =
+    if isVarOcc . occName $ varName var
+      then do
+        body' <- quoteCoreExpr localBinds ((var, varType var) : context) body
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprLamCtor env)
+            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+            , Core.Type $ varType var
+            , Core.Type $ exprType body
+            , body'
+            ]
+      else do
+        body' <- quoteCoreExpr localBinds context body
+        pure $ Core.Lam var body'
   quoteCoreExpr localBinds context expr@(Core.App f x) =
     if isValArg x
       then do
@@ -296,11 +362,13 @@ pass env = bindsOnlyPass $ \binds ->
       else do
         f' <- quoteCoreExpr localBinds context f
         pure $ Core.App f' x
-  quoteCoreExpr localBinds context (Core.Case val var ty branches)
+  quoteCoreExpr localBinds context expr@(Core.Case val var ty branches)
+    -- Int unboxing
     | isIntTy $ varType var
     , [Core.Alt (DataAlt ctor) [arg] body] <- branches
     , ctor == intDataCon = do
         quoteCoreExpr localBinds ((arg, intTy) : context) body
+    -- Bool pattern matching
     | isBoolTy $ varType var
     , [Core.Alt (DataAlt ctor1) [] body1, Core.Alt DataAlt{} [] body2] <- branches = do
         val' <- quoteCoreExpr localBinds context val
@@ -317,11 +385,130 @@ pass env = bindsOnlyPass $ \binds ->
             , trueCase
             , falseCase
             ]
+    -- Primops that return 0, 1 instead of true, false
+    | varType var `eqType` intPrimTy
+    , (Core.Var f, args) <- collectArgs val
+    , f == primIntLt env
+    , [left, right] <- args
+    , [Core.Alt ctor1 [] body1, Core.Alt ctor2 [] body2] <- branches = do
+        left' <- quoteCoreExpr localBinds context left
+        right' <- quoteCoreExpr localBinds context right
+        (trueCase, falseCase) <-
+          case (ctor1, ctor2) of
+            (DEFAULT, LitAlt (LitNumber _ 1)) ->
+              (,) <$> quoteCoreExpr localBinds context body2 <*> quoteCoreExpr localBinds context body1
+            (LitAlt (LitNumber _ 1), DEFAULT) ->
+              (,) <$> quoteCoreExpr localBinds context body1 <*> quoteCoreExpr localBinds context body2
+            _ -> do
+              liftMaybeT . warnMsg $ text "unrecognised branching structure in " <+> ppr expr
+              Control.Applicative.empty
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprIfThenElseCtor env)
+            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+            , Core.Type ty
+            , mkCoreApps
+                (Core.Var $ exprLtCtor env)
+                [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+                , left'
+                , right'
+                ]
+            , trueCase
+            , falseCase
+            ]
+    -- Pattern matching on literals
+    | varType var `eqType` intPrimTy = do
+        val' <- quoteCoreExpr localBinds context val
+        let ctxTy = mkPromotedListTy liftedTypeKind $ fmap snd context
+        let aTy = intTy -- `Int#`s in core are quoted as `Expr ctx Int`s.
+        let bTy = ty
+        branches' <- quoteCoreBranches ctxTy aTy bTy localBinds context branches
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprCaseCtor env)
+            [ Core.Type ctxTy
+            , Core.Type aTy
+            , Core.Type bTy
+            , val'
+            , branches'
+            ]
+   where
+    quoteCoreBranches ::
+      Type ->
+      Type ->
+      Type ->
+      [CoreBind] ->
+      [(CoreBndr, Type)] ->
+      [CoreAlt] ->
+      MaybeT CoreM CoreExpr
+    quoteCoreBranches ctxTy aTy bTy _localBinds _context [] =
+      pure $ mkCoreConApps nilDataCon [Core.Type $ mkAppTys (mkTyCoVarTy $ branchTyCon env) [ctxTy, aTy, bTy]]
+    quoteCoreBranches ctxTy aTy bTy localBinds context (alt@(Alt pattern args body) : alts) = do
+      alt' <- case pattern of
+        DEFAULT
+          | [] <- args -> do
+              let pdefault = mkCoreApps (Core.Var $ patternPDefaultCtor env) [Core.Type ctxTy, Core.Type aTy]
+              body' <- quoteCoreExpr localBinds context body
+              pure
+                $ mkCoreApps
+                  (Core.Var $ branchBranchCtor env)
+                  [ Core.Type ctxTy
+                  , Core.Type ctxTy
+                  , Core.Type aTy
+                  , Core.Type bTy
+                  , pdefault
+                  , body'
+                  ]
+        LitAlt (LitNumber LitNumInt i) | [] <- args -> do
+          let pint = mkCoreApps (Core.Var $ patternPIntCtor env) [Core.Type ctxTy, Core.Lit $ mkLitIntUnchecked i]
+          body' <- quoteCoreExpr localBinds context body
+          pure
+            $ mkCoreApps
+              (Core.Var $ branchBranchCtor env)
+              [ Core.Type ctxTy
+              , Core.Type ctxTy
+              , Core.Type aTy
+              , Core.Type bTy
+              , pint
+              , body'
+              ]
+        _ -> do
+          liftMaybeT . warnMsg $ text "unrecognised pattern branch: " <+> ppr alt
+          Control.Applicative.empty
+      alts' <- quoteCoreBranches ctxTy aTy bTy localBinds context alts
+      pure $ mkCoreConApps consDataCon [Core.Type $ mkAppTys (mkTyCoVarTy $ branchTyCon env) [ctxTy, aTy, bTy], alt', alts']
   quoteCoreExpr _localBinds context expr = do
-    liftMaybeT . putMsg $ hcat [text "warning: unrecognised expr: ", ppr expr]
+    liftMaybeT $ do
+      namePprCtx <- getNamePprCtx
+      dflags <- getDynFlags
+      putMsg
+        . pprLocMsgEnvelopeDefault
+        $ mkMsgEnvelope (initDiagOpts dflags) (UnhelpfulSpan UnhelpfulNoLocationInfo) namePprCtx
+        $ GhcUnknownMessage
+        $ UnknownDiagnostic
+          DiagnosticMessage
+            { diagMessage = mkSimpleDecorated $ text "unrecognised expression: " <+> ppr expr
+            , diagReason = WarningWithoutFlag
+            , diagHints = []
+            }
     pure
       $ mkCoreApps
         (Core.Var $ exprIntCtor env)
         [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
         , mkCoreConApps intDataCon [Core.Lit $ LitNumber LitNumInt 999]
         ]
+
+warnMsg :: SDoc -> CoreM ()
+warnMsg sdoc = do
+  namePprCtx <- getNamePprCtx
+  dflags <- getDynFlags
+  putMsg
+    . pprLocMsgEnvelopeDefault
+    $ mkMsgEnvelope (initDiagOpts dflags) (UnhelpfulSpan UnhelpfulNoLocationInfo) namePprCtx
+    $ GhcUnknownMessage
+    $ UnknownDiagnostic
+      DiagnosticMessage
+        { diagMessage = mkSimpleDecorated sdoc
+        , diagReason = WarningWithoutFlag
+        , diagHints = []
+        }
