@@ -38,9 +38,10 @@ module Lib (
 
 import Compiler.Plugin.Interface (Quoted (..), quote, toString)
 import qualified Compiler.Plugin.Interface as Expr
+import Control.Monad (unless)
 import Control.Monad.Fix (MonadFix (..))
-import Control.Monad.State (evalStateT)
-import Control.Monad.State.Class (MonadState, get, put)
+import Control.Monad.State (evalStateT, runStateT)
+import Control.Monad.State.Class (MonadState, get, gets, modify, put)
 import Control.Monad.Trans
 import Control.Monad.Writer (WriterT, runWriterT)
 import Control.Monad.Writer.Class (MonadWriter, tell)
@@ -111,7 +112,7 @@ textInput :: Interact (Behavior String, Element)
 textInput = TextInput
 
 data Event :: Type -> Type where
-  FromDomEvent :: String -> DomEvent -> Event a
+  FromDomEvent :: String -> DomEvent -> Event ()
   Sample :: Event a -> Behavior b -> Event (a, b)
   FromRequest :: Event a -> String -> Event b
   FmapEvent :: Quoted (a -> b) -> Event a -> Event b
@@ -186,28 +187,60 @@ data Page
 newtype RPC = RPC (forall a. Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a)
 
 renderPage :: (MonadState Int m, MonadIO m, MonadFix m) => Path -> Page -> m (Map ByteString RPC, Builder)
-renderPage path (Page h) = renderHtml path "<!-- no script -->" h
+renderPage path (Page h) = renderHtml path (Js ["<!-- no script -->"]) h
 renderPage path (PageM h) = renderInteractHtml path h
 
-freshId :: (MonadState Int m) => m String
+class HasSupply s where
+  getSupply :: s -> Int
+  setSupply :: Int -> s -> s
+
+freshId :: (MonadState s m, HasSupply s) => m String
 freshId = do
-  n <- get
-  put $ n + 1
+  n <- gets getSupply
+  modify $ setSupply (n + 1)
   pure $ show n
 
 setId :: String -> Html -> Html
 setId i (Node name attrs children) = Node name (("id", i) : attrs) children
 setId _ a = a
 
+newtype Js = Js {getJs :: [String]}
+  deriving (Semigroup, Monoid)
+
+data RenderState = RenderState {supply :: Int, eventListeners :: Map (String, DomEvent) (String -> Js)}
+
+instance HasSupply RenderState where
+  getSupply = supply
+  setSupply s r = r{supply = s}
+
+attachEventListeners :: Map (String, DomEvent) (String -> Js) -> Js
+attachEventListeners =
+  Map.foldrWithKey
+    ( \(elId, de) v rest ->
+        Js
+          [ elId <> ".addEventListener("
+          , renderDomEvent de <> ","
+          , "(__ignore) => {"
+          ]
+          <> v "{}"
+          <> Js
+            [ "}"
+            , ");"
+            ]
+          <> rest
+    )
+    mempty
+
 renderInteractHtml :: (MonadState Int m, MonadIO m, MonadFix m) => Path -> Interact Html -> m (Map ByteString RPC, Builder)
 renderInteractHtml path x = do
-  (h, (fns, script)) <- runWriterT $ go x
-  (fns', content) <- renderHtml path script h
+  s <- get
+  ((h, (fns, script)), s') <- flip runStateT RenderState{supply = s, eventListeners = mempty} . runWriterT $ go x
+  put $ getSupply s'
+  let script' = script <> attachEventListeners (eventListeners s')
+  (fns', content) <- renderHtml path script' h
   pure (fns <> fns', content)
  where
-  -- uncurry (renderHtml path) . Tuple.swap . second Tuple.snd <=<
-
-  go :: (MonadState Int m, MonadWriter (Map ByteString RPC, String) m, MonadIO m, MonadFix m) => Interact a -> m a
+  go :: (MonadState RenderState m, MonadWriter (Map ByteString RPC, Js) m, MonadIO m, MonadFix m) => Interact a -> m a
   go (Pure h) = pure h
   go (Apply mf ma) = go mf <*> go ma
   go (Bind ma f) = go ma >>= go . f
@@ -246,8 +279,8 @@ renderInteractHtml path x = do
             f a
             resp ""
     fnId <- ("function_" <>) <$> freshId
-    script <- foldMap (<> "\n") <$> performEventScript path ea (fetch path fnId)
-    tell (Map.singleton (ByteString.Char8.pack fnId) (RPC run), script)
+    performEventScript path ea (Js . fetch path fnId)
+    tell (Map.singleton (ByteString.Char8.pack fnId) (RPC run), mempty)
     pure ()
   go (Request ea f) = do
     let
@@ -269,25 +302,19 @@ renderInteractHtml path x = do
   go (Stepper initial eUpdate) = do
     pure $ FromStepper initial eUpdate
 
-performEventScript :: (MonadState Int m) => Path -> Event a -> (String -> [String]) -> m [String]
+performEventScript :: (MonadState RenderState m) => Path -> Event a -> (String -> Js) -> m ()
 performEventScript path e code =
   case e of
     FromDomEvent elId de ->
-      pure
-        $ [ elId <> ".addEventListener("
-          , "  " <> renderDomEvent de <> ","
-          , "  (event) => {"
-          ]
-        <> code "{}"
-        <> [ "  }"
-           , ");"
-           ]
+      modify $ \s -> s{eventListeners = Map.insertWith (\new old -> old <> new) (elId, de) code (eventListeners s)}
     Sample e' (Behavior var) -> do
       temp <- ("temp_" <>) <$> freshId
       performEventScript
         path
         e'
-        (\target -> ["const " <> temp <> " = { fst: " <> target <> ", snd: " <> var <> "};"] <> code temp)
+        ( \target ->
+            Js ["const " <> temp <> " = { fst: " <> target <> ", snd: " <> var <> "};"] <> code temp
+        )
     FromRequest e' fnId -> do
       result <- ("result_" <>) <$> freshId
       temp <- ("temp_" <>) <$> freshId
@@ -295,18 +322,20 @@ performEventScript path e code =
         path
         e'
         ( \target ->
-            [ "    fetch("
-            , "      \"" <> renderPath path <> "\","
-            , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> target <> " })}"
-            , "    ).then("
-            , "      (" <> result <> ") => {"
-            , "        " <> result <> ".json().then((" <> temp <> ") => {"
-            ]
+            Js
+              [ "    fetch("
+              , "      \"" <> renderPath path <> "\","
+              , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> target <> " })}"
+              , "    ).then("
+              , "      (" <> result <> ") => {"
+              , "        " <> result <> ".json().then((" <> temp <> ") => {"
+              ]
               <> code temp
-              <> [ "        });"
-                 , "      }"
-                 , "    );"
-                 ]
+              <> Js
+                [ "        });"
+                , "      }"
+                , "    );"
+                ]
         )
     FmapEvent (Quoted expr _) e' -> do
       temp <- ("temp_" <>) <$> freshId
@@ -315,11 +344,59 @@ performEventScript path e code =
         path
         e'
         ( \target ->
-            ["const " <> temp <> " = " <> expr' <> "(" <> target <> ");"]
+            Js ["const " <> temp <> " = " <> expr' <> "(" <> target <> ");"]
               <> code temp
         )
 
-exprToJavascript :: (MonadState Int m) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m String
+{-
+performEventScript :: (MonadState RenderState m) => Path -> Event a -> (String -> Js) -> m ()
+performEventScript path e code =
+  case e of
+    FromDomEvent elId de ->
+      modify $ \s -> s{eventListeners = Map.insertWith (\new old -> old <> new) (elId, de) code (eventListeners s)}
+    Sample e' (Behavior var) -> do
+      temp <- ("temp_" <>) <$> freshId
+      performEventScript
+        path
+        e'
+        ( \target ->
+            Js ["const " <> temp <> " = { fst: " <> target <> ", snd: " <> var <> "};"] <> code temp
+        )
+    FromRequest e' fnId -> do
+      result <- ("result_" <>) <$> freshId
+      temp <- ("temp_" <>) <$> freshId
+      performEventScript
+        path
+        e'
+        ( \target ->
+            Js
+              [ "    fetch("
+              , "      \"" <> renderPath path <> "\","
+              , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> target <> " })}"
+              , "    ).then("
+              , "      (" <> result <> ") => {"
+              , "        " <> result <> ".json().then((" <> temp <> ") => {"
+              ]
+              <> code temp
+              <> Js
+                [ "        });"
+                , "      }"
+                , "    );"
+                ]
+        )
+    FmapEvent (Quoted expr _) e' -> do
+      temp <- ("temp_" <>) <$> freshId
+      expr' <- exprToJavascript Expr.Nil expr
+      performEventScript
+        path
+        e'
+        ( \target ->
+            Js ["const " <> temp <> " = " <> expr' <> "(" <> target <> ");"]
+              <> code temp
+        )
+-}
+
+exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m String
 exprToJavascript ctx expr =
   case expr of
     Expr.Var v -> do
@@ -365,7 +442,7 @@ exprToJavascript ctx expr =
            ]
         <> ["})(" <> a' <> ")"]
      where
-      branchToJavascript :: (MonadState Int m) => String -> String -> Expr.Ctx (Const String) ctx -> Expr.Branch ctx a b -> WriterT Any m (String)
+      branchToJavascript :: (MonadState s m, HasSupply s) => String -> String -> Expr.Ctx (Const String) ctx -> Expr.Branch ctx a b -> WriterT Any m (String)
       branchToJavascript value result ctx (Expr.Branch pattern body) =
         case pattern of
           Expr.PDefault -> do
@@ -401,6 +478,7 @@ data Html
 data DomEvent
   = Click
   | Change
+  deriving (Eq, Ord)
 
 renderDomEvent :: (IsString s) => DomEvent -> s
 renderDomEvent Click = "\"click\""
@@ -422,18 +500,23 @@ fetch path fnId a =
   , "    );"
   ]
 
-renderHtml :: (MonadState Int m) => Path -> String -> Html -> m (Map ByteString RPC, Builder)
-renderHtml path postScript = fmap Tuple.swap . runWriterT . fmap Tuple.fst . runWriterT . go Nothing
+renderHtml :: (MonadState Int m) => Path -> Js -> Html -> m (Map ByteString RPC, Builder)
+renderHtml path postScript h = do
+  s <- get
+  (((h', _script), rpcs), s') <- flip runStateT RenderState{supply = s, eventListeners = mempty} . runWriterT . runWriterT $ go Nothing h
+  put $ getSupply s'
+  pure (rpcs, h')
  where
-  go :: (MonadState Int m, MonadWriter (Map ByteString RPC) m) => Maybe String -> Html -> WriterT String m Builder
+  go :: (MonadState RenderState m, MonadWriter (Map ByteString RPC) m) => Maybe String -> Html -> WriterT String m Builder
   go _ (Html children) = do
     (children', postScript') <- lift . runWriterT $ fold <$> traverse (go Nothing) children
+    els <- gets eventListeners
     pure
       $ "<!doctype html>\n"
       <> "<html>\n"
       <> children'
       <> "<script>\n"
-      <> Builder.byteString (ByteString.Char8.pack $ postScript' <> postScript)
+      <> Builder.byteString (ByteString.Char8.pack $ postScript' <> foldMap (<> "\n") (getJs $ postScript <> attachEventListeners els))
       <> "</script>"
       <> "</html>\n"
   go mId (Node name attrs children) = do
@@ -485,14 +568,10 @@ renderHtml path postScript = fmap Tuple.swap . runWriterT . fmap Tuple.fst . run
     pure $ el' <> "<script>\n" <> Builder.byteString (ByteString.Char8.pack script) <> "</script>\n"
   go mId (ReactiveText (FromStepper initial eString)) = do
     textId <- maybe (("text_" <>) <$> freshId) pure mId
-    script <- performEventScript path eString $ \target -> [textId <> ".textContent = " <> target <> ";"]
-    let
-      script' =
-        foldMap (<> "\n")
-          $ ["const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");"]
-          <> fmap fromString script
-    tell script'
-    pure $ "<span id=\"" <> fromString textId <> "\">" <> fromString initial <> "</span>\n"
+    performEventScript path eString $ \target -> Js [textId <> ".textContent = " <> target <> ";"]
+    pure
+      $ ("<span id=\"" <> fromString textId <> "\">" <> fromString initial <> "</span>\n")
+      <> ("<script>const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");</script>\n")
 
 -- | [[ App ]] = Path -> Maybe Page
 newtype App = App (Map Path Page)

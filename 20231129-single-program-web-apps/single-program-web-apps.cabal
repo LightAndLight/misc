@@ -42,6 +42,7 @@ executable single-program-web-apps
     build-depends:
         base ^>=4.18.1.0,
         compiler-plugin,
+        random,
         single-program-web-apps,
         time
 

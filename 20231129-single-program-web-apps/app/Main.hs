@@ -6,6 +6,7 @@ module Main where
 import Data.Foldable (fold)
 import Data.Time.Clock (getCurrentTime)
 import Lib
+import System.Random (randomRIO)
 
 app :: App
 app =
@@ -71,9 +72,11 @@ app =
                 buttonEl <- element $ Node "button" [] [Text "Click me!"]
                 let eButtonClicked = domEvent Click buttonEl
 
-                eZero <- request eButtonClicked (\() -> pure (0 :: Int))
-                let eZeroPlusOne = fmap (toString . (+ 1)) eZero
-                rCurrentTime <- stepper "" eZeroPlusOne
+                eX <- request eButtonClicked (\() -> randomRIO (0, 10) :: IO Int)
+                rX <- stepper "Unknown" $ fmap toString eX
+
+                let eXPlusOne = fmap (toString . (+ 1)) eX
+                rXPlusOne <- stepper "Unknown" eXPlusOne
 
                 pure
                     $ Html
@@ -81,9 +84,26 @@ app =
                         , Node
                             "body"
                             []
-                            [ Node "p" [] [Text "When you click the button, an updated time will be fetched from the server."]
-                            , Text "Current time: "
-                            , ReactiveText rCurrentTime
+                            [ Node
+                                "p"
+                                []
+                                [ Text "When you click the button, the server will send a number "
+                                , Node "i" [] [Text "x"]
+                                , Text ", and the browser will display the result of "
+                                , Node "i" [] [Text "x + 1"]
+                                ]
+                            , Node
+                                "p"
+                                []
+                                [ Text "x: "
+                                , ReactiveText rX
+                                ]
+                            , Node
+                                "p"
+                                []
+                                [ Text "x + 1: "
+                                , ReactiveText rXPlusOne
+                                ]
                             , html buttonEl
                             ]
                         ]
