@@ -395,54 +395,6 @@ performEventScript path e =
               )
             ]
 
-{-
-performEventScript :: (MonadState RenderState m) => Path -> Event a -> (String -> Js) -> m ()
-performEventScript path e code =
-  case e of
-    FromDomEvent elId de ->
-      modify $ \s -> s{eventListeners = Map.insertWith (\new old -> old <> new) (elId, de) code (eventListeners s)}
-    Sample e' (Behavior var) -> do
-      temp <- ("temp_" <>) <$> freshId
-      performEventScript
-        path
-        e'
-        ( \target ->
-            Js ["const " <> temp <> " = { fst: " <> target <> ", snd: " <> var <> "};"] <> code temp
-        )
-    FromRequest e' fnId -> do
-      result <- ("result_" <>) <$> freshId
-      temp <- ("temp_" <>) <$> freshId
-      performEventScript
-        path
-        e'
-        ( \target ->
-            Js
-              [ "    fetch("
-              , "      \"" <> renderPath path <> "\","
-              , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> target <> " })}"
-              , "    ).then("
-              , "      (" <> result <> ") => {"
-              , "        " <> result <> ".json().then((" <> temp <> ") => {"
-              ]
-              <> code temp
-              <> Js
-                [ "        });"
-                , "      }"
-                , "    );"
-                ]
-        )
-    FmapEvent (Quoted expr _) e' -> do
-      temp <- ("temp_" <>) <$> freshId
-      expr' <- exprToJavascript Expr.Nil expr
-      performEventScript
-        path
-        e'
-        ( \target ->
-            Js ["const " <> temp <> " = " <> expr' <> "(" <> target <> ");"]
-              <> code temp
-        )
--}
-
 exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m String
 exprToJavascript ctx expr =
   case expr of
