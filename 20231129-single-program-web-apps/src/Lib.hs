@@ -8,7 +8,9 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -44,11 +46,11 @@ module Lib (
 import Compiler.Plugin.Interface (Quoted (..), quote, toString)
 import qualified Compiler.Plugin.Interface as Expr
 import Control.Monad.Fix (MonadFix (..))
-import Control.Monad.State (evalStateT, runStateT)
 import Control.Monad.State.Class (MonadState, get, gets, modify, put)
+import Control.Monad.State.Lazy (evalStateT, runStateT)
 import Control.Monad.Trans
-import Control.Monad.Writer (WriterT, runWriterT)
-import Control.Monad.Writer.Class (MonadWriter, tell)
+import Control.Monad.Writer (MonadWriter, tell)
+import Control.Monad.Writer.Lazy (WriterT, runWriterT)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Json
 import Data.Bifunctor (bimap)
@@ -59,8 +61,11 @@ import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.ByteString.Lazy as ByteString.Lazy
 import qualified Data.ByteString.Lazy as Lazy
+import Data.Dependent.Map (DMap)
+import qualified Data.Dependent.Map as DMap
 import Data.Foldable (fold)
 import Data.Functor.Const (Const (..))
+import Data.GADT.Compare (GCompare (..), GEq (..), GOrdering (..))
 import Data.Kind (Type)
 import Data.List (intercalate)
 import Data.Map (Map)
@@ -68,6 +73,7 @@ import qualified Data.Map as Map
 import Data.Monoid (Any (..))
 import Data.String (IsString (..))
 import qualified Data.Text as Text
+import Data.Type.Equality ((:~:) (..))
 import GHC.Generics (Generic)
 import Network.HTTP.Types.Method
 import Network.HTTP.Types.Status (badRequest400, notFound404, ok200)
@@ -75,6 +81,7 @@ import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import System.IO (hPutStrLn)
 import qualified System.IO
+import Unsafe.Coerce (unsafeCoerce)
 
 newtype Path = Path [String]
   deriving (Eq, Ord, Semigroup, Monoid, Show)
@@ -145,9 +152,23 @@ sample = Sample
 current :: (Send a) => Reactive a -> Behavior a
 current = Current
 
+newtype Addr a = Addr Int
+  deriving (Eq, Ord)
+
+instance GEq Addr where
+  geq (Addr a) (Addr b) = if a == b then Just (unsafeCoerce Refl) else Nothing
+
+instance GCompare Addr where
+  gcompare (Addr a) (Addr b) =
+    case compare a b of
+      LT -> GLT
+      EQ -> unsafeCoerce GEQ
+      GT -> GGT
+
 data Reactive a where
   FromStepper :: (Send a) => a -> Event a -> Reactive a
   FmapReactive :: Quoted (a -> b) -> Reactive a -> Reactive b
+  AddrReactive :: Addr a -> Reactive a
 
 instance Functor Reactive where
   {-# INLINE fmap #-}
@@ -221,6 +242,12 @@ freshId = do
   modify $ setSupply (n + 1)
   pure $ show n
 
+freshAddr :: (MonadState s m, HasSupply s) => m (Addr a)
+freshAddr = do
+  n <- gets getSupply
+  modify $ setSupply (n + 1)
+  pure $ Addr n
+
 setId :: String -> Html -> Html
 setId i (Node name attrs children) = Node name (("id", i) : attrs) children
 setId _ a = a
@@ -277,9 +304,14 @@ subscribersJs (Subscribers fs os) input =
     )
     fs
 
+data StoredReactive a where
+  StoredReactive :: (Send a) => a -> Event a -> StoredReactive a
+
 data RenderState = RenderState
   { supply :: Int
   , behaviors :: Map String Lazy.ByteString
+  , getReactives :: DMap Addr StoredReactive
+  , setReactives :: DMap Addr StoredReactive
   , eventListeners :: Map (String, DomEvent) Subscribers
   }
 
@@ -308,7 +340,18 @@ attachEventListeners =
 renderInteractHtml :: (MonadState Int m, MonadIO m, MonadFix m) => Path -> Interact Html -> m (Map ByteString RPC, Builder)
 renderInteractHtml path x = do
   s <- get
-  ((h, (fns, script)), s') <- flip runStateT RenderState{supply = s, behaviors = mempty, eventListeners = mempty} . runWriterT $ go x
+  rec ((h, (fns, script)), s') <-
+        flip
+          runStateT
+          RenderState
+            { supply = s
+            , behaviors = mempty
+            , setReactives = mempty
+            , getReactives = setReactives s'
+            , eventListeners = mempty
+            }
+          . runWriterT
+          $ go x
   put $ getSupply s'
   let script' = script <> attachEventListeners (eventListeners s')
   (fns', content) <- renderHtml path script' h
@@ -376,9 +419,14 @@ renderInteractHtml path x = do
   go (StepperM getInitial eUpdate) = do
     initial <- liftIO getInitial
     pure $ FromStepper initial eUpdate
-  go (Stepper initial eUpdate) =
-    pure $ FromStepper initial eUpdate
+  go (Stepper initial eUpdate) = do
+    addr <- freshAddr
+    modify $ \s -> s{setReactives = DMap.insert addr (StoredReactive initial eUpdate) (setReactives s)}
+    pure $ AddrReactive addr
   go (MFix f) = mfix (go . f)
+
+-- let x = FromStepper 0 (FmapEvent _ (Sample eButtonClicked (Current x)))
+-- this will not do
 
 behaviorVar :: (MonadState RenderState m) => Path -> Behavior a -> m String
 behaviorVar _ (Behavior var) = pure var
@@ -393,6 +441,16 @@ behaviorVar path (Current ra) = go (Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
     subscribe <- performEventScript path $ FmapEvent g ea
     subscribe $ Subscribers mempty [(\input -> Js [b <> " = " <> input <> ";"], mempty, mempty)]
     pure b
+  go g (AddrReactive addr) = do
+    result <- gets $ DMap.lookup addr . getReactives
+    case result of
+      Nothing -> error "reactive addr missing"
+      Just (StoredReactive a ea) -> do
+        b <- ("behavior_" <>) <$> freshId
+        modify $ \s -> s{behaviors = Map.insert b (Json.encode $ toSendTy $ Expr.quotedValue g a) (behaviors s)}
+        subscribe <- performEventScript path $ FmapEvent g ea
+        subscribe $ Subscribers mempty [(\input -> Js [b <> " = " <> input <> ";"], mempty, mempty)]
+        pure b
 
 performEventScript :: (MonadState RenderState m) => Path -> Event a -> m (Subscribers -> m ())
 performEventScript path e =
@@ -550,10 +608,22 @@ fetch path fnId a =
   , "    );"
   ]
 
-renderHtml :: (MonadState Int m) => Path -> Js -> Html -> m (Map ByteString RPC, Builder)
+renderHtml :: (MonadState Int m, MonadFix m) => Path -> Js -> Html -> m (Map ByteString RPC, Builder)
 renderHtml path postScript h = do
   s <- get
-  (((h', _script), rpcs), s') <- flip runStateT RenderState{supply = s, behaviors = mempty, eventListeners = mempty} . runWriterT . runWriterT $ go Nothing h
+  rec (((h', _script), rpcs), s') <-
+        flip
+          runStateT
+          RenderState
+            { supply = s
+            , behaviors = mempty
+            , setReactives = mempty
+            , getReactives = setReactives s'
+            , eventListeners = mempty
+            }
+          . runWriterT
+          . runWriterT
+          $ go Nothing h
   put $ getSupply s'
   pure (rpcs, h')
  where
@@ -629,6 +699,18 @@ renderHtml path postScript h = do
       pure
         $ ("<span id=\"" <> fromString textId <> "\">" <> fromString (Expr.quotedValue f initial) <> "</span>\n")
         <> ("<script>const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");</script>\n")
+    goReactive f (AddrReactive addr) = do
+      result <- gets $ DMap.lookup addr . getReactives
+      case result of
+        Nothing ->
+          error "addr missing from reactives"
+        Just (StoredReactive initial eString) -> do
+          textId <- maybe (("text_" <>) <$> freshId) pure mId
+          subscribe <- performEventScript path $ FmapEvent f eString
+          subscribe $ Subscribers mempty [(\target -> Js [textId <> ".textContent = " <> target <> ";"], mempty, mempty)]
+          pure
+            $ ("<span id=\"" <> fromString textId <> "\">" <> fromString (Expr.quotedValue f initial) <> "</span>\n")
+            <> ("<script>const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");</script>\n")
 
 -- | [[ App ]] = Path -> Maybe Page
 newtype App = App (Map Path Page)
