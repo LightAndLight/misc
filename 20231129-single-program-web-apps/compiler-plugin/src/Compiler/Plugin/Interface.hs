@@ -20,6 +20,7 @@ module Compiler.Plugin.Interface (
   getCtx,
   quote,
   toString,
+  compose,
 ) where
 
 import Data.Kind (Type)
@@ -38,6 +39,7 @@ data Expr :: [Type] -> Type -> Type where
   Bool :: forall ctx. Bool -> Expr ctx Bool
   Char :: forall ctx. Char -> Expr ctx Char
   ToString :: forall ctx a. (Show a) => Expr ctx (a -> String)
+  Weaken :: Expr ctx a -> Expr (b ': ctx) a
 
 deriving instance Show (Expr ctx a)
 
@@ -84,3 +86,6 @@ quote a = noinline error "quote not removed by compiler plugin" a
 {-# NOINLINE toString #-}
 toString :: (Show a) => a -> String
 toString = show
+
+compose :: Quoted (b -> c) -> Quoted (a -> b) -> Quoted (a -> c)
+compose f g = Quoted (Lam $ App (Weaken $ quotedCode f) $ App (Weaken $ quotedCode g) (Var Z)) (quotedValue f . quotedValue g)

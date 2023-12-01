@@ -12,6 +12,26 @@ app :: App
 app =
     fold
         [ page
+            mempty
+            ( Html
+                [ Node "head" [] [Node "title" [] [Text "Examples"]]
+                , Node
+                    "body"
+                    []
+                    [ Node "p" [] [Text "Index of examples"]
+                    , Node
+                        "ul"
+                        []
+                        [ Node "li" [] [Node "a" [href ("example" <> "click")] [Text "Example 1 - \"click\""]]
+                        , Node "li" [] [Node "a" [href ("example" <> "send")] [Text "Example 2 - \"send\""]]
+                        , Node "li" [] [Node "a" [href ("example" <> "receive")] [Text "Example 3 - \"receive\""]]
+                        , Node "li" [] [Node "a" [href ("example" <> "map")] [Text "Example 4 - \"map\""]]
+                        , Node "li" [] [Node "a" [href ("example" <> "counter")] [Text "Example 5 - \"counter\""]]
+                        ]
+                    ]
+                ]
+            )
+        , page
             ("example" <> "click")
             ( Html
                 [ Node "head" [] [Node "title" [] [Text "Example - click"]]
@@ -103,6 +123,35 @@ app =
                                 []
                                 [ Text "x + 1: "
                                 , ReactiveText rXPlusOne
+                                ]
+                            , html buttonEl
+                            ]
+                        ]
+            )
+        , pageM
+            ("example" <> "counter")
+            ( do
+                buttonEl <- element $ Node "button" [] [Text "Click me!"]
+                let eButtonClicked = domEvent Click buttonEl
+
+                rec rCount <- stepper (0 :: Int) $ (\((), x) -> x + 1) <$> sample eButtonClicked (current rCount)
+
+                pure
+                    $ Html
+                        [ Node "head" [] [Node "title" [] [Text "Example - click and recieve"]]
+                        , Node
+                            "body"
+                            []
+                            [ Node
+                                "p"
+                                []
+                                [ Text "When you click the button, the client will increment a count."
+                                ]
+                            , Node
+                                "p"
+                                []
+                                [ Text "count: "
+                                , ReactiveText $ fmap toString rCount
                                 ]
                             , html buttonEl
                             ]

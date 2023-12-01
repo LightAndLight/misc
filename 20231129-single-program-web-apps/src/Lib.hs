@@ -5,14 +5,17 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Lib (
   App,
+  Path,
   serve,
   page,
   pageM,
@@ -26,12 +29,14 @@ module Lib (
   textInput,
   domEvent,
   sample,
+  current,
   stepper,
   stepperM,
   perform,
   request,
   toString,
   Html (..),
+  href,
   DomEvent (..),
   module Network.HTTP.Types.Method,
 ) where
@@ -57,6 +62,7 @@ import qualified Data.ByteString.Lazy as Lazy
 import Data.Foldable (fold)
 import Data.Functor.Const (Const (..))
 import Data.Kind (Type)
+import Data.List (intercalate)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Monoid (Any (..))
@@ -73,6 +79,9 @@ import qualified System.IO
 newtype Path = Path [String]
   deriving (Eq, Ord, Semigroup, Monoid, Show)
 
+href :: Path -> (String, String)
+href (Path segments) = ("href", intercalate "/" segments)
+
 instance IsString Path where
   fromString = Path . pure
 
@@ -85,8 +94,9 @@ data Interact :: Type -> Type where
   DomEvent :: DomEvent -> Element -> Interact (Event ())
   Perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
   Request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
-  Stepper :: a -> Event a -> Interact (Reactive a)
-  StepperM :: IO a -> Event a -> Interact (Reactive a)
+  Stepper :: (Send a) => a -> Event a -> Interact (Reactive a)
+  StepperM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
+  MFix :: (a -> Interact a) -> Interact a
 
 instance Functor Interact where
   fmap f m = Pure f `Apply` m
@@ -97,6 +107,9 @@ instance Applicative Interact where
 
 instance Monad Interact where
   (>>=) = Bind
+
+instance MonadFix Interact where
+  mfix = MFix
 
 data Element = MkElement String Html
 
@@ -119,8 +132,9 @@ instance Functor Event where
   {-# INLINE fmap #-}
   fmap f a = FmapEvent (quote f) a
 
-data Behavior a
-  = Behavior String
+data Behavior a where
+  Behavior :: String -> Behavior a
+  Current :: (Send a) => Reactive a -> Behavior a
 
 domEvent :: DomEvent -> Element -> Event ()
 domEvent de (MkElement elId _) = FromDomEvent elId de
@@ -128,12 +142,21 @@ domEvent de (MkElement elId _) = FromDomEvent elId de
 sample :: Event a -> Behavior b -> Event (a, b)
 sample = Sample
 
-data Reactive a = FromStepper a (Event a)
+current :: (Send a) => Reactive a -> Behavior a
+current = Current
 
-stepper :: a -> Event a -> Interact (Reactive a)
+data Reactive a where
+  FromStepper :: (Send a) => a -> Event a -> Reactive a
+  FmapReactive :: Quoted (a -> b) -> Reactive a -> Reactive b
+
+instance Functor Reactive where
+  {-# INLINE fmap #-}
+  fmap f = FmapReactive (quote f)
+
+stepper :: (Send a) => a -> Event a -> Interact (Reactive a)
 stepper = Stepper
 
-stepperM :: IO a -> Event a -> Interact (Reactive a)
+stepperM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
 stepperM = StepperM
 
 class (FromJSON (SendTy a), ToJSON (SendTy a)) => Send a where
@@ -256,6 +279,7 @@ subscribersJs (Subscribers fs os) input =
 
 data RenderState = RenderState
   { supply :: Int
+  , behaviors :: Map String Lazy.ByteString
   , eventListeners :: Map (String, DomEvent) Subscribers
   }
 
@@ -284,7 +308,7 @@ attachEventListeners =
 renderInteractHtml :: (MonadState Int m, MonadIO m, MonadFix m) => Path -> Interact Html -> m (Map ByteString RPC, Builder)
 renderInteractHtml path x = do
   s <- get
-  ((h, (fns, script)), s') <- flip runStateT RenderState{supply = s, eventListeners = mempty} . runWriterT $ go x
+  ((h, (fns, script)), s') <- flip runStateT RenderState{supply = s, behaviors = mempty, eventListeners = mempty} . runWriterT $ go x
   put $ getSupply s'
   let script' = script <> attachEventListeners (eventListeners s')
   (fns', content) <- renderHtml path script' h
@@ -352,8 +376,23 @@ renderInteractHtml path x = do
   go (StepperM getInitial eUpdate) = do
     initial <- liftIO getInitial
     pure $ FromStepper initial eUpdate
-  go (Stepper initial eUpdate) = do
+  go (Stepper initial eUpdate) =
     pure $ FromStepper initial eUpdate
+  go (MFix f) = mfix (go . f)
+
+behaviorVar :: (MonadState RenderState m) => Path -> Behavior a -> m String
+behaviorVar _ (Behavior var) = pure var
+behaviorVar path (Current ra) = go (Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
+ where
+  go :: (MonadState RenderState m, Send x) => Quoted (a -> x) -> Reactive a -> m String
+  go g (FmapReactive f ra') =
+    go (g `Expr.compose` f) ra'
+  go g (FromStepper a ea) = do
+    b <- ("behavior_" <>) <$> freshId
+    modify $ \s -> s{behaviors = Map.insert b (Json.encode $ toSendTy $ Expr.quotedValue g a) (behaviors s)}
+    subscribe <- performEventScript path $ FmapEvent g ea
+    subscribe $ Subscribers mempty [(\input -> Js [b <> " = " <> input <> ";"], mempty, mempty)]
+    pure b
 
 performEventScript :: (MonadState RenderState m) => Path -> Event a -> m (Subscribers -> m ())
 performEventScript path e =
@@ -365,7 +404,8 @@ performEventScript path e =
       temp <- ("temp_" <>) <$> freshId
       subscribe <- performEventScript path e'
       pure $ \subs -> subscribe $ Subscribers (Map.singleton fnId (path, result, temp, subs)) mempty
-    Sample e' (Behavior var) -> do
+    Sample e' b -> do
+      var <- behaviorVar path b
       temp <- ("temp_" <>) <$> freshId
       subscribe <- performEventScript path e'
       pure $ \subs ->
@@ -396,75 +436,86 @@ performEventScript path e =
             ]
 
 exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m String
-exprToJavascript ctx expr =
-  case expr of
-    Expr.Var v -> do
-      let Const v' = Expr.getCtx v ctx
-      pure v'
-    Expr.Lam body -> do
-      arg <- ("arg_" <>) <$> freshId
-      body' <- exprToJavascript (Expr.Cons (Const arg) ctx) body
-      pure $ "((" <> arg <> ") => " <> body' <> ")"
-    Expr.App f x -> do
-      f' <- exprToJavascript ctx f
-      x' <- exprToJavascript ctx x
-      pure $ f' <> "(" <> x' <> ")"
-    Expr.Int i -> pure $ show i
-    Expr.Add a b -> do
-      a' <- exprToJavascript ctx a
-      b' <- exprToJavascript ctx b
-      pure $ "(" <> a' <> " + " <> b' <> ")"
-    Expr.Bool b ->
-      if b then pure "true" else pure "false"
-    Expr.IfThenElse cond t e -> do
-      cond' <- exprToJavascript ctx cond
-      t' <- exprToJavascript ctx t
-      e' <- exprToJavascript ctx e
-      pure $ "(" <> cond' <> " ? " <> t' <> " : " <> e' <> ")"
-    Expr.Lt a b -> do
-      a' <- exprToJavascript ctx a
-      b' <- exprToJavascript ctx b
-      pure $ "(" <> a' <> " < " <> b' <> ")"
-    Expr.Case a branches -> do
-      value <- ("value_" <>) <$> freshId
-      a' <- exprToJavascript ctx a
-      result <- ("result_" <>) <$> freshId
-      (branches', Any tagged) <- runWriterT $ traverse (branchToJavascript value result ctx) branches
-      pure
-        . unlines
-        $ [ "((" <> value <> (if tagged then ".tag" else "") <> ") => {"
-          , "switch (" <> value <> ") {"
-          ]
-        <> branches'
-        <> [ "};"
-           , "return " <> result <> ";"
-           ]
-        <> ["})(" <> a' <> ")"]
-     where
-      branchToJavascript :: (MonadState s m, HasSupply s) => String -> String -> Expr.Ctx (Const String) ctx -> Expr.Branch ctx a b -> WriterT Any m (String)
-      branchToJavascript value result ctx (Expr.Branch pattern body) =
-        case pattern of
-          Expr.PDefault -> do
-            body' <- lift $ exprToJavascript ctx body
-            pure
-              $ unlines
-                [ "default:"
-                , "  result = " <> body' <> ";"
-                , "  break;"
-                ]
-          Expr.PInt i -> do
-            body' <- lift $ exprToJavascript ctx body
-            pure
-              $ unlines
-                [ "case " <> show i <> ":"
-                , "  result = " <> body' <> ";"
-                , "  break;"
-                ]
-    Expr.Char c -> do
-      pure $ show c
-    Expr.ToString -> do
-      arg <- ("arg_" <>) <$> freshId
-      pure $ "((" <> arg <> ") => JSON.stringify(" <> arg <> "))"
+exprToJavascript = go id
+ where
+  go :: (MonadState s m, HasSupply s) => (forall x. Expr.Index ctx' x -> Expr.Index ctx x) -> Expr.Ctx (Const String) ctx -> Expr.Expr ctx' a -> m String
+  go weaken ctx expr =
+    case expr of
+      Expr.Var v -> do
+        let Const v' = Expr.getCtx (weaken v) ctx
+        pure v'
+      Expr.Lam (body :: Expr.Expr (a ': ctx) b) -> do
+        arg <- ("arg_" <>) <$> freshId
+        body' <- go (\case Expr.Z -> Expr.Z; Expr.S ix -> Expr.S (weaken ix)) (Expr.Cons (Const arg :: Const String a) ctx) body
+        pure $ "((" <> arg <> ") => " <> body' <> ")"
+      Expr.App f x -> do
+        f' <- go weaken ctx f
+        x' <- go weaken ctx x
+        pure $ f' <> "(" <> x' <> ")"
+      Expr.Int i -> pure $ show i
+      Expr.Add a b -> do
+        a' <- go weaken ctx a
+        b' <- go weaken ctx b
+        pure $ "(" <> a' <> " + " <> b' <> ")"
+      Expr.Bool b ->
+        if b then pure "true" else pure "false"
+      Expr.IfThenElse cond t e -> do
+        cond' <- go weaken ctx cond
+        t' <- go weaken ctx t
+        e' <- go weaken ctx e
+        pure $ "(" <> cond' <> " ? " <> t' <> " : " <> e' <> ")"
+      Expr.Lt a b -> do
+        a' <- go weaken ctx a
+        b' <- go weaken ctx b
+        pure $ "(" <> a' <> " < " <> b' <> ")"
+      Expr.Case a branches -> do
+        value <- ("value_" <>) <$> freshId
+        a' <- go weaken ctx a
+        result <- ("result_" <>) <$> freshId
+        (branches', Any tagged) <- runWriterT $ traverse (branchToJavascript value result weaken ctx) branches
+        pure
+          . unlines
+          $ [ "((" <> value <> (if tagged then ".tag" else "") <> ") => {"
+            , "switch (" <> value <> ") {"
+            ]
+          <> branches'
+          <> [ "};"
+             , "return " <> result <> ";"
+             ]
+          <> ["})(" <> a' <> ")"]
+       where
+        branchToJavascript ::
+          (MonadState s m, HasSupply s) =>
+          String ->
+          String ->
+          (forall x. Expr.Index ctx' x -> Expr.Index ctx x) ->
+          Expr.Ctx (Const String) ctx ->
+          Expr.Branch ctx' a b ->
+          WriterT Any m (String)
+        branchToJavascript value result weaken ctx (Expr.Branch pattern body) =
+          case pattern of
+            Expr.PDefault -> do
+              body' <- lift $ go weaken ctx body
+              pure
+                $ unlines
+                  [ "default:"
+                  , "  result = " <> body' <> ";"
+                  , "  break;"
+                  ]
+            Expr.PInt i -> do
+              body' <- lift $ go weaken ctx body
+              pure
+                $ unlines
+                  [ "case " <> show i <> ":"
+                  , "  result = " <> body' <> ";"
+                  , "  break;"
+                  ]
+      Expr.Char c -> do
+        pure $ show c
+      Expr.ToString -> do
+        arg <- ("arg_" <>) <$> freshId
+        pure $ "((" <> arg <> ") => JSON.stringify(" <> arg <> "))"
+      Expr.Weaken x -> go (weaken . Expr.S) ctx x
 
 data Html
   = Html [Html]
@@ -502,7 +553,7 @@ fetch path fnId a =
 renderHtml :: (MonadState Int m) => Path -> Js -> Html -> m (Map ByteString RPC, Builder)
 renderHtml path postScript h = do
   s <- get
-  (((h', _script), rpcs), s') <- flip runStateT RenderState{supply = s, eventListeners = mempty} . runWriterT . runWriterT $ go Nothing h
+  (((h', _script), rpcs), s') <- flip runStateT RenderState{supply = s, behaviors = mempty, eventListeners = mempty} . runWriterT . runWriterT $ go Nothing h
   put $ getSupply s'
   pure (rpcs, h')
  where
@@ -565,13 +616,19 @@ renderHtml path postScript h = do
   go mId (WithScript el script) = do
     el' <- go mId el
     pure $ el' <> "<script>\n" <> Builder.byteString (ByteString.Char8.pack script) <> "</script>\n"
-  go mId (ReactiveText (FromStepper initial eString)) = do
-    textId <- maybe (("text_" <>) <$> freshId) pure mId
-    subscribe <- performEventScript path eString
-    subscribe $ Subscribers mempty [(\target -> Js [textId <> ".textContent = " <> target <> ";"], mempty, mempty)]
-    pure
-      $ ("<span id=\"" <> fromString textId <> "\">" <> fromString initial <> "</span>\n")
-      <> ("<script>const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");</script>\n")
+  go mId (ReactiveText ra) =
+    goReactive (Expr.Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
+   where
+    goReactive :: (MonadState RenderState m) => Quoted (a -> String) -> Reactive a -> m Builder
+    goReactive f (FmapReactive g r) =
+      goReactive (f `Expr.compose` g) r
+    goReactive f (FromStepper initial eString) = do
+      textId <- maybe (("text_" <>) <$> freshId) pure mId
+      subscribe <- performEventScript path $ FmapEvent f eString
+      subscribe $ Subscribers mempty [(\target -> Js [textId <> ".textContent = " <> target <> ";"], mempty, mempty)]
+      pure
+        $ ("<span id=\"" <> fromString textId <> "\">" <> fromString (Expr.quotedValue f initial) <> "</span>\n")
+        <> ("<script>const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");</script>\n")
 
 -- | [[ App ]] = Path -> Maybe Page
 newtype App = App (Map Path Page)
