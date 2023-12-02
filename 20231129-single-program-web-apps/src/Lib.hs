@@ -58,6 +58,7 @@ import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.ByteString.Lazy as ByteString.Lazy
 import qualified Data.ByteString.Lazy as Lazy
+import qualified Data.ByteString.Lazy.Char8 as ByteString.Lazy.Char8
 import Data.Foldable (fold)
 import Data.Functor (void)
 import Data.Functor.Const (Const (..))
@@ -175,7 +176,7 @@ domEvent de (MkElement elId _) = FromDomEvent elId de
 
 subscribe :: Event a -> (String -> Js) -> PageBuilder ()
 subscribe ea callback = do
-  key <- initEvent' ea
+  key <- initEvent ea
   case key of
     EventKey_Derived name -> do
       arg <- ("arg_" <>) <$> freshId
@@ -210,11 +211,23 @@ notify name = do
         , "}"
         ]
 
+newEvent :: PageBuilder String
+newEvent = do
+  name <- ("event_" <>) <$> freshId
+  appendPostScript $ Js ["const " <> name <> " = { subscribers: [] };"]
+  pure name
+
+newBehavior :: String -> PageBuilder String
+newBehavior initial = do
+  name <- ("behavior_" <>) <$> freshId
+  appendPostScript $ Js ["const " <> name <> " = " <> initial]
+  pure name
+
 sample :: Event a -> Behavior b -> Event (a, b)
 sample ea bb =
   Event $ do
     name <- newEvent
-    b <- initBehavior' bb
+    b <- initBehavior bb
     temp <- ("temp_" <>) <$> freshId
     notifyJs <- notify name
     subscribe ea $ \value ->
@@ -225,41 +238,16 @@ sample ea bb =
 current :: (Send a) => Reactive a -> Behavior a
 current = Current
 
-initBehavior' :: Behavior a -> PageBuilder String
-initBehavior' (Behavior var) = pure var
-initBehavior' (Current _ra) = pure "/* todo: initBehavior' (Current _) /*"
+initBehavior :: Behavior a -> PageBuilder String
+initBehavior (Behavior var) = pure var
+initBehavior (Current ra) = do
+  let (initial, event) = initReactive encodeSend ra
+  name <- newBehavior $ ByteString.Lazy.Char8.unpack initial
+  subscribe event $ \value -> Js [name <> " = " <> value <> ";"]
+  pure name
 
-{-
- go (Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
-where
- go :: (Send x) => Quoted (a -> x) -> Reactive a -> PageBuilder String
- go g (FmapReactive f ra') =
-   go (g `Expr.compose` f) ra'
- go g (AddrReactive addr) = do
-   mVar <- gets $ DMap.lookup addr . currents
-   case mVar of
-     -- without this caching, initBehavior/initEvent loop forever (mutually recursive)
-     Just (Const var) ->
-       pure var
-     Nothing -> do
-       result <- gets $ DMap.lookup addr . getReactives
-       case result of
-         Nothing -> error "reactive addr missing"
-         Just (StoredReactive ma ea) -> do
-           b <- ("behavior_" <>) <$> freshId
-           a <- liftIO ma
-           modify $ \s ->
-             s
-               { behaviors = Map.insert b (Json.encode $ toSendTy $ Expr.quotedValue g a) (behaviors s)
-               , currents = DMap.insert addr (Const b) (currents s)
-               }
-           subscribe <- initEvent path $ FmapEvent g ea
-           subscribe $ Subscribers mempty [(\input -> Js [b <> " = " <> input <> ";"], mempty, mempty)]
-           pure b
- -}
-
-initEvent' :: Event a -> PageBuilder EventKey
-initEvent' e =
+initEvent :: Event a -> PageBuilder EventKey
+initEvent e =
   case e of
     Event mkEvent ->
       mkEvent
@@ -371,12 +359,6 @@ setId _ a = a
 newtype Js = Js {getJs :: [String]}
   deriving (Semigroup, Monoid)
 
-newEvent :: PageBuilder String
-newEvent = do
-  name <- ("event_" <>) <$> freshId
-  appendPostScript $ Js ["const " <> name <> " = { subscribers: [] };"]
-  pure name
-
 renderInteractHtml :: Path -> Interact Html -> PageBuilder Builder
 renderInteractHtml path x = do
   h <- go x
@@ -445,10 +427,10 @@ renderInteractHtml path x = do
     pure $ Event (pure $ EventKey_Derived name)
   go (StepperM getInitial eUpdate) = do
     initial <- liftIO getInitial
-    event <- initEvent' eUpdate
+    event <- initEvent eUpdate
     pure $ Reactive initial event
   go (Stepper initial eUpdate) = do
-    event <- initEvent' eUpdate
+    event <- initEvent eUpdate
     pure $ Reactive initial event
   go (MFix f) = mfix (go . f)
 
