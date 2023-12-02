@@ -60,6 +60,19 @@ When the button is clicked, the contents of the text field are passed to the Has
 This requires interactively sampling client-side state (the content of the text field), which is
 expressed with FRP.
 
+I also wrote a GHC plugin that I use to translate simple Haskell expressions to JavaScript,
+for non-trivial FRP code that runs on the client, e.g.
+
+```haskell
+rec rCount <- stepperR (0 :: Int) $ (\((), prev) -> prev + 1) <$> sample eButtonClicked (current rCount)
+``` 
+
+Which keeps a client-side counter that's incremented via JavaScript on a button click.
+
+It all works well, except my FRP implementation has mistakes that I don't know how to fix.
+I think that's orthogonal to the validity of the project;
+the proof-of-concept still holds.
+
 Inspirations:
 
 * Shen, G., Kashiwa, S., & Kuper, L. (2023). Haschor: Functional choreographic programming for
