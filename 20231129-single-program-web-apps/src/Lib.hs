@@ -8,9 +8,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -46,10 +44,9 @@ module Lib (
 import Compiler.Plugin.Interface (Quoted (..), quote, toString)
 import qualified Compiler.Plugin.Interface as Expr
 import Control.Monad.Fix (MonadFix (..))
-import Control.Monad.State.Class (MonadState, get, gets, modify, put)
-import Control.Monad.State.Lazy (evalStateT, runState, runStateT)
+import Control.Monad.State.Class (MonadState, gets, modify)
+import Control.Monad.State.Lazy (StateT, evalStateT)
 import Control.Monad.Trans
-import Control.Monad.Writer (MonadWriter, tell)
 import Control.Monad.Writer.Lazy (WriterT, runWriterT)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Json
@@ -61,9 +58,6 @@ import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.ByteString.Lazy as ByteString.Lazy
 import qualified Data.ByteString.Lazy as Lazy
-import qualified Data.ByteString.Lazy.Char8 as ByteString.Lazy.Char8
-import Data.Dependent.Map (DMap)
-import qualified Data.Dependent.Map as DMap
 import Data.Foldable (fold)
 import Data.Functor (void)
 import Data.Functor.Const (Const (..))
@@ -75,6 +69,7 @@ import qualified Data.Map as Map
 import Data.Monoid (Any (..))
 import Data.String (IsString (..))
 import qualified Data.Text as Text
+import Data.Traversable (for)
 import Data.Type.Equality ((:~:) (..))
 import GHC.Generics (Generic)
 import Network.HTTP.Types.Method
@@ -130,10 +125,41 @@ element = Element
 textInput :: Interact (Behavior String, Element)
 textInput = TextInput
 
+data PageBuilderState = PageBuilderState
+  { pbs_supply :: Int
+  , pbs_postScript :: Js
+  , pbs_domEventSubscriptions :: Map (String, DomEvent) (String -> Js)
+  , pbs_rpcs :: Map ByteString RPC
+  }
+
+newtype PageBuilder a = PageBuilder (StateT PageBuilderState IO a)
+  deriving (Functor, Applicative, Monad, MonadState PageBuilderState, MonadFix, MonadIO)
+
+instance HasSupply PageBuilderState where
+  getSupply = pbs_supply
+  setSupply n s = s{pbs_supply = n}
+
+runPageBuilder :: PageBuilder a -> IO a
+runPageBuilder (PageBuilder ma) =
+  evalStateT
+    ma
+    PageBuilderState
+      { pbs_supply = 0
+      , pbs_postScript = mempty
+      , pbs_domEventSubscriptions = mempty
+      , pbs_rpcs = mempty
+      }
+
+appendPostScript :: Js -> PageBuilder ()
+appendPostScript js = modify $ \s -> s{pbs_postScript = pbs_postScript s <> js}
+
+data EventKey
+  = EventKey_Derived String
+  | EventKey_DomEvent String DomEvent
+
 data Event :: Type -> Type where
   FromDomEvent :: String -> DomEvent -> Event ()
-  Sample :: Event a -> Behavior b -> Event (a, b)
-  FromRequest :: Event a -> String -> Event b
+  Event :: PageBuilder EventKey -> Event a
   FmapEvent :: Quoted (a -> b) -> Event a -> Event b
 
 instance Functor Event where
@@ -147,11 +173,107 @@ data Behavior a where
 domEvent :: DomEvent -> Element -> Event ()
 domEvent de (MkElement elId _) = FromDomEvent elId de
 
+subscribe :: Event a -> (String -> Js) -> PageBuilder ()
+subscribe ea callback = do
+  key <- initEvent' ea
+  case key of
+    EventKey_Derived name -> do
+      arg <- ("arg_" <>) <$> freshId
+      appendPostScript $ Js [name <> ".subscribers.push((" <> arg <> ") => {"] <> callback arg <> Js ["})"]
+    EventKey_DomEvent elId de -> do
+      subscribeDomEvent elId de callback
+
+subscribeDomEvent :: String -> DomEvent -> (String -> Js) -> PageBuilder ()
+subscribeDomEvent elId de callback =
+  modify $ \s ->
+    s
+      { pbs_domEventSubscriptions =
+          Map.insertWith
+            (\new old -> old <> new)
+            (elId, de)
+            callback
+            (pbs_domEventSubscriptions s)
+      }
+
+notify :: String -> PageBuilder (String -> Js)
+notify name = do
+  f <- ("f_" <>) <$> freshId
+  pure
+    $ \value ->
+      Js
+        [ "for ("
+            <> f
+            <> " of "
+            <> name
+            <> ".subscribers) {"
+        , f <> "(" <> value <> ");"
+        , "}"
+        ]
+
 sample :: Event a -> Behavior b -> Event (a, b)
-sample = Sample
+sample ea bb =
+  Event $ do
+    name <- newEvent
+    b <- initBehavior' bb
+    temp <- ("temp_" <>) <$> freshId
+    notifyJs <- notify name
+    subscribe ea $ \value ->
+      Js ["const " <> temp <> " = { fst: " <> value <> ", snd: " <> b <> " };"]
+        <> notifyJs temp
+    pure $ EventKey_Derived name
 
 current :: (Send a) => Reactive a -> Behavior a
 current = Current
+
+initBehavior' :: Behavior a -> PageBuilder String
+initBehavior' (Behavior var) = pure var
+initBehavior' (Current _ra) = pure "/* todo: initBehavior' (Current _) /*"
+
+{-
+ go (Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
+where
+ go :: (Send x) => Quoted (a -> x) -> Reactive a -> PageBuilder String
+ go g (FmapReactive f ra') =
+   go (g `Expr.compose` f) ra'
+ go g (AddrReactive addr) = do
+   mVar <- gets $ DMap.lookup addr . currents
+   case mVar of
+     -- without this caching, initBehavior/initEvent loop forever (mutually recursive)
+     Just (Const var) ->
+       pure var
+     Nothing -> do
+       result <- gets $ DMap.lookup addr . getReactives
+       case result of
+         Nothing -> error "reactive addr missing"
+         Just (StoredReactive ma ea) -> do
+           b <- ("behavior_" <>) <$> freshId
+           a <- liftIO ma
+           modify $ \s ->
+             s
+               { behaviors = Map.insert b (Json.encode $ toSendTy $ Expr.quotedValue g a) (behaviors s)
+               , currents = DMap.insert addr (Const b) (currents s)
+               }
+           subscribe <- initEvent path $ FmapEvent g ea
+           subscribe $ Subscribers mempty [(\input -> Js [b <> " = " <> input <> ";"], mempty, mempty)]
+           pure b
+ -}
+
+initEvent' :: Event a -> PageBuilder EventKey
+initEvent' e =
+  case e of
+    Event mkEvent ->
+      mkEvent
+    FmapEvent (Quoted fExpr _) e' -> do
+      name <- newEvent
+      fJs <- exprToJavascript Expr.Nil fExpr
+      temp <- ("temp_" <>) <$> freshId
+      notifyJs <- notify name
+      subscribe e' $ \value ->
+        Js ["const " <> temp <> " = (" <> fJs <> ")(" <> value <> ");"]
+          <> notifyJs temp
+      pure $ EventKey_Derived name
+    FromDomEvent elId de ->
+      pure $ EventKey_DomEvent elId de
 
 newtype Addr a = Addr Int
   deriving (Show, Eq, Ord)
@@ -168,7 +290,7 @@ instance GCompare Addr where
 
 data Reactive a where
   FmapReactive :: Quoted (a -> b) -> Reactive a -> Reactive b
-  AddrReactive :: Addr a -> Reactive a
+  Reactive :: (Send a) => a -> EventKey -> Reactive a
 
 instance Functor Reactive where
   {-# INLINE fmap #-}
@@ -228,8 +350,8 @@ data Page
 
 newtype RPC = RPC (forall a. Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a)
 
-renderPage :: (MonadState Int m, MonadIO m, MonadFix m) => Path -> Page -> m (Map ByteString RPC, Builder)
-renderPage path (Page h) = renderHtml mempty path (Js ["<!-- no script -->"]) h
+renderPage :: Path -> Page -> PageBuilder Builder
+renderPage path (Page h) = renderHtml path h
 renderPage path (PageM h) = renderInteractHtml path h
 
 class HasSupply s where
@@ -242,12 +364,6 @@ freshId = do
   modify $ setSupply (n + 1)
   pure $ show n
 
-freshAddr :: (MonadState s m, HasSupply s) => m (Addr a)
-freshAddr = do
-  n <- gets getSupply
-  modify $ setSupply (n + 1)
-  pure $ Addr n
-
 setId :: String -> Html -> Html
 setId i (Node name attrs children) = Node name (("id", i) : attrs) children
 setId _ a = a
@@ -255,112 +371,19 @@ setId _ a = a
 newtype Js = Js {getJs :: [String]}
   deriving (Semigroup, Monoid)
 
-data Subscribers = Subscribers
-  { fetchers :: Map String (Path, String, String, Subscribers)
-  , others :: [(String -> Js, String, Subscribers)]
-  }
+newEvent :: PageBuilder String
+newEvent = do
+  name <- ("event_" <>) <$> freshId
+  appendPostScript $ Js ["const " <> name <> " = { subscribers: [] };"]
+  pure name
 
-instance Semigroup Subscribers where
-  Subscribers a b <> Subscribers a' b' = Subscribers (Map.unionWith (\(_, _, _, subs) (x, y, z, subs') -> (x, y, z, subs <> subs')) a a') (b <> b')
-
-instance Monoid Subscribers where
-  mempty = Subscribers mempty mempty
-
-hasSubscribers :: Subscribers -> Bool
-hasSubscribers (Subscribers a b) = not (Map.null a && null b)
-
-subscribersJs :: Subscribers -> String -> Js
-subscribersJs (Subscribers fs os) input =
-  Map.foldrWithKey
-    ( \fnId (path, result, temp, subscribers) rest ->
-        Js
-          [ "    fetch("
-          , "      \"" <> renderPath path <> "\","
-          , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> input <> " })}"
-          , "    )"
-          ]
-          <> ( if hasSubscribers subscribers
-                then
-                  Js
-                    [ "    .then("
-                    , "      (" <> result <> ") => {"
-                    , "        " <> result <> ".json().then((" <> temp <> ") => {"
-                    ]
-                    <> subscribersJs subscribers temp
-                    <> Js
-                      [ "        });"
-                      , "      }"
-                      , "    );"
-                      ]
-                else Js ["    ;"]
-             )
-          <> rest
-    )
-    ( foldMap
-        ( \(code, result, subscribers) ->
-            code input <> subscribersJs subscribers result
-        )
-        os
-    )
-    fs
-
-data StoredReactive a where
-  StoredReactive :: (Send a) => IO a -> Event a -> StoredReactive a
-
-data RenderState = RenderState
-  { supply :: Int
-  , behaviors :: Map String Lazy.ByteString
-  , getReactives :: DMap Addr StoredReactive
-  , setReactives :: DMap Addr StoredReactive
-  , currents :: DMap Addr (Const String)
-  -- ^ cached behavior variables generated by `current :: Reactive a -> Behavior a`
-  , eventListeners :: Map (String, DomEvent) Subscribers
-  }
-
-instance HasSupply RenderState where
-  getSupply = supply
-  setSupply s r = r{supply = s}
-
-attachEventListeners :: Map (String, DomEvent) Subscribers -> Js
-attachEventListeners =
-  Map.foldrWithKey
-    ( \(elId, de) v rest ->
-        Js
-          [ elId <> ".addEventListener("
-          , renderDomEvent de <> ","
-          , "(__ignore) => {"
-          ]
-          <> subscribersJs v "{}"
-          <> Js
-            [ "}"
-            , ");"
-            ]
-          <> rest
-    )
-    mempty
-
-renderInteractHtml :: (MonadState Int m, MonadIO m) => Path -> Interact Html -> m (Map ByteString RPC, Builder)
+renderInteractHtml :: Path -> Interact Html -> PageBuilder Builder
 renderInteractHtml path x = do
-  s <- get
-  let ((h, (fns, script)), s') =
-        flip
-          runState
-          RenderState
-            { supply = s
-            , behaviors = mempty
-            , setReactives = mempty
-            , getReactives = setReactives s'
-            , currents = mempty
-            , eventListeners = mempty
-            }
-          . runWriterT
-          $ go x
-  put $ getSupply s'
-  let script' = script <> attachEventListeners (eventListeners s')
-  (fns', content) <- renderHtml (getReactives s') path script' h
-  pure (fns <> fns', content)
+  h <- go x
+  content <- renderHtml path h
+  pure content
  where
-  go :: (MonadState RenderState m, MonadWriter (Map ByteString RPC, Js) m, MonadFix m) => Interact a -> m a
+  go :: Interact a -> PageBuilder a
   go (Pure h) = pure h
   go (Apply mf ma) = go mf <*> go ma
   go (Bind ma f) = go ma >>= go . f
@@ -398,88 +421,36 @@ renderInteractHtml path x = do
           Right a -> do
             b <- f a
             resp (encodeSend b)
+
     fnId <- ("function_" <>) <$> freshId
-    tell (Map.singleton (ByteString.Char8.pack fnId) (RPC run), mempty)
-    pure $ FromRequest ea fnId
+    modify $ \s -> s{pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
+
+    name <- newEvent
+    response <- ("response_" <>) <$> freshId
+    arg <- ("arg_" <>) <$> freshId
+    notifyJs <- notify name
+    subscribe ea $ \value ->
+      Js
+        (fetch path fnId value)
+        <> Js
+          [ ".then((" <> response <> ") => {"
+          , response <> ".json().then((" <> arg <> ") => {"
+          ]
+        <> notifyJs arg
+        <> Js
+          [ "});"
+          , "});"
+          ]
+
+    pure $ Event (pure $ EventKey_Derived name)
   go (StepperM getInitial eUpdate) = do
-    addr <- freshAddr
-    modify $ \s -> s{setReactives = DMap.insert addr (StoredReactive getInitial eUpdate) (setReactives s)}
-    pure $ AddrReactive addr
+    initial <- liftIO getInitial
+    event <- initEvent' eUpdate
+    pure $ Reactive initial event
   go (Stepper initial eUpdate) = do
-    addr <- freshAddr
-    modify $ \s -> s{setReactives = DMap.insert addr (StoredReactive (pure initial) eUpdate) (setReactives s)}
-    pure $ AddrReactive addr
+    event <- initEvent' eUpdate
+    pure $ Reactive initial event
   go (MFix f) = mfix (go . f)
-
-initBehavior :: (MonadState RenderState m, MonadIO m) => Path -> Behavior a -> m String
-initBehavior _ (Behavior var) = pure var
-initBehavior path (Current ra) = go (Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
- where
-  go :: (MonadState RenderState m, MonadIO m, Send x) => Quoted (a -> x) -> Reactive a -> m String
-  go g (FmapReactive f ra') =
-    go (g `Expr.compose` f) ra'
-  go g (AddrReactive addr) = do
-    mVar <- gets $ DMap.lookup addr . currents
-    case mVar of
-      -- without this caching, initBehavior/initEvent loop forever (mutually recursive)
-      Just (Const var) ->
-        pure var
-      Nothing -> do
-        result <- gets $ DMap.lookup addr . getReactives
-        case result of
-          Nothing -> error "reactive addr missing"
-          Just (StoredReactive ma ea) -> do
-            b <- ("behavior_" <>) <$> freshId
-            a <- liftIO ma
-            modify $ \s ->
-              s
-                { behaviors = Map.insert b (Json.encode $ toSendTy $ Expr.quotedValue g a) (behaviors s)
-                , currents = DMap.insert addr (Const b) (currents s)
-                }
-            subscribe <- initEvent path $ FmapEvent g ea
-            subscribe $ Subscribers mempty [(\input -> Js [b <> " = " <> input <> ";"], mempty, mempty)]
-            pure b
-
-initEvent :: (MonadState RenderState m, MonadIO m) => Path -> Event a -> m (Subscribers -> m ())
-initEvent path e =
-  case e of
-    FromDomEvent elId de -> do
-      pure $ \subs -> modify $ \s -> s{eventListeners = Map.insertWith (\new old -> old <> new) (elId, de) subs (eventListeners s)}
-    FromRequest e' fnId -> do
-      result <- ("result_" <>) <$> freshId
-      temp <- ("temp_" <>) <$> freshId
-      subscribe <- initEvent path e'
-      pure $ \subs -> subscribe $ Subscribers (Map.singleton fnId (path, result, temp, subs)) mempty
-    Sample e' b -> do
-      var <- initBehavior path b
-      temp <- ("temp_" <>) <$> freshId
-      subscribe <- initEvent path e'
-      pure $ \subs ->
-        subscribe
-          $ Subscribers
-            mempty
-            [
-              ( \target ->
-                  Js ["const " <> temp <> " = { fst: " <> target <> ", snd: " <> var <> "};"]
-              , temp
-              , subs
-              )
-            ]
-    FmapEvent (Quoted expr _) e' -> do
-      temp <- ("temp_" <>) <$> freshId
-      expr' <- exprToJavascript Expr.Nil expr
-      subscribe <- initEvent path e'
-      pure $ \subs ->
-        subscribe
-          $ Subscribers
-            mempty
-            [
-              ( \target ->
-                  Js ["const " <> temp <> " = " <> expr' <> "(" <> target <> ");"]
-              , temp
-              , subs
-              )
-            ]
 
 exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m String
 exprToJavascript = go id
@@ -621,34 +592,28 @@ fetch path fnId a =
   [ "    fetch("
   , "      \"" <> renderPath path <> "\","
   , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> a <> " })}"
-  , "    );"
+  , "    )"
   ]
 
-renderHtml :: (MonadState Int m, MonadIO m) => DMap Addr StoredReactive -> Path -> Js -> Html -> m (Map ByteString RPC, Builder)
-renderHtml reactives path postScript h = do
-  s <- get
-  (((h', _script), rpcs), s') <-
-    flip
-      runStateT
-      RenderState
-        { supply = s
-        , behaviors = mempty
-        , setReactives = undefined
-        , getReactives = reactives
-        , currents = mempty
-        , eventListeners = mempty
-        }
-      . runWriterT
-      . runWriterT
-      $ go Nothing h
-  put $ getSupply s'
-  pure (rpcs, h')
+renderHtml :: Path -> Html -> PageBuilder Builder
+renderHtml path h = do
+  go Nothing h
  where
-  go :: (MonadState RenderState m, MonadWriter (Map ByteString RPC) m, MonadIO m) => Maybe String -> Html -> WriterT String m Builder
+  go :: Maybe String -> Html -> PageBuilder Builder
   go _ (Html children) = do
-    (children', postScript') <- lift . runWriterT $ fold <$> traverse (go Nothing) children
-    els <- gets eventListeners
-    bs <- gets behaviors
+    children' <- fold <$> traverse (go Nothing) children
+    postScript <- gets pbs_postScript
+    domEventSubscriptions <- gets pbs_domEventSubscriptions
+    domEventSubscriptionsJs <- fmap fold . for (Map.toList domEventSubscriptions) $ \((elId, de), callback) -> do
+      arg <- ("arg_" <>) <$> freshId
+      pure
+        $ Js
+          [ elId <> ".addEventListener("
+          , renderDomEvent de <> ","
+          , "(" <> arg <> ") => {"
+          ]
+        <> callback arg
+        <> Js ["});"]
     pure
       $ "<!doctype html>\n"
       <> "<html>\n"
@@ -656,14 +621,8 @@ renderHtml reactives path postScript h = do
       <> "<script>\n"
       <> Builder.byteString
         ( ByteString.Char8.pack
-            $ postScript'
-            <> foldMap
-              (<> "\n")
-              ( getJs
-                  $ postScript
-                  <> Map.foldMapWithKey (\k v -> Js ["var " <> k <> " = " <> ByteString.Lazy.Char8.unpack v <> ";"]) bs
-                  <> attachEventListeners els
-              )
+            . foldMap (<> "\n")
+            $ getJs (postScript <> domEventSubscriptionsJs)
         )
       <> "</script>"
       <> "</html>\n"
@@ -695,7 +654,8 @@ renderHtml reactives path postScript h = do
   go mId (OnEvent element (event, action)) = do
     elId <- maybe (("element_" <>) <$> freshId) pure mId
     fnId <- ByteString.Char8.pack . ("function_" <>) <$> freshId
-    lift . tell $ Map.singleton fnId (RPC $ \_ resp -> action *> resp "")
+    arg <- ("arg_" <>) <$> freshId
+    modify $ \s -> s{pbs_rpcs = Map.insert fnId (RPC $ \_ resp -> action *> resp "") (pbs_rpcs s)}
     element' <- go (Just elId) element
     pure
       . (element' <>)
@@ -704,7 +664,7 @@ renderHtml reactives path postScript h = do
         , "const " <> fromString elId <> " = document.getElementById(\"" <> fromString elId <> "\");"
         , fromString elId <> ".addEventListener("
         , "  " <> renderDomEvent event <> ", "
-        , "  (event) => { "
+        , "  (" <> fromString arg <> ") => { "
         ]
       <> fetch path (Builder.byteString fnId) "{}"
       <> [ "  }"
@@ -714,25 +674,18 @@ renderHtml reactives path postScript h = do
   go mId (WithScript el script) = do
     el' <- go mId el
     pure $ el' <> "<script>\n" <> Builder.byteString (ByteString.Char8.pack script) <> "</script>\n"
-  go mId (ReactiveText ra) =
-    goReactive (Expr.Quoted (Expr.Lam $ Expr.Var Expr.Z) id) ra
-   where
-    goReactive :: (MonadState RenderState m, MonadIO m) => Quoted (a -> String) -> Reactive a -> m Builder
-    goReactive f (FmapReactive g r) =
-      goReactive (f `Expr.compose` g) r
-    goReactive f (AddrReactive addr) = do
-      result <- gets $ DMap.lookup addr . getReactives
-      case result of
-        Nothing ->
-          error "addr missing from reactives"
-        Just (StoredReactive getInitial eString) -> do
-          textId <- maybe (("text_" <>) <$> freshId) pure mId
-          initial <- liftIO getInitial
-          subscribe <- initEvent path $ FmapEvent f eString
-          subscribe $ Subscribers mempty [(\target -> Js [textId <> ".textContent = " <> target <> ";"], mempty, mempty)]
-          pure
-            $ ("<span id=\"" <> fromString textId <> "\">" <> fromString (Expr.quotedValue f initial) <> "</span>\n")
-            <> ("<script>const " <> fromString textId <> " = " <> "document.getElementById(\"" <> fromString textId <> "\");</script>\n")
+  go _mId (ReactiveText ra) = do
+    elId <- ("element_" <>) <$> freshId
+    let (initial, event) = initReactive ByteString.Char8.pack ra
+    subscribe event $ \value -> Js [elId <> ".textContent = " <> value <> ";"]
+    pure $ "<span id=\"" <> fromString elId <> "\">" <> Builder.byteString initial <> "</span>"
+
+initReactive :: (a -> initial) -> Reactive a -> (initial, Event a)
+initReactive = go (Expr.Quoted (Expr.Lam $ Expr.Var Expr.Z) id)
+ where
+  go :: Quoted (a -> x) -> (x -> initial) -> Reactive a -> (initial, Event x)
+  go f mk (FmapReactive g r) = go (f `Expr.compose` g) mk r
+  go f mk (Reactive a event) = (mk $ Expr.quotedValue f a, FmapEvent f (Event $ pure event))
 
 -- | [[ App ]] = Path -> Maybe Page
 newtype App = App (Map Path Page)
@@ -754,7 +707,10 @@ compile (App paths) = do
   actionsAndPages <-
     Map.traverseWithKey
       ( \path p -> do
-          (actions, content) <- flip evalStateT 0 $ renderPage ("" <> path) p
+          (actions, content) <- runPageBuilder $ do
+            p' <- renderPage ("" <> path) p
+            rpcs <- gets pbs_rpcs
+            pure (rpcs, p')
           pure
             $ if Map.null actions
               then Map.singleton methodGet (Right content)
