@@ -21,7 +21,7 @@ library
     exposed-modules:  Lib
     -- other-modules:
     -- other-extensions:
-    build-depends:    base ^>=4.18.1.0, dependent-map, mtl, prim-uniq, semialign, these, stm
+    build-depends:    base ^>=4.18.1.0, containers, dependent-map, mtl, prim-uniq, semialign, these, stm, witherable
     hs-source-dirs:   src
     default-language: Haskell2010
 
