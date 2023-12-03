@@ -77,6 +77,7 @@ import Data.Monoid (Any (..))
 import Data.String (IsString (..))
 import qualified Data.Text as Text
 import Data.Traversable (for)
+import qualified Data.Tuple as Tuple
 import Data.Type.Equality ((:~:) (..))
 import Data.Unique.Tag (RealWorld, Tag, newTag)
 import GHC.Generics (Generic)
@@ -395,7 +396,8 @@ initEvent e =
         temp <- ("temp_" <>) <$> freshId
         notifyJs <- notify name
         subscribe e' $ \value ->
-          Js ["const " <> temp <> " = (" <> fJs <> ")(" <> value <> ");"]
+          Js (Tuple.fst fJs)
+            <> Js ["const " <> temp <> " = " <> Tuple.snd fJs <> "(" <> value <> ");"]
             <> notifyJs temp
     FromDomEvent elId de ->
       pure $ EventKey_DomEvent elId de
@@ -569,55 +571,59 @@ renderInteractHtml path x = do
     Reactive <$> mkReactive initial eUpdate
   go (MFix f) = mfix (go . f)
 
-exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m String
+exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m ([String], String)
 exprToJavascript = go id
  where
-  go :: (MonadState s m, HasSupply s) => (forall x. Expr.Index ctx' x -> Expr.Index ctx x) -> Expr.Ctx (Const String) ctx -> Expr.Expr ctx' a -> m String
+  go :: (MonadState s m, HasSupply s) => (forall x. Expr.Index ctx' x -> Expr.Index ctx x) -> Expr.Ctx (Const String) ctx -> Expr.Expr ctx' a -> m ([String], String)
   go weaken ctx expr =
     case expr of
       Expr.Var v -> do
         let Const v' = Expr.getCtx (weaken v) ctx
-        pure v'
+        pure ([], v')
       Expr.Lam (body :: Expr.Expr (a ': ctx) b) -> do
         arg <- ("arg_" <>) <$> freshId
-        body' <- go (\case Expr.Z -> Expr.Z; Expr.S ix -> Expr.S (weaken ix)) (Expr.Cons (Const arg :: Const String a) ctx) body
-        pure $ "((" <> arg <> ") => " <> body' <> ")"
+        (ls, body') <- go (\case Expr.Z -> Expr.Z; Expr.S ix -> Expr.S (weaken ix)) (Expr.Cons (Const arg :: Const String a) ctx) body
+        temp <- ("temp_" <>) <$> freshId
+        pure
+          ( ["const " <> temp <> " = (" <> arg <> ") => {"]
+              <> fmap ("  " <>) (ls <> ["return " <> body' <> ";"])
+              <> ["};"]
+          , temp
+          )
       Expr.App f x -> do
-        f' <- go weaken ctx f
-        x' <- go weaken ctx x
-        pure $ f' <> "(" <> x' <> ")"
-      Expr.Int i -> pure $ show i
+        (ls, f') <- go weaken ctx f
+        (ls', x') <- go weaken ctx x
+        pure (ls <> ls', f' <> "(" <> x' <> ")")
+      Expr.Int i -> pure ([], show i)
       Expr.Add a b -> do
-        a' <- go weaken ctx a
-        b' <- go weaken ctx b
-        pure $ "(" <> a' <> " + " <> b' <> ")"
+        (ls, a') <- go weaken ctx a
+        (ls', b') <- go weaken ctx b
+        pure (ls <> ls', "(" <> a' <> " + " <> b' <> ")")
       Expr.Bool b ->
-        if b then pure "true" else pure "false"
+        if b then pure ([], "true") else pure ([], "false")
       Expr.IfThenElse cond t e -> do
-        cond' <- go weaken ctx cond
-        t' <- go weaken ctx t
-        e' <- go weaken ctx e
-        pure $ "(" <> cond' <> " ? " <> t' <> " : " <> e' <> ")"
+        (ls, cond') <- go weaken ctx cond
+        (ls', t') <- go weaken ctx t
+        (ls'', e') <- go weaken ctx e
+        pure (ls <> ls' <> ls'', "(" <> cond' <> " ? " <> t' <> " : " <> e' <> ")")
       Expr.Lt a b -> do
-        a' <- go weaken ctx a
-        b' <- go weaken ctx b
-        pure $ "(" <> a' <> " < " <> b' <> ")"
+        (ls, a') <- go weaken ctx a
+        (ls', b') <- go weaken ctx b
+        pure (ls <> ls', "(" <> a' <> " < " <> b' <> ")")
       Expr.Case a branches -> do
         value <- ("value_" <>) <$> freshId
-        a' <- go weaken ctx a
+        (ls, a') <- go weaken ctx a
         result <- ("result_" <>) <$> freshId
         (branches', Any tagged) <- runWriterT $ traverse (branchToJavascript value result weaken ctx) branches
         pure
-          . unlines
-          $ [ "((" <> value <> (if tagged then ".tag" else "") <> ") => {"
-            , "var " <> result <> ";"
-            , "switch (" <> value <> ") {"
-            ]
-          <> branches'
-          <> [ "};"
-             , "return " <> result <> ";"
-             ]
-          <> ["})(" <> a' <> ")"]
+          ( ls
+              <> ["const " <> value <> " = " <> a' <> ";"]
+              <> ["var " <> result <> ";"]
+              <> ["switch (" <> value <> (if tagged then ".tag" else "") <> ") {"]
+              <> fmap ("  " <>) (fold branches')
+              <> ["}"]
+          , result
+          )
        where
         branchToJavascript ::
           (MonadState s m, HasSupply s) =>
@@ -626,35 +632,35 @@ exprToJavascript = go id
           (forall x. Expr.Index ctx' x -> Expr.Index ctx x) ->
           Expr.Ctx (Const String) ctx ->
           Expr.Branch ctx' a b ->
-          WriterT Any m (String)
+          WriterT Any m [String]
         branchToJavascript value result weaken ctx (Expr.Branch pattern body) =
           case pattern of
             Expr.PDefault -> do
-              body' <- lift $ go weaken ctx body
+              (ls, body') <- lift $ go weaken ctx body
               pure
-                $ unlines
-                  [ "default:"
-                  , "  " <> result <> " = " <> body' <> ";"
-                  , "  break;"
-                  ]
+                $ ["default:"]
+                <> fmap ("  " <>) ls
+                <> [ "  " <> result <> " = " <> body' <> ";"
+                   , "  break;"
+                   ]
             Expr.PInt i -> do
-              body' <- lift $ go weaken ctx body
+              (ls, body') <- lift $ go weaken ctx body
               pure
-                $ unlines
-                  [ "case " <> show i <> ":"
-                  , "  " <> result <> " = " <> body' <> ";"
-                  , "  break;"
-                  ]
+                $ ["case " <> show i <> ":"]
+                <> fmap ("  " <>) ls
+                <> [ "  " <> result <> " = " <> body' <> ";"
+                   , "  break;"
+                   ]
             Expr.PUnit -> do
-              body' <- lift $ go weaken ctx body
+              (ls, body') <- lift $ go weaken ctx body
               pure
-                $ unlines
-                  [ "default:"
-                  , "  " <> result <> " = " <> body' <> ";"
-                  , "  break;"
-                  ]
+                $ ["default:"]
+                <> fmap ("  " <>) ls
+                <> [ "  " <> result <> " = " <> body' <> ";"
+                   , "  break;"
+                   ]
             Expr.PPair @ctx @a @b -> do
-              body' <-
+              (ls, body') <-
                 lift
                   $ go
                     ( \case
@@ -667,16 +673,15 @@ exprToJavascript = go id
                     (Expr.Cons (Const (value <> ".snd") :: Const String b) $ Expr.Cons (Const (value <> ".fst") :: Const String a) ctx)
                     body
               pure
-                $ unlines
-                  [ "default:"
-                  , "  " <> result <> " = " <> body' <> ";"
-                  , "  break;"
-                  ]
+                $ ["default:"]
+                <> fmap ("  " <>) ls
+                <> [ "  " <> result <> " = " <> body' <> ";"
+                   , "  break;"
+                   ]
       Expr.Char c -> do
-        pure $ show c
+        pure ([], show c)
       Expr.ToString -> do
-        arg <- ("arg_" <>) <$> freshId
-        pure $ "((" <> arg <> ") => JSON.stringify(" <> arg <> "))"
+        pure ([], "JSON.stringify")
       Expr.Weaken x -> go (weaken . Expr.S) ctx x
 
 data Html
