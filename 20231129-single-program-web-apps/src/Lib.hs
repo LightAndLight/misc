@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
@@ -67,6 +68,7 @@ import Data.Foldable (fold)
 import Data.Functor (void)
 import Data.Functor.Const (Const (..))
 import Data.GADT.Compare (GCompare (..), GEq (..), GOrdering (..))
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Kind (Type)
 import Data.List (intercalate)
 import Data.Map (Map)
@@ -84,6 +86,7 @@ import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import System.IO (hPutStrLn)
 import qualified System.IO
+import System.IO.Unsafe (unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
 
 newtype Path = Path [String]
@@ -153,7 +156,7 @@ data PageBuilderState = PageBuilderState
   , pbs_reactives :: DMap ReactiveKey ReactiveInfo
   }
 
-newtype PageBuilder a = PageBuilder (ReaderT PageBuilderEnv (StateT PageBuilderState IO) a)
+newtype PageBuilder a = PageBuilder {unPageBuilder :: ReaderT PageBuilderEnv (StateT PageBuilderState IO) a}
   deriving (Functor, Applicative, Monad, MonadState PageBuilderState, MonadReader PageBuilderEnv, MonadFix, MonadIO)
 
 instance HasSupply PageBuilderState where
@@ -161,11 +164,14 @@ instance HasSupply PageBuilderState where
   setSupply n s = s{pbs_supply = n}
 
 runPageBuilder :: PageBuilder a -> IO a
-runPageBuilder (PageBuilder ma) =
+runPageBuilder ma =
   evalStateT
     ( flip runReaderT PageBuilderEnv{pbe_writeQueueName = "/* unset */"} $ do
         name <- ("writeQueue_" <>) <$> freshId
-        local (\e -> e{pbe_writeQueueName = name}) ma
+
+        local (\e -> e{pbe_writeQueueName = name}) . unPageBuilder $ do
+          appendPostScript $ Js ["var " <> name <> " = [];"]
+          ma
     )
     PageBuilderState
       { pbs_supply = 0
@@ -237,11 +243,16 @@ data EventKey
 data Event :: Type -> Type where
   FromDomEvent :: String -> DomEvent -> Event ()
   Event :: PageBuilder EventKey -> Event a
-  FmapEvent :: Quoted (a -> b) -> Event a -> Event b
+  FmapEvent :: IORef (Maybe EventKey) -> Quoted (a -> b) -> Event a -> Event b
 
 instance Functor Event where
   {-# INLINE fmap #-}
-  fmap f a = FmapEvent (quote f) a
+  fmap f a =
+    let
+      {-# NOINLINE memoRef #-}
+      !memoRef = unsafePerformIO $ newIORef Nothing
+     in
+      FmapEvent memoRef (quote f) a
 
 data Behavior a where
   Behavior :: String -> Behavior a
@@ -256,7 +267,7 @@ subscribe ea callback = do
   case key of
     EventKey_Derived name -> do
       arg <- ("arg_" <>) <$> freshId
-      appendPostScript $ Js [name <> ".subscribers.push((" <> arg <> ") => {"] <> callback arg <> Js ["})"]
+      appendPostScript $ Js [name <> ".subscribers.push((" <> arg <> ") => {"] <> callback arg <> Js ["});"]
     EventKey_DomEvent elId de -> do
       subscribeDomEvent elId de callback
 
@@ -299,17 +310,58 @@ newBehavior initial = do
   appendPostScript $ Js ["var " <> name <> " = " <> initial]
   pure name
 
+{- |
+For example, in this code
+
+@
+do
+  rec r <- stepper initial $ sample e (current r)
+  let r' = fmap f r
+  ...
+@
+
+there's only one call to @sample e (current r)@. But without memoization,
+two @sample e (current r)@ events will be compiled: one for the event that
+updates to @current r@, and one for the event behind @fmap f r@. As a result,
+@e@ will have two subscribers instead of one. This is okay semantically, but
+it increases code size and duplicates work.
+
+Functions that call 'memoEvent' should be marked as @NOINLINE@.
+-}
+memoEvent :: (String -> PageBuilder ()) -> Event a
+memoEvent f =
+  let
+    {-# NOINLINE memoRef #-}
+    !memoRef = unsafePerformIO $ newIORef Nothing
+   in
+    Event $ memoEventWith memoRef f
+
+memoEventWith :: IORef (Maybe EventKey) -> (String -> PageBuilder ()) -> PageBuilder EventKey
+memoEventWith memoRef f = do
+  mEventKey <- liftIO $ readIORef memoRef
+  case mEventKey of
+    Nothing -> do
+      name <- newEvent
+
+      let eventKey = EventKey_Derived name
+      liftIO $ writeIORef memoRef (Just eventKey)
+
+      f name
+
+      pure eventKey
+    Just eventKey ->
+      pure eventKey
+
+{-# NOINLINE sample #-}
 sample :: Event a -> Behavior b -> Event (a, b)
 sample ea bb =
-  Event $ do
-    name <- newEvent
+  memoEvent $ \name -> do
     b <- initBehavior bb
     temp <- ("temp_" <>) <$> freshId
     notifyJs <- notify name
     subscribe ea $ \value ->
       Js ["const " <> temp <> " = { fst: " <> value <> ", snd: " <> b <> " };"]
         <> notifyJs temp
-    pure $ EventKey_Derived name
 
 current :: (Send a) => Reactive a -> Behavior a
 current = Current
@@ -322,7 +374,8 @@ initReactive r' = go (Expr.Quoted (Expr.Lam $ Expr.Var Expr.Z) id) r'
   go f (FmapReactive g r) = go (f `Expr.compose` g) r
   go f (Reactive key) = do
     ReactiveInfo initial mkEvent _ <- gets $ (DMap.! key) . pbs_reactives
-    mkReactive (Expr.quotedValue f initial) (FmapEvent f $ Event mkEvent)
+    memoRef <- liftIO $ newIORef Nothing
+    mkReactive (Expr.quotedValue f initial) (FmapEvent memoRef f $ Event mkEvent)
 
 initBehavior :: Behavior a -> PageBuilder String
 initBehavior (Behavior var) = pure var
@@ -336,15 +389,14 @@ initEvent e =
   case e of
     Event mkEvent ->
       mkEvent
-    FmapEvent (Quoted fExpr _) e' -> do
-      name <- newEvent
-      fJs <- exprToJavascript Expr.Nil fExpr
-      temp <- ("temp_" <>) <$> freshId
-      notifyJs <- notify name
-      subscribe e' $ \value ->
-        Js ["const " <> temp <> " = (" <> fJs <> ")(" <> value <> ");"]
-          <> notifyJs temp
-      pure $ EventKey_Derived name
+    FmapEvent memoRef (Quoted fExpr _) e' ->
+      memoEventWith memoRef $ \name -> do
+        fJs <- exprToJavascript Expr.Nil fExpr
+        temp <- ("temp_" <>) <$> freshId
+        notifyJs <- notify name
+        subscribe e' $ \value ->
+          Js ["const " <> temp <> " = (" <> fJs <> ")(" <> value <> ");"]
+            <> notifyJs temp
     FromDomEvent elId de ->
       pure $ EventKey_DomEvent elId de
 
@@ -678,7 +730,6 @@ renderHtml path h = do
   go :: Maybe String -> Html -> PageBuilder Builder
   go _ (Html children) = do
     writeQueueName <- asks pbe_writeQueueName
-    appendPostScript $ Js ["var " <> writeQueueName <> " = [];"]
     children' <- fold <$> traverse (go Nothing) children
     postScript <- gets pbs_postScript
     domEventSubscriptions <- gets pbs_domEventSubscriptions
