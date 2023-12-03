@@ -28,6 +28,7 @@ library
         dependent-map,
         http-types,
         mtl,
+        prim-uniq,
         some,
         text,
         wai,
