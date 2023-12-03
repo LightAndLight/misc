@@ -44,6 +44,8 @@ module Lib (
 import Compiler.Plugin.Interface (Quoted (..), quote, toString)
 import qualified Compiler.Plugin.Interface as Expr
 import Control.Monad.Fix (MonadFix (..))
+import Control.Monad.Reader (ReaderT, runReaderT)
+import Control.Monad.Reader.Class (MonadReader, asks, local)
 import Control.Monad.State.Class (MonadState, gets, modify)
 import Control.Monad.State.Lazy (StateT, evalStateT)
 import Control.Monad.Trans
@@ -141,6 +143,8 @@ data ReactiveInfo a where
     } ->
     ReactiveInfo a
 
+newtype PageBuilderEnv = PageBuilderEnv {pbe_writeQueueName :: String}
+
 data PageBuilderState = PageBuilderState
   { pbs_supply :: Int
   , pbs_postScript :: Js
@@ -149,8 +153,8 @@ data PageBuilderState = PageBuilderState
   , pbs_reactives :: DMap ReactiveKey ReactiveInfo
   }
 
-newtype PageBuilder a = PageBuilder (StateT PageBuilderState IO a)
-  deriving (Functor, Applicative, Monad, MonadState PageBuilderState, MonadFix, MonadIO)
+newtype PageBuilder a = PageBuilder (ReaderT PageBuilderEnv (StateT PageBuilderState IO) a)
+  deriving (Functor, Applicative, Monad, MonadState PageBuilderState, MonadReader PageBuilderEnv, MonadFix, MonadIO)
 
 instance HasSupply PageBuilderState where
   getSupply = pbs_supply
@@ -159,7 +163,10 @@ instance HasSupply PageBuilderState where
 runPageBuilder :: PageBuilder a -> IO a
 runPageBuilder (PageBuilder ma) =
   evalStateT
-    ma
+    ( flip runReaderT PageBuilderEnv{pbe_writeQueueName = "/* unset */"} $ do
+        name <- ("writeQueue_" <>) <$> freshId
+        local (\e -> e{pbe_writeQueueName = name}) ma
+    )
     PageBuilderState
       { pbs_supply = 0
       , pbs_postScript = mempty
@@ -197,6 +204,12 @@ reactiveInitEvent reactiveKey event = do
       }
   pure eventKey
 
+queueAction :: String -> Js -> Js
+queueAction queueName action =
+  Js [queueName <> ".push(() => {"]
+    <> action
+    <> Js ["});"]
+
 reactiveInitBehavior :: ReactiveKey a -> PageBuilder String
 reactiveInitBehavior reactiveKey = do
   ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
@@ -212,7 +225,8 @@ reactiveInitBehavior reactiveKey = do
       }
 
   eventKey <- mkEvent
-  subscribe (Event $ pure eventKey) $ \value -> Js [b <> " = " <> value <> ";"]
+  writeQueueName <- asks pbe_writeQueueName
+  subscribe (Event $ pure eventKey) $ \value -> queueAction writeQueueName (Js [b <> " = " <> value <> ";"])
 
   pure b
 
@@ -646,15 +660,29 @@ fetch path fnId a =
   , "    )"
   ]
 
+flushQueue :: String -> PageBuilder Js
+flushQueue queueName = do
+  temp <- ("temp_" <>) <$> freshId
+  pure
+    $ Js
+      [ "while (" <> queueName <> ".length > 0) {"
+      , "const " <> temp <> " = " <> queueName <> ".shift();"
+      , temp <> "();"
+      , "}"
+      ]
+
 renderHtml :: Path -> Html -> PageBuilder Builder
 renderHtml path h = do
   go Nothing h
  where
   go :: Maybe String -> Html -> PageBuilder Builder
   go _ (Html children) = do
+    writeQueueName <- asks pbe_writeQueueName
+    appendPostScript $ Js ["var " <> writeQueueName <> " = [];"]
     children' <- fold <$> traverse (go Nothing) children
     postScript <- gets pbs_postScript
     domEventSubscriptions <- gets pbs_domEventSubscriptions
+    flushQueueJs <- flushQueue writeQueueName
     domEventSubscriptionsJs <- fmap fold . for (Map.toList domEventSubscriptions) $ \((elId, de), callback) -> do
       arg <- ("arg_" <>) <$> freshId
       pure
@@ -664,6 +692,7 @@ renderHtml path h = do
           , "(" <> arg <> ") => {"
           ]
         <> callback arg
+        <> flushQueueJs
         <> Js ["});"]
     pure
       $ "<!doctype html>\n"
