@@ -25,6 +25,7 @@ library
         bytestring,
         compiler-plugin,
         containers,
+        data-fix,
         dependent-map,
         http-types,
         mtl,

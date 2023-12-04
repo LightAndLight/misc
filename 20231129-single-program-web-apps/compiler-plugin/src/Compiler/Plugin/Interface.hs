@@ -13,6 +13,8 @@
 module Compiler.Plugin.Interface (
   Quoted (..),
   Expr (..),
+  Sum (..),
+  Product (..),
   Index (..),
   Ctx (..),
   Branch (..),
@@ -23,13 +25,15 @@ module Compiler.Plugin.Interface (
   toString,
   append,
   isEmpty,
+  Quote' (..),
 ) where
 
 import Data.Kind (Type)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import GHC.Exts (noinline)
+import GHC.Exts (Coercible, Symbol, noinline)
 import GHC.Stack (HasCallStack)
+import GHC.TypeLits (KnownSymbol)
 
 data Expr :: [Type] -> Type -> Type where
   Var :: forall ctx a. Index ctx a -> Expr ctx a
@@ -42,10 +46,15 @@ data Expr :: [Type] -> Type -> Type where
   Int :: forall ctx. Int -> Expr ctx Int
   Bool :: forall ctx. Bool -> Expr ctx Bool
   Char :: forall ctx. Char -> Expr ctx Char
+  String :: forall ctx. Text -> Expr ctx Text
+  List :: forall ctx a. [Expr ctx a] -> Expr ctx [a]
   Weaken :: Expr ctx a -> Expr (b ': ctx) a
   ToString :: forall ctx a. (Show a) => Expr ctx (a -> String)
   Append :: forall ctx a. Expr ctx ([a] -> [a] -> [a])
   IsEmpty :: forall ctx a. Expr ctx ([a] -> Bool)
+  Sum :: Sum ctors -> Expr ctx (Sum ctors)
+  Product :: Product fields -> Expr ctx (Product fields)
+  Coerced :: (Coercible a b, Show a) => a -> Expr ctx b
 
 deriving instance Show (Expr ctx a)
 
@@ -61,6 +70,18 @@ data Pattern :: [Type] -> Type -> [Type] -> Type where
   PUnit :: forall ctx. Pattern ctx () ctx
 
 deriving instance Show (Pattern ctx a ctx')
+
+data Sum :: [(Symbol, Type)] -> Type where
+  Sum_Z :: (KnownSymbol ctor) => Expr ctx a -> Sum ('(ctor, a) ': ctors)
+  Sum_S :: (KnownSymbol ctor) => Sum ctors -> Sum ('(ctor, a) ': ctors)
+
+deriving instance Show (Sum ctors)
+
+data Product :: [(Symbol, Type)] -> Type where
+  Product_Nil :: Product '[]
+  Product_Cons :: (KnownSymbol field) => Expr ctx a -> Product fields -> Product ('(field, a) ': fields)
+
+deriving instance Show (Product fields)
 
 data Index :: [Type] -> Type -> Type where
   Z :: forall ctx a. Index (a ': ctx) a
@@ -105,3 +126,7 @@ append = (++)
 {-# NOINLINE isEmpty #-}
 isEmpty :: [a] -> Bool
 isEmpty = null
+
+class Quote' a where
+  type QuoteTy' a :: Type
+  quote' :: a -> Expr '[] (QuoteTy' a)

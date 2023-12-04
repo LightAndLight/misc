@@ -43,7 +43,7 @@ module Lib (
   module Network.HTTP.Types.Method,
 ) where
 
-import Compiler.Plugin.Interface (Quoted (..), quote, toString)
+import Compiler.Plugin.Interface (Product (..), Quote' (..), Quoted (..), Sum (..), quote, toString)
 import qualified Compiler.Plugin.Interface as Expr
 import Control.Monad.Fix (MonadFix (..))
 import Control.Monad.Reader (ReaderT, runReaderT)
@@ -65,7 +65,9 @@ import qualified Data.ByteString.Lazy as Lazy
 import qualified Data.ByteString.Lazy.Char8 as ByteString.Lazy.Char8
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
+import Data.Fix (Fix)
 import Data.Foldable (fold)
+import Data.Functor.Classes (Show1)
 import Data.Functor.Const (Const (..))
 import Data.GADT.Compare (GCompare (..), GEq (..), GOrdering (..))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -817,6 +819,66 @@ data Html
   | ReactiveText (Reactive Data.Text.Text)
   | ReactiveHtml (Reactive Html)
   | OnEvent Html (DomEvent, IO ())
+
+instance Quote' Data.Text.Text where
+  type QuoteTy' Data.Text.Text = Data.Text.Text
+  {-# INLINE quote' #-}
+  quote' = Expr.String
+
+instance (Quote' a) => Quote' [a] where
+  type QuoteTy' [a] = [QuoteTy' a]
+  {-# INLINE quote' #-}
+  quote' = Expr.List . fmap quote'
+
+instance (Quote' a, Quote' b) => Quote' (a, b) where
+  type QuoteTy' (a, b) = Product '[ '("fst", Expr.Expr '[] (QuoteTy' a)), '("snd", Expr.Expr '[] (QuoteTy' b))]
+  {-# INLINE quote' #-}
+  quote' (a, b) =
+    Expr.Product
+      ( Product_Cons @"fst" (quote' a)
+          $ Product_Cons @"snd" (quote' b)
+          $ Product_Nil
+      )
+
+newtype QuotedHtml ctx
+  = QuotedHtml
+      ( Expr.Expr
+          ctx
+          ( Sum
+              '[ '("Html", QuoteTy' [Html])
+               , '( "Node"
+                  , Product
+                      '[ '("name", QuoteTy' Data.Text.Text)
+                       , '("attrs", QuoteTy' [(Data.Text.Text, Data.Text.Text)])
+                       , '("children", QuoteTy' [Html])
+                       ]
+                  )
+               ]
+          )
+      )
+  deriving (Show)
+
+instance Quote' Html where
+  type QuoteTy' Html = QuotedHtml
+  {-# INLINE quote' #-}
+  quote' (Html children) =
+    Expr.Coerced (QuotedHtml $ Sum_Z @"Html" $ quote' children)
+  quote' (Node name attrs children) =
+    Expr.Coerced
+      ( QuotedHtml
+          . Sum_S
+          . Sum_Z
+          . Expr.Product
+          $ Product_Cons (quote' name)
+          $ Product_Cons (quote' attrs)
+          $ Product_Cons (quote' children)
+          $ Product_Nil
+      )
+
+instance Quote' (a -> b) where
+  type QuoteTy' (a -> b) = (a -> b)
+  {-# INLINE quote' #-}
+  quote' f = quotedCode (quote f)
 
 data DomEvent
   = Click
