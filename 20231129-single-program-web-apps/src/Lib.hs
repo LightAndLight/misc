@@ -214,7 +214,7 @@ reactiveInitEvent reactiveKey event = do
 queueAction :: String -> Js -> Js
 queueAction queueName action =
   Js [queueName <> ".push(() => {"]
-    <> action
+    <> indent 2 action
     <> Js ["});"]
 
 reactiveInitBehavior :: ReactiveKey a -> PageBuilder String
@@ -297,7 +297,7 @@ subscribe ea callback = do
   case key of
     EventKey_Derived name -> do
       arg <- ("arg_" <>) <$> freshId
-      appendPostScript $ Js [name <> ".subscribers.push((" <> arg <> ") => {"] <> callback arg <> Js ["});"]
+      appendPostScript $ Js [name <> ".subscribers.push((" <> arg <> ") => {"] <> indent 2 (callback arg) <> Js ["});"]
     EventKey_DomEvent elId de -> do
       subscribeDomEvent elId de callback
 
@@ -324,9 +324,9 @@ notify name = do
             <> " of "
             <> name
             <> ".subscribers) {"
-        , f <> "(" <> value <> ");"
-        , "}"
         ]
+        <> indent 2 (Js [f <> "(" <> value <> ");"])
+        <> Js ["}"]
 
 newEvent :: PageBuilder String
 newEvent = do
@@ -394,7 +394,11 @@ current = Current
 
 initReactive :: (Send a) => Reactive a -> PageBuilder (ReactiveKey a)
 initReactive (Reactive key) = pure key
-initReactive r' = go (Expr.Quoted (Expr.Lam $ Expr.Var Expr.Z) id) r'
+initReactive (FmapReactive f (Reactive key)) = do
+  ReactiveInfo initial mkEvent _ <- gets $ (DMap.! key) . pbs_reactives
+  memoRef <- liftIO newMemoRef
+  mkReactive (Expr.quotedValue f initial) (FmapEvent memoRef f $ Event mkEvent)
+initReactive (FmapReactive f' r'@FmapReactive{}) = go f' r'
  where
   go :: (Send x) => Quoted (a -> x) -> Reactive a -> PageBuilder (ReactiveKey x)
   go f (FmapReactive g r) = go (f `Expr.compose` g) r
@@ -421,7 +425,7 @@ initEvent e =
         temp <- ("temp_" <>) <$> freshId
         notifyJs <- notify name
         subscribe e' $ \value ->
-          Js (Tuple.fst fJs)
+          Tuple.fst fJs
             <> Js ["const " <> temp <> " = " <> Tuple.snd fJs <> "(" <> value <> ");"]
             <> notifyJs temp
     FromDomEvent elId de ->
@@ -523,6 +527,9 @@ setId _ a = a
 newtype Js = Js {getJs :: [String]}
   deriving (Show, Semigroup, Monoid)
 
+indent :: Int -> Js -> Js
+indent n (Js ls) = Js (fmap (replicate n ' ' <>) ls)
+
 renderInteractHtml :: Path -> Interact Html -> PageBuilder Builder
 renderInteractHtml path x = do
   h <- go x
@@ -593,15 +600,14 @@ renderInteractHtml path x = do
     subscribe ea $ \value ->
       Js
         (fetch path fnId value)
-        <> Js
-          [ ".then((" <> response <> ") => {"
-          , response <> ".json().then((" <> arg <> ") => {"
-          ]
-        <> notifyJs arg
-        <> Js
-          [ "});"
-          , "});"
-          ]
+        <> Js [".then((" <> response <> ") => {"]
+        <> indent
+          2
+          ( Js [response <> ".json().then((" <> arg <> ") => {"]
+              <> indent 2 (notifyJs arg)
+              <> Js ["});"]
+          )
+        <> Js ["});"]
 
     pure $ Event (pure $ EventKey_Derived name)
   go (StepperM getInitial eUpdate) = do
@@ -611,36 +617,36 @@ renderInteractHtml path x = do
     Reactive <$> mkReactive initial eUpdate
   go (MFix f) = mfix (go . f)
 
-exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m ([String], String)
+exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m (Js, String)
 exprToJavascript = go id
  where
-  go :: (MonadState s m, HasSupply s) => (forall x. Expr.Index ctx' x -> Expr.Index ctx x) -> Expr.Ctx (Const String) ctx -> Expr.Expr ctx' a -> m ([String], String)
+  go :: (MonadState s m, HasSupply s) => (forall x. Expr.Index ctx' x -> Expr.Index ctx x) -> Expr.Ctx (Const String) ctx -> Expr.Expr ctx' a -> m (Js, String)
   go weaken ctx expr =
     case expr of
       Expr.Var v -> do
         let Const v' = Expr.getCtx (weaken v) ctx
-        pure ([], v')
+        pure (mempty, v')
       Expr.Lam (body :: Expr.Expr (a ': ctx) b) -> do
         arg <- ("arg_" <>) <$> freshId
         (ls, body') <- go (\case Expr.Z -> Expr.Z; Expr.S ix -> Expr.S (weaken ix)) (Expr.Cons (Const arg :: Const String a) ctx) body
         temp <- ("temp_" <>) <$> freshId
         pure
-          ( ["const " <> temp <> " = (" <> arg <> ") => {"]
-              <> fmap ("  " <>) (ls <> ["return " <> body' <> ";"])
-              <> ["};"]
+          ( Js ["const " <> temp <> " = (" <> arg <> ") => {"]
+              <> indent 2 (ls <> Js ["return " <> body' <> ";"])
+              <> Js ["};"]
           , temp
           )
       Expr.App f x -> do
         (ls, f') <- go weaken ctx f
         (ls', x') <- go weaken ctx x
         pure (ls <> ls', f' <> "(" <> x' <> ")")
-      Expr.Int i -> pure ([], show i)
+      Expr.Int i -> pure (mempty, show i)
       Expr.Add a b -> do
         (ls, a') <- go weaken ctx a
         (ls', b') <- go weaken ctx b
         pure (ls <> ls', "(" <> a' <> " + " <> b' <> ")")
       Expr.Bool b ->
-        if b then pure ([], "true") else pure ([], "false")
+        if b then pure (mempty, "true") else pure (mempty, "false")
       Expr.IfThenElse cond t e -> do
         (ls, cond') <- go weaken ctx cond
         (ls', t') <- go weaken ctx t
@@ -657,11 +663,11 @@ exprToJavascript = go id
         (branches', Any tagged) <- runWriterT $ traverse (branchToJavascript value result weaken ctx) branches
         pure
           ( ls
-              <> ["const " <> value <> " = " <> a' <> ";"]
-              <> ["var " <> result <> ";"]
-              <> ["switch (" <> value <> (if tagged then ".tag" else "") <> ") {"]
-              <> fmap ("  " <>) (fold branches')
-              <> ["}"]
+              <> Js ["const " <> value <> " = " <> a' <> ";"]
+              <> Js ["var " <> result <> ";"]
+              <> Js ["switch (" <> value <> (if tagged then ".tag" else "") <> ") {"]
+              <> indent 2 (fold branches')
+              <> Js ["}"]
           , result
           )
        where
@@ -672,33 +678,45 @@ exprToJavascript = go id
           (forall x. Expr.Index ctx' x -> Expr.Index ctx x) ->
           Expr.Ctx (Const String) ctx ->
           Expr.Branch ctx' a b ->
-          WriterT Any m [String]
+          WriterT Any m Js
         branchToJavascript value result weaken ctx (Expr.Branch pattern body) =
           case pattern of
             Expr.PDefault -> do
               (ls, body') <- lift $ go weaken ctx body
               pure
-                $ ["default:"]
-                <> fmap ("  " <>) ls
-                <> [ "  " <> result <> " = " <> body' <> ";"
-                   , "  break;"
-                   ]
+                $ Js ["default:"]
+                <> indent
+                  2
+                  ( ls
+                      <> Js
+                        [ result <> " = " <> body' <> ";"
+                        , "break;"
+                        ]
+                  )
             Expr.PInt i -> do
               (ls, body') <- lift $ go weaken ctx body
               pure
-                $ ["case " <> show i <> ":"]
-                <> fmap ("  " <>) ls
-                <> [ "  " <> result <> " = " <> body' <> ";"
-                   , "  break;"
-                   ]
+                $ Js ["case " <> show i <> ":"]
+                <> indent
+                  2
+                  ( ls
+                      <> Js
+                        [ result <> " = " <> body' <> ";"
+                        , "break;"
+                        ]
+                  )
             Expr.PUnit -> do
               (ls, body') <- lift $ go weaken ctx body
               pure
-                $ ["default:"]
-                <> fmap ("  " <>) ls
-                <> [ "  " <> result <> " = " <> body' <> ";"
-                   , "  break;"
-                   ]
+                $ Js ["default:"]
+                <> indent
+                  2
+                  ( ls
+                      <> Js
+                        [ result <> " = " <> body' <> ";"
+                        , "break;"
+                        ]
+                  )
             Expr.PPair @ctx @a @b -> do
               (ls, body') <-
                 lift
@@ -713,15 +731,19 @@ exprToJavascript = go id
                     (Expr.Cons (Const (value <> ".snd") :: Const String b) $ Expr.Cons (Const (value <> ".fst") :: Const String a) ctx)
                     body
               pure
-                $ ["default:"]
-                <> fmap ("  " <>) ls
-                <> [ "  " <> result <> " = " <> body' <> ";"
-                   , "  break;"
-                   ]
+                $ Js ["default:"]
+                <> indent
+                  2
+                  ( ls
+                      <> Js
+                        [ "" <> result <> " = " <> body' <> ";"
+                        , "break;"
+                        ]
+                  )
       Expr.Char c -> do
-        pure ([], show c)
+        pure (mempty, show c)
       Expr.ToString -> do
-        pure ([], "JSON.stringify")
+        pure (mempty, "JSON.stringify")
       Expr.Weaken x -> go (weaken . Expr.S) ctx x
 
 data Html
@@ -751,22 +773,25 @@ renderPath (Path segments) = go segments
 
 fetch :: (IsString s, Monoid s) => Path -> s -> s -> [s]
 fetch path fnId a =
-  [ "    fetch("
-  , "      \"" <> renderPath path <> "\","
-  , "      { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> a <> " })}"
-  , "    )"
+  [ "fetch("
+  , "  \"" <> renderPath path <> "\","
+  , "  { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> a <> " })}"
+  , ")"
   ]
 
 flushQueue :: String -> PageBuilder Js
 flushQueue queueName = do
   temp <- ("temp_" <>) <$> freshId
   pure
-    $ Js
-      [ "while (" <> queueName <> ".length > 0) {"
-      , "const " <> temp <> " = " <> queueName <> ".shift();"
-      , temp <> "();"
-      , "}"
-      ]
+    $ Js ["while (" <> queueName <> ".length > 0) {"]
+    <> indent
+      2
+      ( Js
+          [ "const " <> temp <> " = " <> queueName <> ".shift();"
+          , temp <> "();"
+          ]
+      )
+    <> Js ["}"]
 
 renderHtml :: Path -> Html -> PageBuilder Builder
 renderHtml path h = do
@@ -783,13 +808,21 @@ renderHtml path h = do
       arg <- ("arg_" <>) <$> freshId
       pure
         $ Js
-          [ elId <> ".addEventListener("
-          , renderDomEvent de <> ","
-          , "(" <> arg <> ") => {"
-          ]
-        <> callback arg
-        <> flushQueueJs
-        <> Js ["});"]
+          [elId <> ".addEventListener("]
+        <> indent
+          2
+          ( Js
+              [ renderDomEvent de <> ","
+              , "(" <> arg <> ") => {"
+              ]
+              <> indent
+                2
+                ( callback arg
+                    <> flushQueueJs
+                )
+              <> Js ["}"]
+          )
+        <> Js [");"]
     pure
       $ "<!doctype html>\n"
       <> "<html>\n"
@@ -842,7 +875,7 @@ renderHtml path h = do
         , "  " <> renderDomEvent event <> ", "
         , "  (" <> fromString arg <> ") => { "
         ]
-      <> fetch path (Builder.byteString fnId) "{}"
+      <> fmap ("  " <>) (fetch path (Builder.byteString fnId) "{}")
       <> [ "  }"
          , ");"
          , "</script>"
