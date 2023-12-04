@@ -32,6 +32,8 @@ data Env = Env
   { quoteVar :: Id
   , quotedCtor :: Id
   , toStringVar :: Id
+  , appendVar :: Id
+  , isEmptyVar :: Id
   , undefinedVar :: Id
   , exprIntCtor :: Id
   , exprLamCtor :: Id
@@ -44,6 +46,8 @@ data Env = Env
   , exprCaseCtor :: Id
   , exprCharCtor :: Id
   , exprToStringCtor :: Id
+  , exprAppendCtor :: Id
+  , exprIsEmptyCtor :: Id
   , branchTyCon :: TyCon
   , branchBranchCtor :: Id
   , patternPDefaultCtor :: Id
@@ -66,6 +70,8 @@ plugin =
         quoteVar <- findVar "Compiler.Plugin.Interface" "quote"
         quotedCtor <- findCtor "Compiler.Plugin.Interface" "Quoted"
         toStringVar <- findVar "Compiler.Plugin.Interface" "toString"
+        appendVar <- findVar "Compiler.Plugin.Interface" "append"
+        isEmptyVar <- findVar "Compiler.Plugin.Interface" "isEmpty"
         exprIntCtor <- findCtor "Compiler.Plugin.Interface" "Int"
         exprLamCtor <- findCtor "Compiler.Plugin.Interface" "Lam"
         exprAppCtor <- findCtor "Compiler.Plugin.Interface" "App"
@@ -77,6 +83,8 @@ plugin =
         exprCaseCtor <- findCtor "Compiler.Plugin.Interface" "Case"
         exprCharCtor <- findCtor "Compiler.Plugin.Interface" "Char"
         exprToStringCtor <- findCtor "Compiler.Plugin.Interface" "ToString"
+        exprAppendCtor <- findCtor "Compiler.Plugin.Interface" "Append"
+        exprIsEmptyCtor <- findCtor "Compiler.Plugin.Interface" "IsEmpty"
         branchBranchCtor <- findCtor "Compiler.Plugin.Interface" "Branch"
         branchTyCon <- findTyCon "Compiler.Plugin.Interface" "Branch"
         patternPDefaultCtor <- findCtor "Compiler.Plugin.Interface" "PDefault"
@@ -92,6 +100,8 @@ plugin =
                 { quoteVar
                 , quotedCtor
                 , toStringVar
+                , appendVar
+                , isEmptyVar
                 , undefinedVar
                 , exprIntCtor
                 , exprLamCtor
@@ -104,6 +114,8 @@ plugin =
                 , exprCaseCtor
                 , exprCharCtor
                 , exprToStringCtor
+                , exprAppendCtor
+                , exprIsEmptyCtor
                 , branchTyCon
                 , branchBranchCtor
                 , patternPDefaultCtor
@@ -317,6 +329,26 @@ pass env = bindsOnlyPass $ \binds ->
             [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
             , Core.Type ty
             , dict
+            ]
+  --  append
+  quoteCoreExpr _localBinds context expr@Core.App{}
+    | (Core.Var f, [Core.Type ty]) <- collectArgs expr
+    , f == appendVar env = do
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprAppendCtor env)
+            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+            , Core.Type ty
+            ]
+  --  isEmpty
+  quoteCoreExpr _localBinds context expr@Core.App{}
+    | (Core.Var f, [Core.Type ty]) <- collectArgs expr
+    , f == isEmptyVar env = do
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprIsEmptyCtor env)
+            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+            , Core.Type ty
             ]
   quoteCoreExpr localBinds context (Core.Var var) = do
     let u = unfoldingInfo $ idInfo var

@@ -47,6 +47,7 @@ executable single-program-web-apps
         compiler-plugin,
         random,
         single-program-web-apps,
+        text,
         time
 
     hs-source-dirs:   app

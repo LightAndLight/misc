@@ -36,6 +36,7 @@ module Lib (
   perform,
   request,
   toString,
+  Expr.isEmpty,
   Html (..),
   href,
   DomEvent (..),
@@ -74,7 +75,9 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Monoid (Any (..))
 import Data.String (IsString (..))
+import qualified Data.Text
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding
 import Data.Traversable (for)
 import qualified Data.Tuple as Tuple
 import Data.Type.Equality ((:~:) (..))
@@ -92,8 +95,8 @@ import Unsafe.Coerce (unsafeCoerce)
 newtype Path = Path [String]
   deriving (Eq, Ord, Semigroup, Monoid, Show)
 
-href :: Path -> (String, String)
-href (Path segments) = ("href", intercalate "/" segments)
+href :: Path -> (Data.Text.Text, Data.Text.Text)
+href (Path segments) = ("href", Data.Text.pack $ intercalate "/" segments)
 
 instance IsString Path where
   fromString = Path . pure
@@ -102,7 +105,7 @@ data Interact :: Type -> Type where
   Pure :: a -> Interact a
   Apply :: Interact (a -> b) -> Interact a -> Interact b
   Bind :: Interact a -> (a -> Interact b) -> Interact b
-  TextInput :: Interact (Behavior String, Element)
+  TextInput :: Interact (Behavior Data.Text.Text, Element)
   Element :: Html -> Interact Element
   DomEvent :: DomEvent -> Element -> Interact (Event ())
   Perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
@@ -124,7 +127,7 @@ instance Monad Interact where
 instance MonadFix Interact where
   mfix = MFix
 
-data Element = MkElement String Html
+data Element = MkElement Data.Text.Text Html
 
 html :: Element -> Html
 html (MkElement _ a) = a
@@ -132,7 +135,7 @@ html (MkElement _ a) = a
 element :: Html -> Interact Element
 element = Element
 
-textInput :: Interact (Behavior String, Element)
+textInput :: Interact (Behavior Data.Text.Text, Element)
 textInput = TextInput
 
 newtype ReactiveKey a = ReactiveKey (Tag RealWorld a)
@@ -147,12 +150,15 @@ data ReactiveInfo a where
     } ->
     ReactiveInfo a
 
-newtype PageBuilderEnv = PageBuilderEnv {pbe_writeQueueName :: String}
+data PageBuilderEnv = PageBuilderEnv
+  { pbe_writeQueueName :: String
+  , pbe_mkNodeName :: String
+  }
 
 data PageBuilderState = PageBuilderState
   { pbs_supply :: Int
   , pbs_postScript :: Js
-  , pbs_domEventSubscriptions :: Map (String, DomEvent) (String -> Js)
+  , pbs_domEventSubscriptions :: Map (Data.Text.Text, DomEvent) (String -> Js)
   , pbs_rpcs :: Map ByteString RPC
   , pbs_reactives :: DMap ReactiveKey ReactiveInfo
   }
@@ -167,12 +173,24 @@ instance HasSupply PageBuilderState where
 runPageBuilder :: PageBuilder a -> IO a
 runPageBuilder ma =
   evalStateT
-    ( flip runReaderT PageBuilderEnv{pbe_writeQueueName = "/* unset */"} $ do
-        name <- ("writeQueue_" <>) <$> freshId
+    ( flip
+        runReaderT
+        PageBuilderEnv
+          { pbe_writeQueueName = "/* unset */"
+          , pbe_mkNodeName = "/* unset */"
+          }
+        $ do
+          writeQueueName <- ("writeQueue_" <>) <$> freshId
+          mkNodeName <- ("mkNode_" <>) <$> freshId
 
-        local (\e -> e{pbe_writeQueueName = name}) . unPageBuilder $ do
-          appendPostScript $ Js ["var " <> name <> " = [];"]
-          ma
+          local (\e -> e{pbe_writeQueueName = writeQueueName, pbe_mkNodeName = mkNodeName}) . unPageBuilder $ do
+            appendPostScript $ Js ["var " <> writeQueueName <> " = [];"]
+            appendPostScript
+              $ Js
+                [ "function " <> mkNodeName <> "(node) {"
+                , "}"
+                ]
+            ma
     )
     PageBuilderState
       { pbs_supply = 0
@@ -184,19 +202,6 @@ runPageBuilder ma =
 
 appendPostScript :: Js -> PageBuilder ()
 appendPostScript js = modify $ \s -> s{pbs_postScript = pbs_postScript s <> js}
-
-mkReactive :: (Send a) => a -> Event a -> PageBuilder (ReactiveKey a)
-mkReactive initial eUpdate = do
-  key <- liftIO $ ReactiveKey <$> newTag
-  modify $ \s ->
-    s
-      { pbs_reactives =
-          DMap.insert
-            key
-            (ReactiveInfo initial (reactiveInitEvent key eUpdate) (reactiveInitBehavior key))
-            (pbs_reactives s)
-      }
-  pure key
 
 reactiveInitEvent :: ReactiveKey a -> Event a -> PageBuilder EventKey
 reactiveInitEvent reactiveKey event = do
@@ -239,7 +244,7 @@ reactiveInitBehavior reactiveKey = do
 
 data EventKey
   = EventKey_Derived String
-  | EventKey_DomEvent String DomEvent
+  | EventKey_DomEvent Data.Text.Text DomEvent
 
 newtype MemoRef a = MemoRef (IORef (MemoMaybe a))
 
@@ -276,7 +281,7 @@ setMemoRef :: MemoRef a -> a -> IO ()
 setMemoRef (MemoRef ref) a = writeIORef ref (MemoJust a)
 
 data Event :: Type -> Type where
-  FromDomEvent :: String -> DomEvent -> Event ()
+  FromDomEvent :: Data.Text.Text -> DomEvent -> Event ()
   Event :: PageBuilder EventKey -> Event a
   FmapEvent :: MemoRef EventKey -> Quoted (a -> b) -> Event a -> Event b
 
@@ -301,7 +306,7 @@ subscribe ea callback = do
     EventKey_DomEvent elId de -> do
       subscribeDomEvent elId de callback
 
-subscribeDomEvent :: String -> DomEvent -> (String -> Js) -> PageBuilder ()
+subscribeDomEvent :: Data.Text.Text -> DomEvent -> (String -> Js) -> PageBuilder ()
 subscribeDomEvent elId de callback =
   modify $ \s ->
     s
@@ -407,6 +412,19 @@ initReactive (FmapReactive f' r'@FmapReactive{}) = go f' r'
     memoRef <- liftIO newMemoRef
     mkReactive (Expr.quotedValue f initial) (FmapEvent memoRef f $ Event mkEvent)
 
+mkReactive :: (Send a) => a -> Event a -> PageBuilder (ReactiveKey a)
+mkReactive initial eUpdate = do
+  key <- liftIO $ ReactiveKey <$> newTag
+  modify $ \s ->
+    s
+      { pbs_reactives =
+          DMap.insert
+            key
+            (ReactiveInfo initial (reactiveInitEvent key eUpdate) (reactiveInitBehavior key))
+            (pbs_reactives s)
+      }
+  pure key
+
 initBehavior :: Behavior a -> PageBuilder String
 initBehavior (Behavior var) = pure var
 initBehavior (Current ra) = do
@@ -473,8 +491,8 @@ instance Send Int where
   fromSendTy = id
   toSendTy = id
 
-instance Send String where
-  type SendTy String = String
+instance Send Data.Text.Text where
+  type SendTy Data.Text.Text = Data.Text.Text
   fromSendTy = id
   toSendTy = id
 
@@ -483,10 +501,50 @@ instance (Send a, Send b) => Send (a, b) where
   fromSendTy (SendPair a b) = (fromSendTy a, fromSendTy b)
   toSendTy (a, b) = SendPair (toSendTy a) (toSendTy b)
 
+instance (Send a) => Send [a] where
+  type SendTy [a] = [SendTy a]
+  fromSendTy = fmap fromSendTy
+  toSendTy = fmap toSendTy
+
 data SendPair a b = SendPair {fst :: a, snd :: b}
   deriving (Generic)
 instance (FromJSON a, FromJSON b) => FromJSON (SendPair a b)
 instance (ToJSON a, ToJSON b) => ToJSON (SendPair a b)
+
+newtype SendHtml = SendHtml Html
+
+instance Send Html where
+  type SendTy Html = SendHtml
+  fromSendTy (SendHtml h) = h
+  toSendTy = SendHtml
+
+instance ToJSON SendHtml where
+  toJSON (SendHtml h) =
+    case h of
+      Node name attrs children ->
+        Json.object
+          [ "tag" Json..= ("Node" :: Data.Text.Text)
+          , "arg"
+              Json..= [ Json.toJSON name
+                      , Json.toJSON attrs
+                      , Json.toJSON $ fmap toSendTy children
+                      ]
+          ]
+      _ ->
+        error "TODO: toEncoding for SendHtml"
+
+instance FromJSON SendHtml where
+  parseJSON = Json.withObject "SendHtml" $ \obj -> do
+    tag :: Data.Text.Text <- obj Json..: "tag"
+    case tag of
+      "Node" -> do
+        arg :: [Json.Value] <- obj Json..: "arg"
+        fmap SendHtml
+          $ Node
+          <$> Json.parseJSON (arg !! 0)
+          <*> Json.parseJSON (arg !! 1)
+          <*> fmap fromSendTy (Json.parseJSON (arg !! 2))
+      _ -> fail $ "invalid tag: " <> Data.Text.unpack tag
 
 decodeSend :: (Send a) => Lazy.ByteString -> Either String a
 decodeSend = fmap fromSendTy . Json.eitherDecode'
@@ -520,7 +578,7 @@ freshId = do
   modify $ setSupply (n + 1)
   pure $ show n
 
-setId :: String -> Html -> Html
+setId :: Data.Text.Text -> Html -> Html
 setId i (Node name attrs children) = Node name (("id", i) : attrs) children
 setId _ a = a
 
@@ -544,8 +602,8 @@ renderInteractHtml path x = do
     behaviorId <- ("behavior_" <>) <$> freshId
     pure
       ( Behavior behaviorId
-      , MkElement elId
-          $ Node "input" [("id", elId), ("type", "text")] []
+      , MkElement (fromString elId)
+          $ Node "input" [("id", fromString elId), ("type", "text")] []
           `WithScript` unlines
             [ "const " <> elId <> " = document.getElementById(\"" <> elId <> "\");"
             , "var " <> behaviorId <> " = \"\";"
@@ -559,7 +617,10 @@ renderInteractHtml path x = do
       )
   go (Element h) = do
     elId <- ("element_" <>) <$> freshId
-    pure $ MkElement elId $ setId elId h `WithScript` ("const " <> elId <> " = document.getElementById(\"" <> elId <> "\");")
+    pure
+      . MkElement (fromString elId)
+      $ setId (fromString elId) h
+      `WithScript` ("const " <> elId <> " = document.getElementById(\"" <> elId <> "\");")
   go (DomEvent de (MkElement elId _)) =
     pure $ FromDomEvent elId de
   go (Perform ea f) = do
@@ -744,14 +805,17 @@ exprToJavascript = go id
         pure (mempty, show c)
       Expr.ToString -> do
         pure (mempty, "JSON.stringify")
+      Expr.Append -> do
+        pure (mempty, "((a, b) => [...a, ...b])")
       Expr.Weaken x -> go (weaken . Expr.S) ctx x
 
 data Html
   = Html [Html]
-  | Node String [(String, String)] [Html]
+  | Node Data.Text.Text [(Data.Text.Text, Data.Text.Text)] [Html]
   | WithScript Html String
-  | Text String
-  | ReactiveText (Reactive String)
+  | Text Data.Text.Text
+  | ReactiveText (Reactive Data.Text.Text)
+  | ReactiveHtml (Reactive Html)
   | OnEvent Html (DomEvent, IO ())
 
 data DomEvent
@@ -808,7 +872,7 @@ renderHtml path h = do
       arg <- ("arg_" <>) <$> freshId
       pure
         $ Js
-          [elId <> ".addEventListener("]
+          [Data.Text.unpack elId <> ".addEventListener("]
         <> indent
           2
           ( Js
@@ -836,7 +900,7 @@ renderHtml path h = do
       <> "</script>"
       <> "</html>\n"
   go mId (Node name attrs children) = do
-    let nameBytes = ByteString.Char8.pack name
+    let nameBytes = Data.Text.Encoding.encodeUtf8 name
     children' <- fold <$> traverse (go Nothing) children
     pure
       $ "<"
@@ -846,8 +910,8 @@ renderHtml path h = do
         ( maybe [] (pure . (,) "id" . fromString) mId
             <> fmap
               ( bimap
-                  (Builder.byteString . ByteString.Char8.pack)
-                  (Builder.byteString . ByteString.Char8.pack)
+                  (Builder.byteString . Data.Text.Encoding.encodeUtf8)
+                  (Builder.byteString . Data.Text.Encoding.encodeUtf8)
               )
               attrs
         )
@@ -859,7 +923,7 @@ renderHtml path h = do
       <> ">\n"
   go _ (Text t) =
     -- TODO: escape text
-    pure $ Builder.byteString (ByteString.Char8.pack t)
+    pure $ Builder.byteString (Data.Text.Encoding.encodeUtf8 t)
   go mId (OnEvent element (event, action)) = do
     elId <- maybe (("element_" <>) <$> freshId) pure mId
     fnId <- ByteString.Char8.pack . ("function_" <>) <$> freshId
@@ -889,7 +953,20 @@ renderHtml path h = do
     ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
     event <- mkEvent
     subscribe (Event $ pure event) $ \value -> Js [elId <> ".textContent = " <> value <> ";"]
-    pure $ "<span id=\"" <> fromString elId <> "\">" <> fromString initial <> "</span>"
+    pure $ "<span id=\"" <> fromString elId <> "\">" <> Builder.byteString (Data.Text.Encoding.encodeUtf8 initial) <> "</span>"
+  go _mId (ReactiveHtml rhtml) = do
+    elId <- ("element_" <>) <$> freshId
+    reactiveKey <- initReactive rhtml
+    ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
+    event <- mkEvent
+    var <- ("var_" <>) <$> freshId
+    mkNodeJs <- asks pbe_mkNodeName
+    subscribe (Event $ pure event) $ \value ->
+      Js
+        [ "const " <> var <> " = document.getElementById(\"" <> elId <> "\");"
+        , var <> ".replaceWith(" <> mkNodeJs <> "(" <> value <> "));"
+        ]
+    go (Just elId) initial
 
 -- | [[ App ]] = Path -> Maybe Page
 newtype App = App (Map Path Page)

@@ -19,11 +19,15 @@ module Compiler.Plugin.Interface (
   Pattern (..),
   getCtx,
   quote,
-  toString,
   compose,
+  toString,
+  append,
+  isEmpty,
 ) where
 
 import Data.Kind (Type)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import GHC.Exts (noinline)
 import GHC.Stack (HasCallStack)
 
@@ -38,8 +42,10 @@ data Expr :: [Type] -> Type -> Type where
   Int :: forall ctx. Int -> Expr ctx Int
   Bool :: forall ctx. Bool -> Expr ctx Bool
   Char :: forall ctx. Char -> Expr ctx Char
-  ToString :: forall ctx a. (Show a) => Expr ctx (a -> String)
   Weaken :: Expr ctx a -> Expr (b ': ctx) a
+  ToString :: forall ctx a. (Show a) => Expr ctx (a -> String)
+  Append :: forall ctx a. Expr ctx ([a] -> [a] -> [a])
+  IsEmpty :: forall ctx a. Expr ctx ([a] -> Bool)
 
 deriving instance Show (Expr ctx a)
 
@@ -85,9 +91,17 @@ instance Show (Quoted a) where
 quote :: (HasCallStack) => a -> Quoted a
 quote a = noinline error "quote not removed by compiler plugin" a
 
-{-# NOINLINE toString #-}
-toString :: (Show a) => a -> String
-toString = show
-
 compose :: Quoted (b -> c) -> Quoted (a -> b) -> Quoted (a -> c)
 compose f g = Quoted (Lam $ App (Weaken $ quotedCode f) $ App (Weaken $ quotedCode g) (Var Z)) (quotedValue f . quotedValue g)
+
+{-# NOINLINE toString #-}
+toString :: (Show a) => a -> Text
+toString = Text.pack . show
+
+{-# NOINLINE append #-}
+append :: [a] -> [a] -> [a]
+append = (++)
+
+{-# NOINLINE isEmpty #-}
+isEmpty :: [a] -> Bool
+isEmpty = null
