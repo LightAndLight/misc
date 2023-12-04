@@ -65,7 +65,6 @@ import qualified Data.ByteString.Lazy.Char8 as ByteString.Lazy.Char8
 import Data.Dependent.Map (DMap)
 import qualified Data.Dependent.Map as DMap
 import Data.Foldable (fold)
-import Data.Functor (void)
 import Data.Functor.Const (Const (..))
 import Data.GADT.Compare (GCompare (..), GEq (..), GOrdering (..))
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -106,6 +105,7 @@ data Interact :: Type -> Type where
   TextInput :: Interact (Behavior String, Element)
   Element :: Html -> Interact Element
   DomEvent :: DomEvent -> Element -> Interact (Event ())
+  Perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
   Request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
   Stepper :: (Send a) => a -> Event a -> Interact (Reactive a)
   StepperM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
@@ -241,19 +241,48 @@ data EventKey
   = EventKey_Derived String
   | EventKey_DomEvent String DomEvent
 
+newtype MemoRef a = MemoRef (IORef (MemoMaybe a))
+
+data MemoMaybe a where
+  MemoNothing :: x -> MemoMaybe a
+  MemoJust :: a -> MemoMaybe a
+
+{-# NOINLINE unsafeNewMemoRef #-}
+unsafeNewMemoRef ::
+  -- | This argument isn't used by the function; it's here to stop what would
+  -- be @unsafePerformIO newMemoRef@ getting let-floated.
+  a ->
+  MemoRef EventKey
+unsafeNewMemoRef a = MemoRef (unsafePerformIO $ newIORef (MemoNothing a))
+
+{- | Do not use @unsafePerformIO newMemoRef@.
+It will create a single IORef in global scope due to let-floating.
+Use @unsafeNewMemoRef@ instead.
+-}
+newMemoRef :: IO (MemoRef EventKey)
+newMemoRef = MemoRef <$> newIORef (MemoNothing undefined)
+
+readMemoRef :: MemoRef a -> IO (Maybe a)
+readMemoRef (MemoRef ref) = do
+  val <- readIORef ref
+  case val of
+    MemoNothing _ ->
+      pure Nothing
+    MemoJust a ->
+      pure $ Just a
+
+-- | Don't call this twice.
+setMemoRef :: MemoRef a -> a -> IO ()
+setMemoRef (MemoRef ref) a = writeIORef ref (MemoJust a)
+
 data Event :: Type -> Type where
   FromDomEvent :: String -> DomEvent -> Event ()
   Event :: PageBuilder EventKey -> Event a
-  FmapEvent :: IORef (Maybe EventKey) -> Quoted (a -> b) -> Event a -> Event b
+  FmapEvent :: MemoRef EventKey -> Quoted (a -> b) -> Event a -> Event b
 
 instance Functor Event where
   {-# INLINE fmap #-}
-  fmap f a =
-    let
-      {-# NOINLINE memoRef #-}
-      !memoRef = unsafePerformIO $ newIORef Nothing
-     in
-      FmapEvent memoRef (quote f) a
+  fmap f = let !memoRef = unsafeNewMemoRef f in FmapEvent memoRef (quote f)
 
 data Behavior a where
   Behavior :: String -> Behavior a
@@ -327,25 +356,21 @@ updates to @current r@, and one for the event behind @fmap f r@. As a result,
 @e@ will have two subscribers instead of one. This is okay semantically, but
 it increases code size and duplicates work.
 
-Functions that call 'memoEvent' should be marked as @NOINLINE@.
+Functions that call 'memoEvent' should be marked as @NOINLINE@, so that each
+call-site is assigned a single memoized event.
 -}
 memoEvent :: (String -> PageBuilder ()) -> Event a
-memoEvent f =
-  let
-    {-# NOINLINE memoRef #-}
-    !memoRef = unsafePerformIO $ newIORef Nothing
-   in
-    Event $ memoEventWith memoRef f
+memoEvent f = let !memoRef = unsafeNewMemoRef f in Event $ memoEventWith memoRef f
 
-memoEventWith :: IORef (Maybe EventKey) -> (String -> PageBuilder ()) -> PageBuilder EventKey
+memoEventWith :: MemoRef EventKey -> (String -> PageBuilder ()) -> PageBuilder EventKey
 memoEventWith memoRef f = do
-  mEventKey <- liftIO $ readIORef memoRef
+  mEventKey <- liftIO $ readMemoRef memoRef
   case mEventKey of
     Nothing -> do
       name <- newEvent
 
       let eventKey = EventKey_Derived name
-      liftIO $ writeIORef memoRef (Just eventKey)
+      liftIO $ setMemoRef memoRef eventKey
 
       f name
 
@@ -375,7 +400,7 @@ initReactive r' = go (Expr.Quoted (Expr.Lam $ Expr.Var Expr.Z) id) r'
   go f (FmapReactive g r) = go (f `Expr.compose` g) r
   go f (Reactive key) = do
     ReactiveInfo initial mkEvent _ <- gets $ (DMap.! key) . pbs_reactives
-    memoRef <- liftIO $ newIORef Nothing
+    memoRef <- liftIO newMemoRef
     mkReactive (Expr.quotedValue f initial) (FmapEvent memoRef f $ Event mkEvent)
 
 initBehavior :: Behavior a -> PageBuilder String
@@ -466,7 +491,7 @@ encodeSend :: (Send a) => a -> Lazy.ByteString
 encodeSend = Json.encode . toSendTy
 
 perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
-perform e f = void $ request e (void . f)
+perform = Perform
 
 request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
 request = Request
@@ -496,13 +521,12 @@ setId i (Node name attrs children) = Node name (("id", i) : attrs) children
 setId _ a = a
 
 newtype Js = Js {getJs :: [String]}
-  deriving (Semigroup, Monoid)
+  deriving (Show, Semigroup, Monoid)
 
 renderInteractHtml :: Path -> Interact Html -> PageBuilder Builder
 renderInteractHtml path x = do
   h <- go x
-  content <- renderHtml path h
-  pure content
+  renderHtml path h
  where
   go :: Interact a -> PageBuilder a
   go (Pure h) = pure h
@@ -531,6 +555,22 @@ renderInteractHtml path x = do
     pure $ MkElement elId $ setId elId h `WithScript` ("const " <> elId <> " = document.getElementById(\"" <> elId <> "\");")
   go (DomEvent de (MkElement elId _)) =
     pure $ FromDomEvent elId de
+  go (Perform ea f) = do
+    let
+      run :: Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
+      run input resp =
+        case decodeSend input of
+          Left err -> do
+            hPutStrLn System.IO.stderr $ show err
+            undefined
+          Right a -> do
+            b <- f a
+            resp (encodeSend b)
+
+    fnId <- ("function_" <>) <$> freshId
+    modify $ \s -> s{pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
+
+    subscribe ea $ \value -> Js (fetch path fnId value)
   go (Request ea f) = do
     let
       run :: Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
