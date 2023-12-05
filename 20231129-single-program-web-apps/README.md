@@ -121,9 +121,9 @@ Which keeps a client-side counter that's incremented via JavaScript on a button 
      This would change the meaning of `quote`; `quote (f x) == App (quote f) (quote x)` would no longer be true in general.
      Maybe you could call this "extensional quoting" as opposed to "intensional quoting". It seems worse.
      It also might not work properly because I need to inline terms containing `quote` until its
-     argument has no free variables.
+     argument has no free variables, and that could be too much to ask from a type checker plugin.
     
-     Alternatives:
+     Possible alternatives:
     
      * Just construct `Expr`s - i.e. `fmapEvent :: Expr '[] (a -> b) -> Event a -> Event b`
        * Make it as easy as possible: PHOAS / quasiquoter
@@ -134,6 +134,10 @@ Which keeps a client-side counter that's incremented via JavaScript on a button 
       
        Mental model: compiling my app with GHC creates a server executable, compiling my app
        with GHC+JSbackend+plugin creates client JS code required by each page of the server.
+      
+     * Write the app in "tagless final" style, such that one type class instance is the client
+       code and another instance is the server code.
+       * Again, no Haskell code reuse. More thoughts [here](./notes/client-server-code-reuse.md).
 
 ## Inspirations / similar projects
 
