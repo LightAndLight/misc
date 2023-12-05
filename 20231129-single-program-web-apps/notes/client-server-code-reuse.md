@@ -54,12 +54,18 @@ I don't want to write my own Haskell compiler, so reusing GHC is my best option.
 My first thought is to line things up so that GHC can compile a variant of my app into a server,
 and GHC+JS can compile a different variant of my app into corresponding client JS.
 I'm pessimistic about the quality of the code output by GHC+JS, because it includes a Haskell runtime.
-Some sort of runtime seems necessary for semantics-preserving reuse of arbitrary code.
+Some sort of runtime seems necessary for semantics-preserving reuse (my compiler plugin changes strictness of programs)
+of arbitrary Haskell code.
 But I wouldn't be surprised if GHC+JS reimplements some JavaScript features in terms of other JavaScript
 features because of the level at which the JavaScript is generated in the GHC pipeline.
 I should actually play around with it to find out.
+While it works for the server, it might not be what I want for the client code.
+I need several JS files; one per page of the app.
+My app, and its page definitions, might be written in a single file.
+I'm not sure how to make a GHC+JS system split that up properly.
 
 My second thought is an alternative codegen backend for GHC.
+Maintaining a GHC fork is a burden and probably dooms one to obscurity and keeping up with code churn.
 
 [^1]: The mental model doesn't take performance into account, because that's an implementation
     detail. It's reasonable to break out of the "single program" mental model, and think in
