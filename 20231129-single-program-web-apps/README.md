@@ -125,6 +125,12 @@ Which keeps a client-side counter that's incremented via JavaScript on a button 
     
      Possible alternatives:
     
+     * Ignore (for now)
+    
+       Writing the `Send` instance might be easier than all that stuff, so 
+       it could be feasible to use `request (f :: a -> Html) (event :: Event a) :: Event Html`
+       to retrieve dynamic HTML from the server.
+    
      * Just construct `Expr`s - i.e. `fmapEvent :: Expr '[] (a -> b) -> Event a -> Event b`
        * Make it as easy as possible: PHOAS / quasiquoter
        * Downside: no reuse of existing Haskell code
