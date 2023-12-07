@@ -35,6 +35,7 @@ module Lib (
   stepperM,
   perform,
   request,
+  onLoad,
   toString,
   Html (..),
   href,
@@ -110,6 +111,7 @@ data Interact :: Type -> Type where
   Stepper :: (Send a) => a -> Event a -> Interact (Reactive a)
   StepperM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
   MFix :: (a -> Interact a) -> Interact a
+  OnLoad :: IO () -> Interact ()
 
 instance Functor Interact where
   fmap f m = Pure f `Apply` m
@@ -153,6 +155,7 @@ data PageBuilderState = PageBuilderState
   { pbs_supply :: Int
   , pbs_postScript :: Js
   , pbs_domEventSubscriptions :: Map (String, DomEvent) (String -> Js)
+  , pbs_onLoadSubscriptions :: String -> Js
   , pbs_rpcs :: Map ByteString RPC
   , pbs_reactives :: DMap ReactiveKey ReactiveInfo
   }
@@ -178,6 +181,7 @@ runPageBuilder ma =
       { pbs_supply = 0
       , pbs_postScript = mempty
       , pbs_domEventSubscriptions = mempty
+      , pbs_onLoadSubscriptions = mempty
       , pbs_rpcs = mempty
       , pbs_reactives = mempty
       }
@@ -500,6 +504,9 @@ perform = Perform
 request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
 request = Request
 
+onLoad :: IO () -> Interact ()
+onLoad = OnLoad
+
 data Page
   = Page Html
   | PageM (Interact Html)
@@ -616,6 +623,35 @@ renderInteractHtml path x = do
   go (Stepper initial eUpdate) = do
     Reactive <$> mkReactive initial eUpdate
   go (MFix f) = mfix (go . f)
+  go (OnLoad action) = do
+    {- `OnLoad action` is essentially `Perform eOnLoad action` for
+    a fictional `eOnLoad` event that fires on page load.
+
+    I'm leaving `eOnLoad` out for now, because it feels too much like
+    an implementation detail. `onLoad :: IO () -> Interact ()` says that
+    the action is not run as part of describing the page (`Interact Html`),
+    but it is run when that page is alive.
+    -}
+    let
+      run :: Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
+      run input resp =
+        case decodeSend input of
+          Left err -> do
+            hPutStrLn System.IO.stderr $ show err
+            undefined
+          Right () -> do
+            action
+            resp (encodeSend ())
+
+    fnId <- ("function_" <>) <$> freshId
+    modify $ \s -> s{pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
+
+    modify $ \s ->
+      s
+        { pbs_onLoadSubscriptions =
+            pbs_onLoadSubscriptions s
+              <> (\value -> Js (fetch path fnId value))
+        }
 
 exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m (Js, String)
 exprToJavascript = go id
@@ -802,8 +838,10 @@ renderHtml path h = do
     writeQueueName <- asks pbe_writeQueueName
     children' <- fold <$> traverse (go Nothing) children
     postScript <- gets pbs_postScript
-    domEventSubscriptions <- gets pbs_domEventSubscriptions
+
     flushQueueJs <- flushQueue writeQueueName
+
+    domEventSubscriptions <- gets pbs_domEventSubscriptions
     domEventSubscriptionsJs <- fmap fold . for (Map.toList domEventSubscriptions) $ \((elId, de), callback) -> do
       arg <- ("arg_" <>) <$> freshId
       pure
@@ -823,6 +861,21 @@ renderHtml path h = do
               <> Js ["}"]
           )
         <> Js [");"]
+
+    onLoadSubscriptions <- gets pbs_onLoadSubscriptions
+    onLoadSubscriptionsJs <- do
+      var <- ("var_" <>) <$> freshId
+      pure
+        $ Js ["window.addEventListener("]
+        <> indent
+          2
+          ( Js ["\"load\","]
+              <> Js ["(" <> var <> ") => {"]
+              <> indent 2 (onLoadSubscriptions var)
+              <> Js ["}"]
+          )
+        <> Js [");"]
+
     pure
       $ "<!doctype html>\n"
       <> "<html>\n"
@@ -831,7 +884,7 @@ renderHtml path h = do
       <> Builder.byteString
         ( ByteString.Char8.pack
             . foldMap (<> "\n")
-            $ getJs (postScript <> domEventSubscriptionsJs)
+            $ getJs (postScript <> domEventSubscriptionsJs <> onLoadSubscriptionsJs)
         )
       <> "</script>"
       <> "</html>\n"
