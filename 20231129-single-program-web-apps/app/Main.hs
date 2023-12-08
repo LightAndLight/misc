@@ -161,7 +161,7 @@ app =
     , pageM
         ("example" <> "onload")
         ( do
-            onLoad $ putStrLn "page loaded"
+            onLoad $ putStrLn . ("page loaded at " <>) . show =<< getCurrentTime
 
             pure
               $ Html
