@@ -2,6 +2,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
@@ -46,6 +47,7 @@ module Lib (
 import Compiler.Plugin.Interface (Quoted (..), quote, toString)
 import qualified Compiler.Plugin.Interface as Expr
 import Control.Monad.Fix (MonadFix (..))
+import Control.Monad.Identity (IdentityT (..))
 import Control.Monad.Reader (ReaderT, runReaderT)
 import Control.Monad.Reader.Class (MonadReader, asks, local)
 import Control.Monad.State.Class (MonadState, gets, modify)
@@ -73,7 +75,7 @@ import Data.Kind (Type)
 import Data.List (intercalate)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Monoid (Any (..))
+import Data.Monoid (Any (..), Ap (..))
 import Data.String (IsString (..))
 import qualified Data.Text as Text
 import Data.Traversable (for)
@@ -143,7 +145,7 @@ newtype ReactiveKey a = ReactiveKey (Tag RealWorld a)
 data ReactiveInfo a where
   ReactiveInfo ::
     (Send a) =>
-    { ri_initial :: a
+    { ri_initial :: IO a
     , ri_event :: PageBuilder EventKey
     , ri_behavior :: PageBuilder String
     } ->
@@ -153,7 +155,7 @@ newtype PageBuilderEnv = PageBuilderEnv {pbe_writeQueueName :: String}
 
 data PageBuilderState = PageBuilderState
   { pbs_supply :: Int
-  , pbs_postScript :: Js
+  , pbs_postScript :: Template IO Js
   , pbs_domEventSubscriptions :: Map (String, DomEvent) (String -> Js)
   , pbs_onLoadSubscriptions :: String -> Js
   , pbs_rpcs :: Map ByteString RPC
@@ -174,7 +176,7 @@ runPageBuilder ma =
         name <- ("writeQueue_" <>) <$> freshId
 
         local (\e -> e{pbe_writeQueueName = name}) . unPageBuilder $ do
-          appendPostScript $ Js ["var " <> name <> " = [];"]
+          appendPostScript . pure $ Js ["var " <> name <> " = [];"]
           ma
     )
     PageBuilderState
@@ -186,60 +188,60 @@ runPageBuilder ma =
       , pbs_reactives = mempty
       }
 
-appendPostScript :: Js -> PageBuilder ()
+appendPostScript :: Template IO Js -> PageBuilder ()
 appendPostScript js = modify $ \s -> s{pbs_postScript = pbs_postScript s <> js}
 
-mkReactive :: (Send a) => a -> Event a -> PageBuilder (ReactiveKey a)
-mkReactive initial eUpdate = do
+mkReactive :: (Send a) => IO a -> Event a -> PageBuilder (ReactiveKey a)
+mkReactive initial_ eUpdate = do
   key <- liftIO $ ReactiveKey <$> newTag
   modify $ \s ->
     s
       { pbs_reactives =
           DMap.insert
             key
-            (ReactiveInfo initial (reactiveInitEvent key eUpdate) (reactiveInitBehavior key))
+            (ReactiveInfo initial_ (reactiveInitEvent key eUpdate) (reactiveInitBehavior key))
             (pbs_reactives s)
       }
   pure key
+ where
+  reactiveInitEvent :: ReactiveKey a -> Event a -> PageBuilder EventKey
+  reactiveInitEvent reactiveKey event = do
+    eventKey <- initEvent event
+    modify $ \s ->
+      s
+        { pbs_reactives =
+            DMap.adjust
+              (\info -> info{ri_event = pure eventKey})
+              reactiveKey
+              (pbs_reactives s)
+        }
+    pure eventKey
 
-reactiveInitEvent :: ReactiveKey a -> Event a -> PageBuilder EventKey
-reactiveInitEvent reactiveKey event = do
-  eventKey <- initEvent event
-  modify $ \s ->
-    s
-      { pbs_reactives =
-          DMap.adjust
-            (\info -> info{ri_event = pure eventKey})
-            reactiveKey
-            (pbs_reactives s)
-      }
-  pure eventKey
+  reactiveInitBehavior :: ReactiveKey a -> PageBuilder String
+  reactiveInitBehavior reactiveKey = do
+    ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
+
+    b <- newBehavior (ByteString.Lazy.Char8.unpack . encodeSend <$> initial)
+    modify $ \s ->
+      s
+        { pbs_reactives =
+            DMap.adjust
+              (\info -> info{ri_behavior = pure b})
+              reactiveKey
+              (pbs_reactives s)
+        }
+
+    eventKey <- mkEvent
+    writeQueueName <- asks pbe_writeQueueName
+    subscribe (Event $ pure eventKey) $ \value -> queueAction writeQueueName (Js [b <> " = " <> value <> ";"])
+
+    pure b
 
 queueAction :: String -> Js -> Js
 queueAction queueName action =
   Js [queueName <> ".push(() => {"]
     <> indent 2 action
     <> Js ["});"]
-
-reactiveInitBehavior :: ReactiveKey a -> PageBuilder String
-reactiveInitBehavior reactiveKey = do
-  ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
-
-  b <- newBehavior (ByteString.Lazy.Char8.unpack $ encodeSend initial)
-  modify $ \s ->
-    s
-      { pbs_reactives =
-          DMap.adjust
-            (\info -> info{ri_behavior = pure b})
-            reactiveKey
-            (pbs_reactives s)
-      }
-
-  eventKey <- mkEvent
-  writeQueueName <- asks pbe_writeQueueName
-  subscribe (Event $ pure eventKey) $ \value -> queueAction writeQueueName (Js [b <> " = " <> value <> ";"])
-
-  pure b
 
 data EventKey
   = EventKey_Derived String
@@ -301,7 +303,7 @@ subscribe ea callback = do
   case key of
     EventKey_Derived name -> do
       arg <- ("arg_" <>) <$> freshId
-      appendPostScript $ Js [name <> ".subscribers.push((" <> arg <> ") => {"] <> indent 2 (callback arg) <> Js ["});"]
+      appendPostScript . pure $ Js [name <> ".subscribers.push((" <> arg <> ") => {"] <> indent 2 (callback arg) <> Js ["});"]
     EventKey_DomEvent elId de -> do
       subscribeDomEvent elId de callback
 
@@ -335,13 +337,13 @@ notify name = do
 newEvent :: PageBuilder String
 newEvent = do
   name <- ("event_" <>) <$> freshId
-  appendPostScript $ Js ["const " <> name <> " = { subscribers: [] };"]
+  appendPostScript . pure $ Js ["const " <> name <> " = { subscribers: [] };"]
   pure name
 
-newBehavior :: String -> PageBuilder String
+newBehavior :: IO String -> PageBuilder String
 newBehavior initial = do
   name <- ("behavior_" <>) <$> freshId
-  appendPostScript $ Js ["var " <> name <> " = " <> initial]
+  appendPostScript . Template $ (\i -> Js ["var " <> name <> " = " <> i]) <$> initial
   pure name
 
 {- |
@@ -401,7 +403,7 @@ initReactive (Reactive key) = pure key
 initReactive (FmapReactive f (Reactive key)) = do
   ReactiveInfo initial mkEvent _ <- gets $ (DMap.! key) . pbs_reactives
   memoRef <- liftIO newMemoRef
-  mkReactive (Expr.quotedValue f initial) (FmapEvent memoRef f $ Event mkEvent)
+  mkReactive (Expr.quotedValue f <$> initial) (FmapEvent memoRef f $ Event mkEvent)
 initReactive (FmapReactive f' r'@FmapReactive{}) = go f' r'
  where
   go :: (Send x) => Quoted (a -> x) -> Reactive a -> PageBuilder (ReactiveKey x)
@@ -409,7 +411,7 @@ initReactive (FmapReactive f' r'@FmapReactive{}) = go f' r'
   go f (Reactive key) = do
     ReactiveInfo initial mkEvent _ <- gets $ (DMap.! key) . pbs_reactives
     memoRef <- liftIO newMemoRef
-    mkReactive (Expr.quotedValue f initial) (FmapEvent memoRef f $ Event mkEvent)
+    mkReactive (Expr.quotedValue f <$> initial) (FmapEvent memoRef f $ Event mkEvent)
 
 initBehavior :: Behavior a -> PageBuilder String
 initBehavior (Behavior var) = pure var
@@ -513,7 +515,17 @@ data Page
 
 newtype RPC = RPC (forall a. Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a)
 
-renderPage :: Path -> Page -> PageBuilder Builder
+newtype Template m a = Template {runTemplate :: m a}
+  deriving (Functor, Applicative) via IdentityT m
+  deriving (Semigroup, Monoid) via Ap m a
+
+fromBuilder :: (Applicative m) => Builder -> Template m Builder
+fromBuilder = Template . pure
+
+instance (Applicative m, IsString a) => IsString (Template m a) where
+  fromString = Template . pure . fromString
+
+renderPage :: Path -> Page -> PageBuilder (Template IO Builder)
 renderPage path (Page h) = renderHtml path h
 renderPage path (PageM h) = renderInteractHtml path h
 
@@ -537,7 +549,7 @@ newtype Js = Js {getJs :: [String]}
 indent :: Int -> Js -> Js
 indent n (Js ls) = Js (fmap (replicate n ' ' <>) ls)
 
-renderInteractHtml :: Path -> Interact Html -> PageBuilder Builder
+renderInteractHtml :: Path -> Interact Html -> PageBuilder (Template IO Builder)
 renderInteractHtml path x = do
   h <- go x
   renderHtml path h
@@ -617,11 +629,10 @@ renderInteractHtml path x = do
         <> Js ["});"]
 
     pure $ Event (pure $ EventKey_Derived name)
-  go (StepperM getInitial eUpdate) = do
-    initial <- liftIO getInitial
-    Reactive <$> mkReactive initial eUpdate
+  go (StepperM getInitial eUpdate) =
+    Reactive <$> mkReactive getInitial eUpdate
   go (Stepper initial eUpdate) = do
-    Reactive <$> mkReactive initial eUpdate
+    Reactive <$> mkReactive (pure initial) eUpdate
   go (MFix f) = mfix (go . f)
   go (OnLoad action) = do
     {- `OnLoad action` is essentially `Perform eOnLoad action` for
@@ -829,11 +840,11 @@ flushQueue queueName = do
       )
     <> Js ["}"]
 
-renderHtml :: Path -> Html -> PageBuilder Builder
+renderHtml :: Path -> Html -> PageBuilder (Template IO Builder)
 renderHtml path h = do
   go Nothing h
  where
-  go :: Maybe String -> Html -> PageBuilder Builder
+  go :: Maybe String -> Html -> PageBuilder (Template IO Builder)
   go _ (Html children) = do
     writeQueueName <- asks pbe_writeQueueName
     children' <- fold <$> traverse (go Nothing) children
@@ -876,15 +887,17 @@ renderHtml path h = do
           )
         <> Js [");"]
 
+    postScriptJs <- liftIO $ runTemplate postScript
     pure
       $ "<!doctype html>\n"
       <> "<html>\n"
       <> children'
       <> "<script>\n"
-      <> Builder.byteString
-        ( ByteString.Char8.pack
+      <> fromBuilder
+        ( Builder.byteString
+            $ ByteString.Char8.pack
             . foldMap (<> "\n")
-            $ getJs (postScript <> domEventSubscriptionsJs <> onLoadSubscriptionsJs)
+            $ getJs (postScriptJs <> domEventSubscriptionsJs <> onLoadSubscriptionsJs)
         )
       <> "</script>"
       <> "</html>\n"
@@ -893,14 +906,14 @@ renderHtml path h = do
     children' <- fold <$> traverse (go Nothing) children
     pure
       $ "<"
-      <> Builder.byteString nameBytes
+      <> fromBuilder (Builder.byteString nameBytes)
       <> foldMap
         (\(attrName, attrValue) -> " " <> attrName <> "=\"" <> attrValue <> "\"")
         ( maybe [] (pure . (,) "id" . fromString) mId
             <> fmap
               ( bimap
-                  (Builder.byteString . ByteString.Char8.pack)
-                  (Builder.byteString . ByteString.Char8.pack)
+                  (fromBuilder . Builder.byteString . ByteString.Char8.pack)
+                  (fromBuilder . Builder.byteString . ByteString.Char8.pack)
               )
               attrs
         )
@@ -908,11 +921,11 @@ renderHtml path h = do
       <> (case children of [] -> ""; [Text{}] -> ""; _ -> "\n")
       <> children'
       <> "</"
-      <> Builder.byteString nameBytes
+      <> fromBuilder (Builder.byteString nameBytes)
       <> ">\n"
   go _ (Text t) =
     -- TODO: escape text
-    pure $ Builder.byteString (ByteString.Char8.pack t)
+    pure . fromBuilder $ Builder.byteString (ByteString.Char8.pack t)
   go mId (OnEvent element (event, action)) = do
     elId <- maybe (("element_" <>) <$> freshId) pure mId
     fnId <- ByteString.Char8.pack . ("function_" <>) <$> freshId
@@ -928,21 +941,21 @@ renderHtml path h = do
         , "  " <> renderDomEvent event <> ", "
         , "  (" <> fromString arg <> ") => { "
         ]
-      <> fmap ("  " <>) (fetch path (Builder.byteString fnId) "{}")
+      <> fmap ("  " <>) (fetch path (fromBuilder $ Builder.byteString fnId) "{}")
       <> [ "  }"
          , ");"
          , "</script>"
          ]
   go mId (WithScript el script) = do
     el' <- go mId el
-    pure $ el' <> "<script>\n" <> Builder.byteString (ByteString.Char8.pack script) <> "</script>\n"
+    pure $ el' <> "<script>\n" <> fromBuilder (Builder.byteString $ ByteString.Char8.pack script) <> "</script>\n"
   go _mId (ReactiveText ra) = do
     elId <- ("element_" <>) <$> freshId
     reactiveKey <- initReactive ra
     ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
     event <- mkEvent
     subscribe (Event $ pure event) $ \value -> Js [elId <> ".textContent = " <> value <> ";"]
-    pure $ "<span id=\"" <> fromString elId <> "\">" <> fromString initial <> "</span>"
+    pure $ "<span id=\"" <> fromBuilder (fromString elId) <> "\">" <> Template (fmap fromString initial) <> "</span>"
 
 -- | [[ App ]] = Path -> Maybe Page
 newtype App = App (Map Path Page)
@@ -1001,7 +1014,8 @@ compile (App paths) = do
                             respond $ Wai.responseLBS badRequest400 [] "invalid action request"
                           Just (RPC action) -> do
                             action (Json.encode arg) (respond . Wai.responseBuilder ok200 [] . Builder.lazyByteString)
-                  Right contents ->
+                  Right mkContents -> do
+                    contents <- runTemplate mkContents
                     respond $ Wai.responseBuilder ok200 [] contents
  where
   decodeJsonBody :: (FromJSON a) => Wai.Request -> IO (Either String a)
