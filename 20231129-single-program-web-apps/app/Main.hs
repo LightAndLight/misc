@@ -17,7 +17,7 @@ import SPWA.DomEvent (DomEvent (..))
 import SPWA.Element (html)
 import SPWA.Event (domEvent, sample)
 import SPWA.Html (Html (..))
-import SPWA.Interact (element, mkTrigger, onLoad, perform, request, stepper, stepperM, textInput)
+import SPWA.Interact (element, mkTrigger, onLoad, perform, request, stepperR, stepperRM, textInput)
 import SPWA.Path (href)
 import SPWA.Reactive (current)
 import SPWA.Session (forkSession)
@@ -88,7 +88,7 @@ app =
             let eButtonClicked = domEvent Click buttonEl
 
             eCurrentTime <- request eButtonClicked (\() -> show <$> getCurrentTime)
-            rCurrentTime <- stepperM (show <$> getCurrentTime) eCurrentTime
+            rCurrentTime <- stepperRM (show <$> getCurrentTime) eCurrentTime
 
             pure
               $ Html
@@ -110,10 +110,10 @@ app =
             let eButtonClicked = domEvent Click buttonEl
 
             eX <- request eButtonClicked (\() -> randomRIO (0, 10) :: IO Int)
-            rX <- stepper "Unknown" $ fmap toString eX
+            rX <- stepperR "Unknown" $ fmap toString eX
 
             let eXPlusOne = fmap (toString . (+ 1)) eX
-            rXPlusOne <- stepper "Unknown" eXPlusOne
+            rXPlusOne <- stepperR "Unknown" eXPlusOne
 
             pure
               $ Html
@@ -151,7 +151,7 @@ app =
             buttonEl <- element $ Node "button" [] [Text "Click me!"]
             let eButtonClicked = domEvent Click buttonEl
 
-            rec rCount <- stepper (0 :: Int) $ (\((), x) -> x + 1) <$> sample eButtonClicked (current rCount)
+            rec rCount <- stepperR (0 :: Int) $ (\((), x) -> x + 1) <$> sample eButtonClicked (current rCount)
 
             pure
               $ Html
@@ -205,7 +205,7 @@ app =
                 sendCount count
                 liftIO $ threadDelay 1000000
 
-            rec rCount <- stepper "no count recieved" $ toString <$> eCount
+            rec rCount <- stepperR "no count recieved" $ toString <$> eCount
 
             pure
               $ Html

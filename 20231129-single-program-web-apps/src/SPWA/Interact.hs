@@ -3,8 +3,9 @@
 
 module SPWA.Interact (
   Interact (..),
-  stepper,
-  stepperM,
+  stepperB,
+  stepperR,
+  stepperRM,
   perform,
   request,
   onLoad,
@@ -33,8 +34,9 @@ data Interact :: Type -> Type where
   DomEvent :: DomEvent -> Element -> Interact (Event ())
   Perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
   Request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
-  Stepper :: (Send a) => a -> Event a -> Interact (Reactive a)
-  StepperM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
+  StepperB :: (Send a) => a -> Event a -> Interact (Behavior a)
+  StepperR :: (Send a) => a -> Event a -> Interact (Reactive a)
+  StepperRM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
   MFix :: (a -> Interact a) -> Interact a
   OnLoad :: Session () -> Interact ()
   MkTrigger :: (Send a) => Interact (a -> Session (), Event a)
@@ -52,11 +54,14 @@ instance Monad Interact where
 instance MonadFix Interact where
   mfix = MFix
 
-stepper :: (Send a) => a -> Event a -> Interact (Reactive a)
-stepper = Stepper
+stepperB :: (Send a) => a -> Event a -> Interact (Behavior a)
+stepperB = StepperB
 
-stepperM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
-stepperM = StepperM
+stepperR :: (Send a) => a -> Event a -> Interact (Reactive a)
+stepperR = StepperR
+
+stepperRM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
+stepperRM = StepperRM
 
 perform :: (Send a) => Event a -> (a -> IO ()) -> Interact ()
 perform = Perform

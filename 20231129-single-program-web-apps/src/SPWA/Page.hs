@@ -14,6 +14,7 @@ import Data.ByteString.Builder (Builder)
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import qualified Data.ByteString.Lazy as Lazy
+import qualified Data.ByteString.Lazy.Char8 as ByteString.Lazy.Char8
 import qualified Data.Dependent.Map as DMap
 import Data.Foldable (fold)
 import qualified Data.Map as Map
@@ -37,6 +38,7 @@ import SPWA.PageBuilder (
   appendPostScript,
   initReactive,
   mkReactive,
+  newBehavior,
   newEvent,
   notify,
   subscribe,
@@ -337,10 +339,15 @@ renderInteractHtml path x = do
         <> Js ["});"]
 
     pure $ Event (pure $ EventKey_Derived name)
-  go (StepperM getInitial eUpdate) =
+  go (StepperRM getInitial eUpdate) =
     Reactive <$> mkReactive getInitial eUpdate
-  go (Stepper initial eUpdate) = do
+  go (StepperR initial eUpdate) = do
     Reactive <$> mkReactive (pure initial) eUpdate
+  go (StepperB initial eUpdate) = do
+    name <- newBehavior (pure . ByteString.Lazy.Char8.unpack $ encodeSend initial)
+    writeQueueName <- asks pbe_writeQueueName
+    subscribe eUpdate $ \value -> Js [writeQueueName <> ".push(() => {" <> name <> " = " <> value <> "; });"]
+    pure $ Behavior name
   go (MFix f) = mfix (go . f)
   go (OnLoad action) = do
     {- `OnLoad action` is essentially `Perform eOnLoad action` for
