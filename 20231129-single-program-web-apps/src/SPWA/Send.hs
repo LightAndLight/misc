@@ -27,6 +27,11 @@ instance Send Int where
   fromSendTy = id
   toSendTy = id
 
+instance Send Bool where
+  type SendTy Bool = Bool
+  fromSendTy = id
+  toSendTy = id
+
 instance Send String where
   type SendTy String = String
   fromSendTy = id

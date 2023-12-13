@@ -44,6 +44,7 @@ app =
                     , Node "li" [] [Node "a" [href ("example" <> "counter")] [Text "Example 5 - \"counter\""]]
                     , Node "li" [] [Node "a" [href ("example" <> "onload")] [Text "Example 6 - \"onload\""]]
                     , Node "li" [] [Node "a" [href ("example" <> "trigger")] [Text "Example 7 - \"trigger\""]]
+                    , Node "li" [] [Node "a" [href ("example" <> "dynamic")] [Text "Example 8 - \"dynamic\""]]
                     ]
                 ]
             ]
@@ -218,6 +219,44 @@ app =
                         []
                         [Text "When the page loads, the server will start counting, sending the counter to the client, and the client renders the counter."]
                     , Node "p" [] [ReactiveText rCount]
+                    ]
+                ]
+        )
+    , pageM
+        ("example" <> "dynamic")
+        ( do
+            let
+              text True = "This is some bold text"
+              text False = "This is some italic text"
+
+            buttonEl <- element $ Node "button" [] [Text "toggle"]
+            let eButtonClicked = domEvent Click buttonEl
+
+            rec rBold <- stepper True $ not . snd <$> sample eButtonClicked (current rBold)
+            eHtml <-
+              request
+                (sample eButtonClicked (current rBold))
+                ( \((), bold) ->
+                    let next = not bold
+                     in pure $ Node (if next then "b" else "i") [] [Text $ text next]
+                )
+            rHtml <- stepper (Node "b" [] [Text $ text True]) eHtml
+
+            pure
+              $ Html
+                [ Node "head" [] [Node "title" [] [Text "Example - dynamic"]]
+                , Node
+                    "body"
+                    []
+                    [ Node
+                        "p"
+                        []
+                        [ Text "Clicking the button will toggle between bold and italic."
+                        , Text " "
+                        , Text "The new HTML generated on the server, sent to the client, and then inserted into the page."
+                        ]
+                    , Node "p" [] [ReactiveHtml rHtml]
+                    , html buttonEl
                     ]
                 ]
         )

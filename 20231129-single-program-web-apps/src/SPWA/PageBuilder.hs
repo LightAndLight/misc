@@ -71,6 +71,7 @@ data PageBuilderState = PageBuilderState
   , pbs_hasTrigger :: Bool
   , pbs_rpcs :: Map ByteString RPC
   , pbs_reactives :: DMap ReactiveKey ReactiveInfo
+  , pbs_needsMake :: Bool
   }
 
 instance HasSupply PageBuilderState where
@@ -164,6 +165,7 @@ runPageBuilder ma =
       , pbs_rpcs = mempty
       , pbs_reactives = mempty
       , pbs_hasTrigger = False
+      , pbs_needsMake = False
       }
 
 appendPostScript :: Template IO Js -> PageBuilder ()

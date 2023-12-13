@@ -88,11 +88,46 @@ renderHtml path h = do
         )
       <> Js ["}"]
 
+  makeJs :: Js
+  makeJs =
+    Js
+      [ "function make(html) {"
+      , "  var el;"
+      , "  switch (html.tag) {"
+      , "    case \"Node\":"
+      , "      const tag = html.args[0];"
+      , "      const attrs = html.args[1];"
+      , "      const children = html.args[2];"
+      , "      el = document.createElement(tag);"
+      , "      for (attr of attrs) {"
+      , "        el.setAttribute(attr.fst, attr.snd);"
+      , "      }"
+      , "      for (child of children) {"
+      , "        el.appendChild(make(child));"
+      , "      }"
+      , "      break;"
+      , "    case \"Text\":"
+      , "      const text = html.args[0];"
+      , "      el = document.createTextNode(text);"
+      , "      break;"
+      , "  }"
+      , "  return el;"
+      , "}"
+      , ""
+      , "function make_with_id(id, html) {"
+      , "  const el = make(html);"
+      , "  el.setAttribute(\"id\", id);"
+      , "  return el;"
+      , "}"
+      ]
+
   go :: Maybe String -> Html -> PageBuilder (Template IO Builder)
   go _ (Html children) = do
     writeQueueName <- asks pbe_writeQueueName
 
     children' <- fold <$> traverse (go Nothing) children
+
+    needsMake <- gets pbs_needsMake
 
     flushQueueJs <- flushQueue writeQueueName
 
@@ -178,7 +213,7 @@ renderHtml path h = do
       <> "<html>\n"
       <> children'
       <> "<script>\n"
-      <> fmap (Builder.byteString . ByteString.Char8.pack . foldMap (<> "\n") . getJs) postScript
+      <> fmap (Builder.byteString . ByteString.Char8.pack . foldMap (<> "\n") . getJs) ((if needsMake then pure makeJs else mempty) <> postScript)
       <> pure
         ( Builder.byteString
             $ ByteString.Char8.pack
@@ -259,6 +294,15 @@ renderHtml path h = do
     event <- mkEvent
     subscribe (Event $ pure event) $ \value -> Js [elId <> ".textContent = " <> value <> ";"]
     pure $ "<span id=\"" <> pure (fromString elId) <> "\">" <> liftIO (fmap fromString initial) <> "</span>"
+  go _mId (ReactiveHtml rHtml) = do
+    modify $ \s -> s{pbs_needsMake = True}
+    elId <- ("element_" <>) <$> freshId
+    reactiveKey <- initReactive rHtml
+    ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
+    i <- go (Just elId) =<< liftIO initial
+    event <- mkEvent
+    subscribe (Event $ pure event) $ \value -> Js [elId <> ".replaceWith(make_with_id(\"" <> elId <> "\", " <> value <> "));"]
+    pure i
 
 renderInteractHtml :: Path -> Interact Html -> PageBuilder (Template IO Builder)
 renderInteractHtml path x = do
