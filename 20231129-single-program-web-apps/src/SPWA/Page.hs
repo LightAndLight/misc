@@ -25,7 +25,22 @@ import SPWA.Html (Html (..), setId)
 import SPWA.Interact (Interact (..))
 import SPWA.Js (Js (..))
 import qualified SPWA.Js as Js
-import SPWA.PageBuilder (Behavior (..), Event (..), EventKey (..), PageBuilder, PageBuilderEnv (..), PageBuilderState (..), ReactiveInfo (..), TriggerId (..), appendPostScript, initReactive, mkReactive, newEvent, notify, subscribe)
+import SPWA.PageBuilder (
+  Behavior (..),
+  Event (..),
+  EventKey (..),
+  PageBuilder,
+  PageBuilderEnv (..),
+  PageBuilderState (..),
+  ReactiveInfo (..),
+  TriggerId (..),
+  appendPostScript,
+  initReactive,
+  mkReactive,
+  newEvent,
+  notify,
+  subscribe,
+ )
 import SPWA.Path (Path, renderPath)
 import SPWA.RPC (RPC (..))
 import SPWA.Reactive (Reactive (..))
@@ -191,6 +206,22 @@ renderHtml path h = do
       <> "</"
       <> pure (Builder.byteString nameBytes)
       <> ">\n"
+  go mId (Void name attrs) = do
+    let nameBytes = ByteString.Char8.pack name
+    pure
+      $ "<"
+      <> pure (Builder.byteString nameBytes)
+      <> foldMap
+        (\(attrName, attrValue) -> " " <> attrName <> "=\"" <> attrValue <> "\"")
+        ( maybe [] (pure . (,) "id" . fromString) mId
+            <> fmap
+              ( bimap
+                  (pure . Builder.byteString . ByteString.Char8.pack)
+                  (pure . Builder.byteString . ByteString.Char8.pack)
+              )
+              attrs
+        )
+      <> ">"
   go _ (Text t) =
     -- TODO: escape text
     pure . pure $ Builder.byteString (ByteString.Char8.pack t)

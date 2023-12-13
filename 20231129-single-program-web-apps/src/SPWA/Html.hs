@@ -6,6 +6,7 @@ import SPWA.Reactive (Reactive)
 data Html
   = Html [Html]
   | Node String [(String, String)] [Html]
+  | Void String [(String, String)]
   | WithScript Html String
   | Text String
   | ReactiveText (Reactive String)
