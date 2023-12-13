@@ -100,6 +100,7 @@ newtype PageBuilder a = PageBuilder {unPageBuilder :: ReaderT PageBuilderEnv (St
 
 data Behavior a where
   Behavior :: String -> Behavior a
+  Behavior' :: PageBuilder String -> Behavior a
   Current :: (Send a) => Reactive a -> Behavior a
   FmapBehavior :: Quoted (a -> b) -> Behavior a -> Behavior b
   PureBehavior :: Quoted a -> Behavior a
@@ -129,6 +130,7 @@ data EventKey
   = EventKey_Derived String
   | EventKey_DomEvent String DomEvent
   | EventKey_Trigger TriggerId
+  | EventKey_Never
 
 newtype TriggerId = TriggerId {getTriggerId :: String}
   deriving (Show)
@@ -272,6 +274,8 @@ subscribe ea callback = do
       subscribeDomEvent elId de callback
     EventKey_Trigger triggerId -> do
       subscribeTrigger triggerId callback
+    EventKey_Never ->
+      pure ()
 
 subscribeDomEvent :: String -> DomEvent -> (String -> Js) -> PageBuilder ()
 subscribeDomEvent elId de callback =
@@ -338,6 +342,7 @@ initReactive (FmapReactive f' r'@FmapReactive{}) = go f' r'
 
 initBehavior :: Behavior a -> PageBuilder String
 initBehavior (Behavior var) = pure var
+initBehavior (Behavior' mkVar) = mkVar
 initBehavior (Current ra) = do
   reactiveKey <- initReactive ra
   ReactiveInfo _ _ mkBehavior <- gets $ (DMap.! reactiveKey) . pbs_reactives

@@ -43,6 +43,7 @@ data Env = Env
   , exprLtCtor :: Id
   , exprCaseCtor :: Id
   , exprCharCtor :: Id
+  , exprPairCtor :: Id
   , exprToStringCtor :: Id
   , branchTyCon :: TyCon
   , branchBranchCtor :: Id
@@ -77,6 +78,7 @@ plugin =
         exprCaseCtor <- findCtor "Compiler.Plugin.Interface" "Case"
         exprCharCtor <- findCtor "Compiler.Plugin.Interface" "Char"
         exprToStringCtor <- findCtor "Compiler.Plugin.Interface" "ToString"
+        exprPairCtor <- findCtor "Compiler.Plugin.Interface" "Pair"
         branchBranchCtor <- findCtor "Compiler.Plugin.Interface" "Branch"
         branchTyCon <- findTyCon "Compiler.Plugin.Interface" "Branch"
         patternPDefaultCtor <- findCtor "Compiler.Plugin.Interface" "PDefault"
@@ -104,6 +106,7 @@ plugin =
                 , exprCaseCtor
                 , exprCharCtor
                 , exprToStringCtor
+                , exprPairCtor
                 , branchTyCon
                 , branchBranchCtor
                 , patternPDefaultCtor
@@ -252,6 +255,21 @@ pass env = bindsOnlyPass $ \binds ->
         [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
         , mkCoreConApps intDataCon [expr]
         ]
+  -- pairs
+  quoteCoreExpr localBinds context expr
+    | (Core.Var name, [aTy, bTy, a, b]) <- collectArgs expr
+    , name == dataConWorkId (tupleDataCon Boxed 2) = do
+        a' <- quoteCoreExpr localBinds context a
+        b' <- quoteCoreExpr localBinds context b
+        pure
+          $ mkCoreApps
+            (Core.Var $ exprPairCtor env)
+            [ Core.Type $ mkPromotedListTy liftedTypeKind $ fmap snd context
+            , aTy
+            , bTy
+            , a'
+            , b'
+            ]
   -- boxed int literals
   quoteCoreExpr localBinds context expr@(Core.App (Core.Var var) x)
     | var == dataConWorkId intDataCon =

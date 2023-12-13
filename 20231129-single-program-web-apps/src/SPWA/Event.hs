@@ -1,13 +1,13 @@
 {-# LANGUAGE BangPatterns #-}
 
-module SPWA.Event (Event, sample, domEvent) where
+module SPWA.Event (Event, never, sample, domEvent) where
 
 import SPWA.Behavior (Behavior)
 import SPWA.DomEvent (DomEvent (..))
 import SPWA.Element (Element (..))
 import SPWA.Js (Js (..))
 import SPWA.MemoRef (unsafeNewMemoRef)
-import SPWA.PageBuilder (Event (..), PageBuilder, initBehavior, memoEventWith, notify, subscribe)
+import SPWA.PageBuilder (Event (..), EventKey (..), PageBuilder, initBehavior, memoEventWith, notify, subscribe)
 import SPWA.Supply (freshId)
 
 {- |
@@ -45,3 +45,6 @@ sample ea bb =
 
 domEvent :: DomEvent -> Element -> Event ()
 domEvent de (MkElement elId _) = FromDomEvent elId de
+
+never :: Event a
+never = Event $ pure EventKey_Never

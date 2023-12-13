@@ -10,16 +10,18 @@ import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (fold)
 import Data.Functor (void)
-import Data.IORef
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Time.Clock (getCurrentTime)
+import GHC.Float (rationalToDouble)
 import SPWA.App (App, page, pageM, serve)
 import SPWA.DomEvent (DomEvent (..))
 import SPWA.Element (html)
-import SPWA.Event (domEvent, sample)
+import SPWA.Event (domEvent, never, sample)
 import SPWA.Html (Html (..))
-import SPWA.Interact (element, mkTrigger, onLoad, perform, request, stepperR, stepperRM, textInput)
+import SPWA.Interact (element, mkTrigger, onLoad, perform, request, stepperB, stepperR, stepperRM, textInput)
 import SPWA.Path (href)
 import SPWA.Reactive (current)
+import SPWA.Send (Array (..))
 import SPWA.Session (forkSession)
 import System.Random (randomRIO)
 
@@ -45,6 +47,7 @@ app =
                     , Node "li" [] [Node "a" [href ("example" <> "onload")] [Text "Example 6 - \"onload\""]]
                     , Node "li" [] [Node "a" [href ("example" <> "trigger")] [Text "Example 7 - \"trigger\""]]
                     , Node "li" [] [Node "a" [href ("example" <> "dynamic")] [Text "Example 8 - \"dynamic\""]]
+                    , Node "li" [] [Node "a" [href ("example" <> "todo")] [Text "Example 9 - \"todo\""]]
                     ]
                 ]
             ]
@@ -232,7 +235,7 @@ app =
             buttonEl <- element $ Node "button" [] [Text "toggle"]
             let eButtonClicked = domEvent Click buttonEl
 
-            rec rBold <- stepper True $ not . snd <$> sample eButtonClicked (current rBold)
+            rec rBold <- stepperR True $ not . snd <$> sample eButtonClicked (current rBold)
             eHtml <-
               request
                 (sample eButtonClicked (current rBold))
@@ -240,7 +243,7 @@ app =
                     let next = not bold
                      in pure $ Node (if next then "b" else "i") [] [Text $ text next]
                 )
-            rHtml <- stepper (Node "b" [] [Text $ text True]) eHtml
+            rHtml <- stepperR (Node "b" [] [Text $ text True]) eHtml
 
             pure
               $ Html
@@ -257,6 +260,48 @@ app =
                         ]
                     , Node "p" [] [ReactiveHtml rHtml]
                     , html buttonEl
+                    ]
+                ]
+        )
+    , pageM
+        ("example" <> "todo")
+        ( do
+            (bValue, inputEl) <- textInput
+
+            buttonEl <- element $ Node "button" [] [Text "Add"]
+            let eButtonClicked = domEvent Click buttonEl
+
+            let
+              render (Array []) =
+                Node "p" [] [Node "i" [] [Text "No todos added"]]
+              render (Array todos) =
+                Node "ul" [] (Node "li" [] . pure . Node "p" [] . pure . Text <$> todos)
+
+            let initialTodos = Array []
+
+            rec let eAddTodo = snd <$> sample eButtonClicked ((,) <$> bValue <*> bTodos)
+                eTodoAdded <-
+                  request
+                    eAddTodo
+                    ( \(todo, Array todos) -> do
+                        let new = Array $ todo : todos
+                        pure (new, render new)
+                    )
+                bTodos <- stepperB initialTodos $ fst <$> eTodoAdded
+
+            rRenderedTodos <- stepperR (render initialTodos) $ snd <$> eTodoAdded
+
+            pure
+              $ Html
+                [ Node "head" [] [Node "title" [] [Text "Example - todo"]]
+                , Node
+                    "body"
+                    []
+                    [ Node "p" [] [Text "An interactive todo list."]
+                    , Node "p" [] [Text "State is tracked in the client and not persisted between visits."]
+                    , Void "hr" []
+                    , Node "div" [] [html inputEl, html buttonEl]
+                    , ReactiveHtml rRenderedTodos
                     ]
                 ]
         )

@@ -58,6 +58,10 @@ exprToJavascript = go id
         (ls, a') <- go weaken ctx a
         (ls', b') <- go weaken ctx b
         pure (ls <> ls', "(" <> a' <> " < " <> b' <> ")")
+      Expr.Pair a b -> do
+        (ls, a') <- go weaken ctx a
+        (ls', b') <- go weaken ctx b
+        pure (ls <> ls', "{ fst: " <> a' <> ", snd: " <> b' <> " }")
       Expr.Case a branches -> do
         value <- ("value_" <>) <$> freshId
         (ls, a') <- go weaken ctx a

@@ -38,6 +38,7 @@ data Expr :: [Type] -> Type -> Type where
   Int :: forall ctx. Int -> Expr ctx Int
   Bool :: forall ctx. Bool -> Expr ctx Bool
   Char :: forall ctx. Char -> Expr ctx Char
+  Pair :: forall ctx a b. Expr ctx a -> Expr ctx b -> Expr ctx (a, b)
   ToString :: forall ctx a. (Show a) => Expr ctx (a -> String)
   Weaken :: Expr ctx a -> Expr (b ': ctx) a
 

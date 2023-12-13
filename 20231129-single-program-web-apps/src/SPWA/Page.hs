@@ -26,6 +26,7 @@ import SPWA.Html (Html (..), setId)
 import SPWA.Interact (Interact (..))
 import SPWA.Js (Js (..))
 import qualified SPWA.Js as Js
+import SPWA.MemoRef (newMemoRef, readMemoRef, setMemoRef)
 import SPWA.PageBuilder (
   Behavior (..),
   Event (..),
@@ -37,6 +38,7 @@ import SPWA.PageBuilder (
   TriggerId (..),
   appendPostScript,
   initReactive,
+  memoEventWith,
   mkReactive,
   newBehavior,
   newEvent,
@@ -315,18 +317,20 @@ renderInteractHtml path x = do
   go (Bind ma f) = go ma >>= go . f
   go TextInput = do
     elId <- ("element_" <>) <$> freshId
-    behaviorId <- ("behavior_" <>) <$> freshId
+    stateName <- ("state_" <>) <$> freshId
+    behaviorName <- ("behavior_" <>) <$> freshId
     pure
-      ( Behavior behaviorId
+      ( Behavior behaviorName
       , MkElement elId
           $ Node "input" [("id", elId), ("type", "text")] []
           `WithScript` unlines
             [ "const " <> elId <> " = document.getElementById(\"" <> elId <> "\");"
-            , "var " <> behaviorId <> " = \"\";"
+            , "var " <> stateName <> " = \"\";"
+            , "const " <> behaviorName <> " = () => " <> stateName <> ";"
             , elId <> ".addEventListener("
             , "  \"change\","
             , "  (event) => {"
-            , "    " <> behaviorId <> " = " <> elId <> ".value;"
+            , "    " <> stateName <> " = " <> elId <> ".value;"
             , "  }"
             , ");"
             ]
@@ -353,46 +357,54 @@ renderInteractHtml path x = do
     conn <- asks pbe_connectionIdName
     subscribe ea $ \value -> Js (fetch path conn fnId value)
   go (Request ea f) = do
-    let run :: SessionEnv -> Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
-        run _ input resp =
-          case decodeSend input of
-            Left err -> do
-              hPutStrLn System.IO.stderr $ show err
-              undefined
-            Right a -> do
-              b <- f a
-              resp (encodeSend b)
+    memoRef <- liftIO newMemoRef
+    pure . Event . memoEventWith memoRef $ \name -> do
+      let run :: SessionEnv -> Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
+          run _ input resp =
+            case decodeSend input of
+              Left err -> do
+                hPutStrLn System.IO.stderr $ show err
+                undefined
+              Right a -> do
+                b <- f a
+                resp (encodeSend b)
 
-    fnId <- ("function_" <>) <$> freshId
-    modify $ \s -> s{pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
+      fnId <- ("function_" <>) <$> freshId
+      modify $ \s -> s{pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
 
-    name <- newEvent
-    response <- ("response_" <>) <$> freshId
-    arg <- ("arg_" <>) <$> freshId
-    notifyJs <- notify name
-    conn <- asks pbe_connectionIdName
-    subscribe ea $ \value ->
-      Js
-        (fetch path conn fnId value)
-        <> Js [".then((" <> response <> ") => {"]
-        <> Js.indent
-          2
-          ( Js [response <> ".json().then((" <> arg <> ") => {"]
-              <> Js.indent 2 (notifyJs arg)
-              <> Js ["});"]
-          )
-        <> Js ["});"]
-
-    pure $ Event (pure $ EventKey_Derived name)
+      name <- newEvent
+      response <- ("response_" <>) <$> freshId
+      arg <- ("arg_" <>) <$> freshId
+      notifyJs <- notify name
+      conn <- asks pbe_connectionIdName
+      subscribe ea $ \value ->
+        Js
+          (fetch path conn fnId value)
+          <> Js [".then((" <> response <> ") => {"]
+          <> Js.indent
+            2
+            ( Js [response <> ".json().then((" <> arg <> ") => {"]
+                <> Js.indent 2 (notifyJs arg)
+                <> Js ["});"]
+            )
+          <> Js ["});"]
   go (StepperRM getInitial eUpdate) =
     Reactive <$> mkReactive getInitial eUpdate
   go (StepperR initial eUpdate) = do
     Reactive <$> mkReactive (pure initial) eUpdate
   go (StepperB initial eUpdate) = do
-    (name, state) <- newBehavior (pure . ByteString.Lazy.Char8.unpack $ encodeSend initial)
-    writeQueueName <- asks pbe_writeQueueName
-    subscribe eUpdate $ \value -> queueAction writeQueueName (Js [state <> " = " <> value <> ";"])
-    pure $ Behavior name
+    memoRef <- liftIO newMemoRef
+    pure . Behavior' $ do
+      mName <- liftIO $ readMemoRef memoRef
+      case mName of
+        Just name ->
+          pure name
+        Nothing -> do
+          (name, state) <- newBehavior (pure . ByteString.Lazy.Char8.unpack $ encodeSend initial)
+          liftIO $ setMemoRef memoRef name
+          writeQueueName <- asks pbe_writeQueueName
+          subscribe eUpdate $ \value -> queueAction writeQueueName (Js [state <> " = " <> value <> ";"])
+          pure name
   go (MFix f) = mfix (go . f)
   go (OnLoad action) = do
     {- `OnLoad action` is essentially `Perform eOnLoad action` for

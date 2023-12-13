@@ -1,10 +1,16 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 
-module SPWA.Send (Send (..), encodeSend, decodeSend) where
+module SPWA.Send (
+  Send (..),
+  encodeSend,
+  decodeSend,
+  Array (..),
+) where
 
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Json
@@ -54,3 +60,11 @@ decodeSend = fmap fromSendTy . Json.eitherDecode'
 
 encodeSend :: (Send a) => a -> Lazy.ByteString
 encodeSend = Json.encode . toSendTy
+
+newtype Array a = Array [a]
+  deriving (ToJSON, FromJSON)
+
+instance (Send a) => Send (Array a) where
+  type SendTy (Array a) = [SendTy a]
+  toSendTy (Array a) = fmap toSendTy a
+  fromSendTy = Array . fmap fromSendTy
