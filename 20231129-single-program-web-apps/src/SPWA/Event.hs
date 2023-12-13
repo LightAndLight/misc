@@ -40,7 +40,7 @@ sample ea bb =
     temp <- ("temp_" <>) <$> freshId
     notifyJs <- notify name
     subscribe ea $ \value ->
-      Js ["const " <> temp <> " = { fst: " <> value <> ", snd: " <> b <> " };"]
+      Js ["const " <> temp <> " = { fst: " <> value <> ", snd: " <> b <> "() };"]
         <> notifyJs temp
 
 domEvent :: DomEvent -> Element -> Event ()

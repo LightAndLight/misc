@@ -41,6 +41,7 @@ import SPWA.PageBuilder (
   newBehavior,
   newEvent,
   notify,
+  queueAction,
   subscribe,
  )
 import SPWA.Path (Path, renderPath)
@@ -344,9 +345,9 @@ renderInteractHtml path x = do
   go (StepperR initial eUpdate) = do
     Reactive <$> mkReactive (pure initial) eUpdate
   go (StepperB initial eUpdate) = do
-    name <- newBehavior (pure . ByteString.Lazy.Char8.unpack $ encodeSend initial)
+    (name, state) <- newBehavior (pure . ByteString.Lazy.Char8.unpack $ encodeSend initial)
     writeQueueName <- asks pbe_writeQueueName
-    subscribe eUpdate $ \value -> Js [writeQueueName <> ".push(() => {" <> name <> " = " <> value <> "; });"]
+    subscribe eUpdate $ \value -> queueAction writeQueueName (Js [state <> " = " <> value <> ";"])
     pure $ Behavior name
   go (MFix f) = mfix (go . f)
   go (OnLoad action) = do

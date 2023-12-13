@@ -24,6 +24,7 @@ module SPWA.PageBuilder (
   newBehavior,
   notify,
   subscribe,
+  queueAction,
 ) where
 
 import Compiler.Plugin.Interface (Quoted (..), quote)
@@ -99,6 +100,20 @@ newtype PageBuilder a = PageBuilder {unPageBuilder :: ReaderT PageBuilderEnv (St
 data Behavior a where
   Behavior :: String -> Behavior a
   Current :: (Send a) => Reactive a -> Behavior a
+  FmapBehavior :: Quoted (a -> b) -> Behavior a -> Behavior b
+  PureBehavior :: Quoted a -> Behavior a
+  ApBehavior :: Behavior (a -> b) -> Behavior a -> Behavior b
+
+instance Functor Behavior where
+  {-# INLINE fmap #-}
+  fmap f = FmapBehavior (quote f)
+
+instance Applicative Behavior where
+  {-# INLINE pure #-}
+  pure a = PureBehavior (quote a)
+
+  {-# INLINE (<*>) #-} -- so that `quote`s can be replaced
+  (<*>) = ApBehavior
 
 data Event :: Type -> Type where
   FromDomEvent :: String -> DomEvent -> Event ()
@@ -184,7 +199,7 @@ mkReactive initial_ eUpdate = do
   reactiveInitBehavior reactiveKey = do
     ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
 
-    b <- newBehavior (ByteString.Lazy.Char8.unpack . encodeSend <$> initial)
+    (b, bState) <- newBehavior (ByteString.Lazy.Char8.unpack . encodeSend <$> initial)
     modify $ \s ->
       s
         { pbs_reactives =
@@ -196,15 +211,15 @@ mkReactive initial_ eUpdate = do
 
     eventKey <- mkEvent
     writeQueueName <- asks pbe_writeQueueName
-    subscribe (Event $ pure eventKey) $ \value -> queueAction writeQueueName (Js [b <> " = " <> value <> ";"])
+    subscribe (Event $ pure eventKey) $ \value -> queueAction writeQueueName (Js [bState <> " = " <> value <> ";"])
 
     pure b
-   where
-    queueAction :: String -> Js -> Js
-    queueAction queueName action =
-      Js [queueName <> ".push(() => {"]
-        <> Js.indent 2 action
-        <> Js ["});"]
+
+queueAction :: String -> Js -> Js
+queueAction queueName action =
+  Js [queueName <> ".push(() => {"]
+    <> Js.indent 2 action
+    <> Js ["});"]
 
 initEvent :: Event a -> PageBuilder EventKey
 initEvent e =
@@ -229,11 +244,20 @@ newEvent = do
   appendPostScript . pure $ Js ["const " <> name <> " = { subscribers: [] };"]
   pure name
 
-newBehavior :: IO String -> PageBuilder String
+newBehavior :: IO String -> PageBuilder (String, String)
 newBehavior initial = do
+  state <- ("state_" <>) <$> freshId
   name <- ("behavior_" <>) <$> freshId
-  appendPostScript . Template $ (\i -> Js ["var " <> name <> " = " <> i]) <$> initial
-  pure name
+  appendPostScript
+    . Template
+    $ ( \i ->
+          Js
+            [ "var " <> state <> " = " <> i <> ";"
+            , "const " <> name <> " = () => " <> state <> ";"
+            ]
+      )
+    <$> initial
+  pure (name, state)
 
 subscribe :: Event a -> (String -> Js) -> PageBuilder ()
 subscribe ea callback = do
@@ -316,3 +340,28 @@ initBehavior (Current ra) = do
   reactiveKey <- initReactive ra
   ReactiveInfo _ _ mkBehavior <- gets $ (DMap.! reactiveKey) . pbs_reactives
   mkBehavior
+initBehavior (FmapBehavior f ba) = do
+  parentName <- initBehavior ba
+  name <- ("behavior_" <>) <$> freshId
+  (fJs, value) <- exprToJavascript Ctx.Nil (quotedCode f)
+  appendPostScript
+    . pure
+    $ Js ["const " <> name <> " = () => {"]
+    <> Js.indent
+      2
+      ( fJs
+          <> Js ["return " <> value <> "(" <> parentName <> "());"]
+      )
+    <> Js ["}"]
+  pure name
+initBehavior (PureBehavior a) = do
+  name <- ("behavior_" <>) <$> freshId
+  (aJs, aValue) <- exprToJavascript Ctx.Nil (quotedCode a)
+  appendPostScript . pure $ aJs <> Js ["const " <> name <> " = () => " <> aValue <> ";"]
+  pure name
+initBehavior (ApBehavior bf ba) = do
+  fName <- initBehavior bf
+  aName <- initBehavior ba
+  name <- ("behavior_" <>) <$> freshId
+  appendPostScript . pure $ Js ["const " <> name <> " = () => " <> fName <> "()(" <> aName <> "());"]
+  pure name
