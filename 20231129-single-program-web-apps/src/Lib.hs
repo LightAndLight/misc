@@ -14,59 +14,67 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ImportQualifiedPost #-}
 
-module Lib (
-  App,
-  Path,
-  serve,
-  page,
-  pageM,
-  Interact,
-  Event,
-  Behavior,
-  Reactive,
-  Element,
-  html,
-  element,
-  textInput,
-  domEvent,
-  sample,
-  current,
-  stepper,
-  stepperM,
-  perform,
-  request,
-  onLoad,
-  toString,
-  Html (..),
-  href,
-  DomEvent (..),
-  module Network.HTTP.Types.Method,
-) where
+module Lib
+  ( App,
+    Path,
+    serve,
+    page,
+    pageM,
+    Interact,
+    Event,
+    Behavior,
+    Reactive,
+    Element,
+    html,
+    element,
+    textInput,
+    domEvent,
+    sample,
+    current,
+    stepper,
+    stepperM,
+    perform,
+    request,
+    Session,
+    forkSession,
+    onLoad,
+    mkTrigger,
+    toString,
+    Html (..),
+    href,
+    DomEvent (..),
+    module Network.HTTP.Types.Method,
+  )
+where
 
+import Control.Concurrent (ThreadId, forkIO)
 import Compiler.Plugin.Interface (Quoted (..), quote, toString)
-import qualified Compiler.Plugin.Interface as Expr
+import Compiler.Plugin.Interface qualified as Expr
+import Control.Concurrent.STM (atomically, newTVarIO, readTVar)
+import Control.Monad (when)
 import Control.Monad.Fix (MonadFix (..))
 import Control.Monad.Identity (IdentityT (..))
-import Control.Monad.Reader (ReaderT, runReaderT)
+import Control.Monad.Reader (ReaderT (..), runReaderT)
 import Control.Monad.Reader.Class (MonadReader, asks, local)
 import Control.Monad.State.Class (MonadState, gets, modify)
 import Control.Monad.State.Lazy (StateT, evalStateT)
 import Control.Monad.Trans
 import Control.Monad.Writer.Lazy (WriterT, runWriterT)
 import Data.Aeson (FromJSON, ToJSON)
-import qualified Data.Aeson as Json
+import Data.Aeson qualified as Json
 import Data.Bifunctor (bimap)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as ByteString
+import Data.ByteString qualified as ByteString
 import Data.ByteString.Builder (Builder)
-import qualified Data.ByteString.Builder as Builder
-import qualified Data.ByteString.Char8 as ByteString.Char8
-import qualified Data.ByteString.Lazy as ByteString.Lazy
-import qualified Data.ByteString.Lazy as Lazy
-import qualified Data.ByteString.Lazy.Char8 as ByteString.Lazy.Char8
+import Data.ByteString.Builder qualified as Builder
+import Data.ByteString.Char8 qualified as ByteString.Char8
+import Data.ByteString.Lazy qualified as ByteString.Lazy
+import Data.ByteString.Lazy qualified as Lazy
+import Data.ByteString.Lazy.Char8 qualified as ByteString.Lazy.Char8
 import Data.Dependent.Map (DMap)
-import qualified Data.Dependent.Map as DMap
+import Data.Dependent.Map qualified as DMap
 import Data.Foldable (fold)
 import Data.Functor.Const (Const (..))
 import Data.GADT.Compare (GCompare (..), GEq (..), GOrdering (..))
@@ -74,21 +82,22 @@ import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Kind (Type)
 import Data.List (intercalate)
 import Data.Map (Map)
-import qualified Data.Map as Map
+import Data.Map qualified as Map
 import Data.Monoid (Any (..), Ap (..))
 import Data.String (IsString (..))
-import qualified Data.Text as Text
+import Data.Text qualified as Text
 import Data.Traversable (for)
-import qualified Data.Tuple as Tuple
+import Data.Tuple qualified as Tuple
 import Data.Type.Equality ((:~:) (..))
 import Data.Unique.Tag (RealWorld, Tag, newTag)
 import GHC.Generics (Generic)
 import Network.HTTP.Types.Method
 import Network.HTTP.Types.Status (badRequest400, notFound404, ok200)
-import qualified Network.Wai as Wai
-import qualified Network.Wai.Handler.Warp as Warp
+import Network.Wai qualified as Wai
+import Network.Wai.Handler.Warp qualified as Warp
+import Network.WebSockets qualified as Websocket
 import System.IO (hPutStrLn)
-import qualified System.IO
+import System.IO qualified
 import System.IO.Unsafe (unsafePerformIO)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -113,7 +122,8 @@ data Interact :: Type -> Type where
   Stepper :: (Send a) => a -> Event a -> Interact (Reactive a)
   StepperM :: (Send a) => IO a -> Event a -> Interact (Reactive a)
   MFix :: (a -> Interact a) -> Interact a
-  OnLoad :: IO () -> Interact ()
+  OnLoad :: Session () -> Interact ()
+  MkTrigger :: (Send a) => Interact (a -> Session (), Event a)
 
 instance Functor Interact where
   fmap f m = Pure f `Apply` m
@@ -145,21 +155,23 @@ newtype ReactiveKey a = ReactiveKey (Tag RealWorld a)
 data ReactiveInfo a where
   ReactiveInfo ::
     (Send a) =>
-    { ri_initial :: IO a
-    , ri_event :: PageBuilder EventKey
-    , ri_behavior :: PageBuilder String
+    { ri_initial :: IO a,
+      ri_event :: PageBuilder EventKey,
+      ri_behavior :: PageBuilder String
     } ->
     ReactiveInfo a
 
 newtype PageBuilderEnv = PageBuilderEnv {pbe_writeQueueName :: String}
 
 data PageBuilderState = PageBuilderState
-  { pbs_supply :: Int
-  , pbs_postScript :: Template IO Js
-  , pbs_domEventSubscriptions :: Map (String, DomEvent) (String -> Js)
-  , pbs_onLoadSubscriptions :: String -> Js
-  , pbs_rpcs :: Map ByteString RPC
-  , pbs_reactives :: DMap ReactiveKey ReactiveInfo
+  { pbs_supply :: Int,
+    pbs_postScript :: Template IO Js,
+    pbs_domEventSubscriptions :: Map (String, DomEvent) (String -> Js),
+    pbs_onLoadSubscriptions :: String -> Js,
+    pbs_triggerSubscriptions :: String -> Js,
+    pbs_hasTrigger :: Bool,
+    pbs_rpcs :: Map ByteString RPC,
+    pbs_reactives :: DMap ReactiveKey ReactiveInfo
   }
 
 newtype PageBuilder a = PageBuilder {unPageBuilder :: ReaderT PageBuilderEnv (StateT PageBuilderState IO) a}
@@ -167,29 +179,31 @@ newtype PageBuilder a = PageBuilder {unPageBuilder :: ReaderT PageBuilderEnv (St
 
 instance HasSupply PageBuilderState where
   getSupply = pbs_supply
-  setSupply n s = s{pbs_supply = n}
+  setSupply n s = s {pbs_supply = n}
 
 runPageBuilder :: PageBuilder a -> IO a
 runPageBuilder ma =
   evalStateT
-    ( flip runReaderT PageBuilderEnv{pbe_writeQueueName = "/* unset */"} $ do
+    ( flip runReaderT PageBuilderEnv {pbe_writeQueueName = "/* unset */"} $ do
         name <- ("writeQueue_" <>) <$> freshId
 
-        local (\e -> e{pbe_writeQueueName = name}) . unPageBuilder $ do
+        local (\e -> e {pbe_writeQueueName = name}) . unPageBuilder $ do
           appendPostScript . pure $ Js ["var " <> name <> " = [];"]
           ma
     )
     PageBuilderState
-      { pbs_supply = 0
-      , pbs_postScript = mempty
-      , pbs_domEventSubscriptions = mempty
-      , pbs_onLoadSubscriptions = mempty
-      , pbs_rpcs = mempty
-      , pbs_reactives = mempty
+      { pbs_supply = 0,
+        pbs_postScript = mempty,
+        pbs_domEventSubscriptions = mempty,
+        pbs_onLoadSubscriptions = mempty,
+        pbs_triggerSubscriptions = mempty,
+        pbs_rpcs = mempty,
+        pbs_reactives = mempty,
+        pbs_hasTrigger = False
       }
 
 appendPostScript :: Template IO Js -> PageBuilder ()
-appendPostScript js = modify $ \s -> s{pbs_postScript = pbs_postScript s <> js}
+appendPostScript js = modify $ \s -> s {pbs_postScript = pbs_postScript s <> js}
 
 mkReactive :: (Send a) => IO a -> Event a -> PageBuilder (ReactiveKey a)
 mkReactive initial_ eUpdate = do
@@ -203,39 +217,39 @@ mkReactive initial_ eUpdate = do
             (pbs_reactives s)
       }
   pure key
- where
-  reactiveInitEvent :: ReactiveKey a -> Event a -> PageBuilder EventKey
-  reactiveInitEvent reactiveKey event = do
-    eventKey <- initEvent event
-    modify $ \s ->
-      s
-        { pbs_reactives =
-            DMap.adjust
-              (\info -> info{ri_event = pure eventKey})
-              reactiveKey
-              (pbs_reactives s)
-        }
-    pure eventKey
+  where
+    reactiveInitEvent :: ReactiveKey a -> Event a -> PageBuilder EventKey
+    reactiveInitEvent reactiveKey event = do
+      eventKey <- initEvent event
+      modify $ \s ->
+        s
+          { pbs_reactives =
+              DMap.adjust
+                (\info -> info {ri_event = pure eventKey})
+                reactiveKey
+                (pbs_reactives s)
+          }
+      pure eventKey
 
-  reactiveInitBehavior :: ReactiveKey a -> PageBuilder String
-  reactiveInitBehavior reactiveKey = do
-    ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
+    reactiveInitBehavior :: ReactiveKey a -> PageBuilder String
+    reactiveInitBehavior reactiveKey = do
+      ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
 
-    b <- newBehavior (ByteString.Lazy.Char8.unpack . encodeSend <$> initial)
-    modify $ \s ->
-      s
-        { pbs_reactives =
-            DMap.adjust
-              (\info -> info{ri_behavior = pure b})
-              reactiveKey
-              (pbs_reactives s)
-        }
+      b <- newBehavior (ByteString.Lazy.Char8.unpack . encodeSend <$> initial)
+      modify $ \s ->
+        s
+          { pbs_reactives =
+              DMap.adjust
+                (\info -> info {ri_behavior = pure b})
+                reactiveKey
+                (pbs_reactives s)
+          }
 
-    eventKey <- mkEvent
-    writeQueueName <- asks pbe_writeQueueName
-    subscribe (Event $ pure eventKey) $ \value -> queueAction writeQueueName (Js [b <> " = " <> value <> ";"])
+      eventKey <- mkEvent
+      writeQueueName <- asks pbe_writeQueueName
+      subscribe (Event $ pure eventKey) $ \value -> queueAction writeQueueName (Js [b <> " = " <> value <> ";"])
 
-    pure b
+      pure b
 
 queueAction :: String -> Js -> Js
 queueAction queueName action =
@@ -243,9 +257,13 @@ queueAction queueName action =
     <> indent 2 action
     <> Js ["});"]
 
+newtype TriggerId = TriggerId {getTriggerId :: String}
+  deriving Show
+
 data EventKey
   = EventKey_Derived String
   | EventKey_DomEvent String DomEvent
+  | EventKey_Trigger TriggerId
 
 newtype MemoRef a = MemoRef (IORef (MemoMaybe a))
 
@@ -261,10 +279,9 @@ unsafeNewMemoRef ::
   MemoRef EventKey
 unsafeNewMemoRef a = MemoRef (unsafePerformIO $ newIORef (MemoNothing a))
 
-{- | Do not use @unsafePerformIO newMemoRef@.
-It will create a single IORef in global scope due to let-floating.
-Use @unsafeNewMemoRef@ instead.
--}
+-- | Do not use @unsafePerformIO newMemoRef@.
+-- It will create a single IORef in global scope due to let-floating.
+-- Use @unsafeNewMemoRef@ instead.
 newMemoRef :: IO (MemoRef EventKey)
 newMemoRef = MemoRef <$> newIORef (MemoNothing undefined)
 
@@ -288,7 +305,7 @@ data Event :: Type -> Type where
 
 instance Functor Event where
   {-# INLINE fmap #-}
-  fmap f = let !memoRef = unsafeNewMemoRef f in FmapEvent memoRef (quote f)
+  fmap f a = let !memoRef = unsafeNewMemoRef a in FmapEvent memoRef (quote f) a
 
 data Behavior a where
   Behavior :: String -> Behavior a
@@ -306,6 +323,8 @@ subscribe ea callback = do
       appendPostScript . pure $ Js [name <> ".subscribers.push((" <> arg <> ") => {"] <> indent 2 (callback arg) <> Js ["});"]
     EventKey_DomEvent elId de -> do
       subscribeDomEvent elId de callback
+    EventKey_Trigger triggerId -> do
+      subscribeTrigger triggerId callback
 
 subscribeDomEvent :: String -> DomEvent -> (String -> Js) -> PageBuilder ()
 subscribeDomEvent elId de callback =
@@ -319,11 +338,16 @@ subscribeDomEvent elId de callback =
             (pbs_domEventSubscriptions s)
       }
 
+subscribeTrigger :: TriggerId -> (String -> Js) -> PageBuilder ()
+subscribeTrigger triggerId callback =
+  modify $ \s ->
+    s {pbs_triggerSubscriptions = callback <> pbs_triggerSubscriptions s}
+
 notify :: String -> PageBuilder (String -> Js)
 notify name = do
   f <- ("f_" <>) <$> freshId
-  pure
-    $ \value ->
+  pure $
+    \value ->
       Js
         [ "for ("
             <> f
@@ -346,25 +370,24 @@ newBehavior initial = do
   appendPostScript . Template $ (\i -> Js ["var " <> name <> " = " <> i]) <$> initial
   pure name
 
-{- |
-For example, in this code
-
-@
-do
-  rec r <- stepper initial $ sample e (current r)
-  let r' = fmap f r
-  ...
-@
-
-there's only one call to @sample e (current r)@. But without memoization,
-two @sample e (current r)@ events will be compiled: one for the event that
-updates to @current r@, and one for the event behind @fmap f r@. As a result,
-@e@ will have two subscribers instead of one. This is okay semantically, but
-it increases code size and duplicates work.
-
-Functions that call 'memoEvent' should be marked as @NOINLINE@, so that each
-call-site is assigned a single memoized event.
--}
+-- |
+-- For example, in this code
+--
+-- @
+-- do
+--   rec r <- stepper initial $ sample e (current r)
+--   let r' = fmap f r
+--   ...
+-- @
+--
+-- there's only one call to @sample e (current r)@. But without memoization,
+-- two @sample e (current r)@ events will be compiled: one for the event that
+-- updates to @current r@, and one for the event behind @fmap f r@. As a result,
+-- @e@ will have two subscribers instead of one. This is okay semantically, but
+-- it increases code size and duplicates work.
+--
+-- Functions that call 'memoEvent' should be marked as @NOINLINE@, so that each
+-- call-site is assigned a single memoized event.
 memoEvent :: (String -> PageBuilder ()) -> Event a
 memoEvent f = let !memoRef = unsafeNewMemoRef f in Event $ memoEventWith memoRef f
 
@@ -404,14 +427,14 @@ initReactive (FmapReactive f (Reactive key)) = do
   ReactiveInfo initial mkEvent _ <- gets $ (DMap.! key) . pbs_reactives
   memoRef <- liftIO newMemoRef
   mkReactive (Expr.quotedValue f <$> initial) (FmapEvent memoRef f $ Event mkEvent)
-initReactive (FmapReactive f' r'@FmapReactive{}) = go f' r'
- where
-  go :: (Send x) => Quoted (a -> x) -> Reactive a -> PageBuilder (ReactiveKey x)
-  go f (FmapReactive g r) = go (f `Expr.compose` g) r
-  go f (Reactive key) = do
-    ReactiveInfo initial mkEvent _ <- gets $ (DMap.! key) . pbs_reactives
-    memoRef <- liftIO newMemoRef
-    mkReactive (Expr.quotedValue f <$> initial) (FmapEvent memoRef f $ Event mkEvent)
+initReactive (FmapReactive f' r'@FmapReactive {}) = go f' r'
+  where
+    go :: (Send x) => Quoted (a -> x) -> Reactive a -> PageBuilder (ReactiveKey x)
+    go f (FmapReactive g r) = go (f `Expr.compose` g) r
+    go f (Reactive key) = do
+      ReactiveInfo initial mkEvent _ <- gets $ (DMap.! key) . pbs_reactives
+      memoRef <- liftIO newMemoRef
+      mkReactive (Expr.quotedValue f <$> initial) (FmapEvent memoRef f $ Event mkEvent)
 
 initBehavior :: Behavior a -> PageBuilder String
 initBehavior (Behavior var) = pure var
@@ -491,7 +514,9 @@ instance (Send a, Send b) => Send (a, b) where
 
 data SendPair a b = SendPair {fst :: a, snd :: b}
   deriving (Generic)
+
 instance (FromJSON a, FromJSON b) => FromJSON (SendPair a b)
+
 instance (ToJSON a, ToJSON b) => ToJSON (SendPair a b)
 
 decodeSend :: (Send a) => Lazy.ByteString -> Either String a
@@ -506,14 +531,31 @@ perform = Perform
 request :: (Send a, Send b) => Event a -> (a -> IO b) -> Interact (Event b)
 request = Request
 
-onLoad :: IO () -> Interact ()
+newtype SessionId = SessionId Int
+  deriving (Eq, Ord)
+
+data SessionEnv = SessionEnv
+  { sessionId :: SessionId,
+    connections :: Map SessionId Websocket.Connection
+  }
+
+newtype Session a = Session {runSession :: SessionEnv -> IO a}
+  deriving (Functor, Applicative, Monad, MonadIO, MonadReader SessionEnv) via (ReaderT SessionEnv IO)
+  
+forkSession :: Session () -> Session ThreadId
+forkSession (Session ma) = Session $ \env -> forkIO $ ma env
+
+onLoad :: Session () -> Interact ()
 onLoad = OnLoad
+
+mkTrigger :: (Send a) => Interact (a -> Session (), Event a)
+mkTrigger = MkTrigger
 
 data Page
   = Page Html
   | PageM (Interact Html)
 
-newtype RPC = RPC (forall a. Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a)
+newtype RPC = RPC (forall a. SessionEnv -> Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a)
 
 newtype Template m a = Template {runTemplate :: m a}
   deriving (Functor, Applicative) via IdentityT m
@@ -553,245 +595,253 @@ renderInteractHtml :: Path -> Interact Html -> PageBuilder (Template IO Builder)
 renderInteractHtml path x = do
   h <- go x
   renderHtml path h
- where
-  go :: Interact a -> PageBuilder a
-  go (Pure h) = pure h
-  go (Apply mf ma) = go mf <*> go ma
-  go (Bind ma f) = go ma >>= go . f
-  go TextInput = do
-    elId <- ("element_" <>) <$> freshId
-    behaviorId <- ("behavior_" <>) <$> freshId
-    pure
-      ( Behavior behaviorId
-      , MkElement elId
-          $ Node "input" [("id", elId), ("type", "text")] []
-          `WithScript` unlines
-            [ "const " <> elId <> " = document.getElementById(\"" <> elId <> "\");"
-            , "var " <> behaviorId <> " = \"\";"
-            , elId <> ".addEventListener("
-            , "  \"change\","
-            , "  (event) => {"
-            , "    " <> behaviorId <> " = " <> elId <> ".value;"
-            , "  }"
-            , ");"
-            ]
-      )
-  go (Element h) = do
-    elId <- ("element_" <>) <$> freshId
-    pure $ MkElement elId $ setId elId h `WithScript` ("const " <> elId <> " = document.getElementById(\"" <> elId <> "\");")
-  go (DomEvent de (MkElement elId _)) =
-    pure $ FromDomEvent elId de
-  go (Perform ea f) = do
-    let
-      run :: Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
-      run input resp =
-        case decodeSend input of
-          Left err -> do
-            hPutStrLn System.IO.stderr $ show err
-            undefined
-          Right a -> do
-            b <- f a
-            resp (encodeSend b)
+  where
+    go :: Interact a -> PageBuilder a
+    go (Pure h) = pure h
+    go (Apply mf ma) = go mf <*> go ma
+    go (Bind ma f) = go ma >>= go . f
+    go TextInput = do
+      elId <- ("element_" <>) <$> freshId
+      behaviorId <- ("behavior_" <>) <$> freshId
+      pure
+        ( Behavior behaviorId,
+          MkElement elId $
+            Node "input" [("id", elId), ("type", "text")] []
+              `WithScript` unlines
+                [ "const " <> elId <> " = document.getElementById(\"" <> elId <> "\");",
+                  "var " <> behaviorId <> " = \"\";",
+                  elId <> ".addEventListener(",
+                  "  \"change\",",
+                  "  (event) => {",
+                  "    " <> behaviorId <> " = " <> elId <> ".value;",
+                  "  }",
+                  ");"
+                ]
+        )
+    go (Element h) = do
+      elId <- ("element_" <>) <$> freshId
+      pure $ MkElement elId $ setId elId h `WithScript` ("const " <> elId <> " = document.getElementById(\"" <> elId <> "\");")
+    go (DomEvent de (MkElement elId _)) =
+      pure $ FromDomEvent elId de
+    go (Perform ea f) = do
+      let run :: SessionEnv -> Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
+          run _ input resp =
+            case decodeSend input of
+              Left err -> do
+                hPutStrLn System.IO.stderr $ show err
+                undefined
+              Right a -> do
+                b <- f a
+                resp (encodeSend b)
 
-    fnId <- ("function_" <>) <$> freshId
-    modify $ \s -> s{pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
+      fnId <- ("function_" <>) <$> freshId
+      modify $ \s -> s {pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
 
-    subscribe ea $ \value -> Js (fetch path fnId value)
-  go (Request ea f) = do
-    let
-      run :: Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
-      run input resp =
-        case decodeSend input of
-          Left err -> do
-            hPutStrLn System.IO.stderr $ show err
-            undefined
-          Right a -> do
-            b <- f a
-            resp (encodeSend b)
+      subscribe ea $ \value -> Js (fetch path fnId value)
+    go (Request ea f) = do
+      let run :: SessionEnv -> Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
+          run _ input resp =
+            case decodeSend input of
+              Left err -> do
+                hPutStrLn System.IO.stderr $ show err
+                undefined
+              Right a -> do
+                b <- f a
+                resp (encodeSend b)
 
-    fnId <- ("function_" <>) <$> freshId
-    modify $ \s -> s{pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
+      fnId <- ("function_" <>) <$> freshId
+      modify $ \s -> s {pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
 
-    name <- newEvent
-    response <- ("response_" <>) <$> freshId
-    arg <- ("arg_" <>) <$> freshId
-    notifyJs <- notify name
-    subscribe ea $ \value ->
-      Js
-        (fetch path fnId value)
-        <> Js [".then((" <> response <> ") => {"]
-        <> indent
-          2
-          ( Js [response <> ".json().then((" <> arg <> ") => {"]
-              <> indent 2 (notifyJs arg)
-              <> Js ["});"]
-          )
-        <> Js ["});"]
+      name <- newEvent
+      response <- ("response_" <>) <$> freshId
+      arg <- ("arg_" <>) <$> freshId
+      notifyJs <- notify name
+      subscribe ea $ \value ->
+        Js
+          (fetch path fnId value)
+          <> Js [".then((" <> response <> ") => {"]
+          <> indent
+            2
+            ( Js [response <> ".json().then((" <> arg <> ") => {"]
+                <> indent 2 (notifyJs arg)
+                <> Js ["});"]
+            )
+          <> Js ["});"]
 
-    pure $ Event (pure $ EventKey_Derived name)
-  go (StepperM getInitial eUpdate) =
-    Reactive <$> mkReactive getInitial eUpdate
-  go (Stepper initial eUpdate) = do
-    Reactive <$> mkReactive (pure initial) eUpdate
-  go (MFix f) = mfix (go . f)
-  go (OnLoad action) = do
-    {- `OnLoad action` is essentially `Perform eOnLoad action` for
-    a fictional `eOnLoad` event that fires on page load.
+      pure $ Event (pure $ EventKey_Derived name)
+    go (StepperM getInitial eUpdate) =
+      Reactive <$> mkReactive getInitial eUpdate
+    go (Stepper initial eUpdate) = do
+      Reactive <$> mkReactive (pure initial) eUpdate
+    go (MFix f) = mfix (go . f)
+    go (OnLoad action) = do
+      {- `OnLoad action` is essentially `Perform eOnLoad action` for
+      a fictional `eOnLoad` event that fires on page load.
 
-    I'm leaving `eOnLoad` out for now, because it feels too much like
-    an implementation detail. `onLoad :: IO () -> Interact ()` says that
-    the action is not run as part of describing the page (`Interact Html`),
-    but it is run when that page is alive.
-    -}
-    let
-      run :: Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
-      run input resp =
-        case decodeSend input of
-          Left err -> do
-            hPutStrLn System.IO.stderr $ show err
-            undefined
-          Right () -> do
-            action
-            resp (encodeSend ())
+      I'm leaving `eOnLoad` out for now, because it feels too much like
+      an implementation detail. `onLoad :: IO () -> Interact ()` says that
+      the action is not run as part of describing the page (`Interact Html`),
+      but it is run when that page is alive.
+      -}
+      let run :: SessionEnv -> Lazy.ByteString -> (Lazy.ByteString -> IO a) -> IO a
+          run sessionEnv input resp =
+            case decodeSend input of
+              Left err -> do
+                hPutStrLn System.IO.stderr $ show err
+                undefined
+              Right () -> do
+                runSession action sessionEnv
+                resp (encodeSend ())
 
-    fnId <- ("function_" <>) <$> freshId
-    modify $ \s -> s{pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
+      fnId <- ("function_" <>) <$> freshId
+      modify $ \s -> s {pbs_rpcs = Map.insert (ByteString.Char8.pack fnId) (RPC run) (pbs_rpcs s)}
 
-    modify $ \s ->
-      s
-        { pbs_onLoadSubscriptions =
-            pbs_onLoadSubscriptions s
-              <> (\value -> Js (fetch path fnId value))
-        }
+      modify $ \s ->
+        s
+          { pbs_onLoadSubscriptions =
+              pbs_onLoadSubscriptions s
+                <> (\value -> Js (fetch path fnId value))
+          }
+    go MkTrigger = do
+      modify $ \s -> s {pbs_hasTrigger = True}
+      triggerId <- TriggerId . ("trigger_" <>) <$> freshId
+      let event = Event . pure $ EventKey_Trigger triggerId
+      pure
+        ( \value -> Session $ \env ->
+            case Map.lookup (sessionId env) (connections env) of
+              Nothing -> error "connection missing"
+              Just connection -> Websocket.sendTextData connection (encodeSend value),
+          event
+        )
 
 exprToJavascript :: (MonadState s m, HasSupply s) => Expr.Ctx (Const String) ctx -> Expr.Expr ctx a -> m (Js, String)
 exprToJavascript = go id
- where
-  go :: (MonadState s m, HasSupply s) => (forall x. Expr.Index ctx' x -> Expr.Index ctx x) -> Expr.Ctx (Const String) ctx -> Expr.Expr ctx' a -> m (Js, String)
-  go weaken ctx expr =
-    case expr of
-      Expr.Var v -> do
-        let Const v' = Expr.getCtx (weaken v) ctx
-        pure (mempty, v')
-      Expr.Lam (body :: Expr.Expr (a ': ctx) b) -> do
-        arg <- ("arg_" <>) <$> freshId
-        (ls, body') <- go (\case Expr.Z -> Expr.Z; Expr.S ix -> Expr.S (weaken ix)) (Expr.Cons (Const arg :: Const String a) ctx) body
-        temp <- ("temp_" <>) <$> freshId
-        pure
-          ( Js ["const " <> temp <> " = (" <> arg <> ") => {"]
-              <> indent 2 (ls <> Js ["return " <> body' <> ";"])
-              <> Js ["};"]
-          , temp
-          )
-      Expr.App f x -> do
-        (ls, f') <- go weaken ctx f
-        (ls', x') <- go weaken ctx x
-        pure (ls <> ls', f' <> "(" <> x' <> ")")
-      Expr.Int i -> pure (mempty, show i)
-      Expr.Add a b -> do
-        (ls, a') <- go weaken ctx a
-        (ls', b') <- go weaken ctx b
-        pure (ls <> ls', "(" <> a' <> " + " <> b' <> ")")
-      Expr.Bool b ->
-        if b then pure (mempty, "true") else pure (mempty, "false")
-      Expr.IfThenElse cond t e -> do
-        (ls, cond') <- go weaken ctx cond
-        (ls', t') <- go weaken ctx t
-        (ls'', e') <- go weaken ctx e
-        pure (ls <> ls' <> ls'', "(" <> cond' <> " ? " <> t' <> " : " <> e' <> ")")
-      Expr.Lt a b -> do
-        (ls, a') <- go weaken ctx a
-        (ls', b') <- go weaken ctx b
-        pure (ls <> ls', "(" <> a' <> " < " <> b' <> ")")
-      Expr.Case a branches -> do
-        value <- ("value_" <>) <$> freshId
-        (ls, a') <- go weaken ctx a
-        result <- ("result_" <>) <$> freshId
-        (branches', Any tagged) <- runWriterT $ traverse (branchToJavascript value result weaken ctx) branches
-        pure
-          ( ls
-              <> Js ["const " <> value <> " = " <> a' <> ";"]
-              <> Js ["var " <> result <> ";"]
-              <> Js ["switch (" <> value <> (if tagged then ".tag" else "") <> ") {"]
-              <> indent 2 (fold branches')
-              <> Js ["}"]
-          , result
-          )
-       where
-        branchToJavascript ::
-          (MonadState s m, HasSupply s) =>
-          String ->
-          String ->
-          (forall x. Expr.Index ctx' x -> Expr.Index ctx x) ->
-          Expr.Ctx (Const String) ctx ->
-          Expr.Branch ctx' a b ->
-          WriterT Any m Js
-        branchToJavascript value result weaken ctx (Expr.Branch pattern body) =
-          case pattern of
-            Expr.PDefault -> do
-              (ls, body') <- lift $ go weaken ctx body
-              pure
-                $ Js ["default:"]
-                <> indent
-                  2
-                  ( ls
-                      <> Js
-                        [ result <> " = " <> body' <> ";"
-                        , "break;"
-                        ]
-                  )
-            Expr.PInt i -> do
-              (ls, body') <- lift $ go weaken ctx body
-              pure
-                $ Js ["case " <> show i <> ":"]
-                <> indent
-                  2
-                  ( ls
-                      <> Js
-                        [ result <> " = " <> body' <> ";"
-                        , "break;"
-                        ]
-                  )
-            Expr.PUnit -> do
-              (ls, body') <- lift $ go weaken ctx body
-              pure
-                $ Js ["default:"]
-                <> indent
-                  2
-                  ( ls
-                      <> Js
-                        [ result <> " = " <> body' <> ";"
-                        , "break;"
-                        ]
-                  )
-            Expr.PPair @ctx @a @b -> do
-              (ls, body') <-
-                lift
-                  $ go
-                    ( \case
-                        Expr.Z -> Expr.Z
-                        Expr.S n ->
-                          Expr.S $ case n of
+  where
+    go :: (MonadState s m, HasSupply s) => (forall x. Expr.Index ctx' x -> Expr.Index ctx x) -> Expr.Ctx (Const String) ctx -> Expr.Expr ctx' a -> m (Js, String)
+    go weaken ctx expr =
+      case expr of
+        Expr.Var v -> do
+          let Const v' = Expr.getCtx (weaken v) ctx
+          pure (mempty, v')
+        Expr.Lam (body :: Expr.Expr (a ': ctx) b) -> do
+          arg <- ("arg_" <>) <$> freshId
+          (ls, body') <- go (\case Expr.Z -> Expr.Z; Expr.S ix -> Expr.S (weaken ix)) (Expr.Cons (Const arg :: Const String a) ctx) body
+          temp <- ("temp_" <>) <$> freshId
+          pure
+            ( Js ["const " <> temp <> " = (" <> arg <> ") => {"]
+                <> indent 2 (ls <> Js ["return " <> body' <> ";"])
+                <> Js ["};"],
+              temp
+            )
+        Expr.App f x -> do
+          (ls, f') <- go weaken ctx f
+          (ls', x') <- go weaken ctx x
+          pure (ls <> ls', f' <> "(" <> x' <> ")")
+        Expr.Int i -> pure (mempty, show i)
+        Expr.Add a b -> do
+          (ls, a') <- go weaken ctx a
+          (ls', b') <- go weaken ctx b
+          pure (ls <> ls', "(" <> a' <> " + " <> b' <> ")")
+        Expr.Bool b ->
+          if b then pure (mempty, "true") else pure (mempty, "false")
+        Expr.IfThenElse cond t e -> do
+          (ls, cond') <- go weaken ctx cond
+          (ls', t') <- go weaken ctx t
+          (ls'', e') <- go weaken ctx e
+          pure (ls <> ls' <> ls'', "(" <> cond' <> " ? " <> t' <> " : " <> e' <> ")")
+        Expr.Lt a b -> do
+          (ls, a') <- go weaken ctx a
+          (ls', b') <- go weaken ctx b
+          pure (ls <> ls', "(" <> a' <> " < " <> b' <> ")")
+        Expr.Case a branches -> do
+          value <- ("value_" <>) <$> freshId
+          (ls, a') <- go weaken ctx a
+          result <- ("result_" <>) <$> freshId
+          (branches', Any tagged) <- runWriterT $ traverse (branchToJavascript value result weaken ctx) branches
+          pure
+            ( ls
+                <> Js ["const " <> value <> " = " <> a' <> ";"]
+                <> Js ["var " <> result <> ";"]
+                <> Js ["switch (" <> value <> (if tagged then ".tag" else "") <> ") {"]
+                <> indent 2 (fold branches')
+                <> Js ["}"],
+              result
+            )
+          where
+            branchToJavascript ::
+              (MonadState s m, HasSupply s) =>
+              String ->
+              String ->
+              (forall x. Expr.Index ctx' x -> Expr.Index ctx x) ->
+              Expr.Ctx (Const String) ctx ->
+              Expr.Branch ctx' a b ->
+              WriterT Any m Js
+            branchToJavascript value result weaken ctx (Expr.Branch pattern body) =
+              case pattern of
+                Expr.PDefault -> do
+                  (ls, body') <- lift $ go weaken ctx body
+                  pure $
+                    Js ["default:"]
+                      <> indent
+                        2
+                        ( ls
+                            <> Js
+                              [ result <> " = " <> body' <> ";",
+                                "break;"
+                              ]
+                        )
+                Expr.PInt i -> do
+                  (ls, body') <- lift $ go weaken ctx body
+                  pure $
+                    Js ["case " <> show i <> ":"]
+                      <> indent
+                        2
+                        ( ls
+                            <> Js
+                              [ result <> " = " <> body' <> ";",
+                                "break;"
+                              ]
+                        )
+                Expr.PUnit -> do
+                  (ls, body') <- lift $ go weaken ctx body
+                  pure $
+                    Js ["default:"]
+                      <> indent
+                        2
+                        ( ls
+                            <> Js
+                              [ result <> " = " <> body' <> ";",
+                                "break;"
+                              ]
+                        )
+                Expr.PPair @ctx @a @b -> do
+                  (ls, body') <-
+                    lift $
+                      go
+                        ( \case
                             Expr.Z -> Expr.Z
-                            Expr.S n' -> Expr.S (weaken n')
-                    )
-                    (Expr.Cons (Const (value <> ".snd") :: Const String b) $ Expr.Cons (Const (value <> ".fst") :: Const String a) ctx)
-                    body
-              pure
-                $ Js ["default:"]
-                <> indent
-                  2
-                  ( ls
-                      <> Js
-                        [ "" <> result <> " = " <> body' <> ";"
-                        , "break;"
-                        ]
-                  )
-      Expr.Char c -> do
-        pure (mempty, show c)
-      Expr.ToString -> do
-        pure (mempty, "JSON.stringify")
-      Expr.Weaken x -> go (weaken . Expr.S) ctx x
+                            Expr.S n ->
+                              Expr.S $ case n of
+                                Expr.Z -> Expr.Z
+                                Expr.S n' -> Expr.S (weaken n')
+                        )
+                        (Expr.Cons (Const (value <> ".snd") :: Const String b) $ Expr.Cons (Const (value <> ".fst") :: Const String a) ctx)
+                        body
+                  pure $
+                    Js ["default:"]
+                      <> indent
+                        2
+                        ( ls
+                            <> Js
+                              [ "" <> result <> " = " <> body' <> ";",
+                                "break;"
+                              ]
+                        )
+        Expr.Char c -> do
+          pure (mempty, show c)
+        Expr.ToString -> do
+          pure (mempty, "JSON.stringify")
+        Expr.Weaken x -> go (weaken . Expr.S) ctx x
 
 data Html
   = Html [Html]
@@ -812,150 +862,192 @@ renderDomEvent Change = "\"change\""
 
 renderPath :: (IsString s, Monoid s) => Path -> s
 renderPath (Path segments) = go segments
- where
-  go [] = mempty
-  go [b] = fromString b
-  go (b : bs) =
-    fromString b <> "/" <> go bs
+  where
+    go [] = mempty
+    go [b] = fromString b
+    go (b : bs) =
+      fromString b <> "/" <> go bs
 
 fetch :: (IsString s, Monoid s) => Path -> s -> s -> [s]
 fetch path fnId a =
-  [ "fetch("
-  , "  \"" <> renderPath path <> "\","
-  , "  { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> a <> " })}"
-  , ")"
+  [ "fetch(",
+    "  \"" <> renderPath path <> "\",",
+    "  { method: \"POST\", body: JSON.stringify({ fn: \"" <> fnId <> "\", arg: " <> a <> " })}",
+    ")"
   ]
 
 flushQueue :: String -> PageBuilder Js
 flushQueue queueName = do
   temp <- ("temp_" <>) <$> freshId
-  pure
-    $ Js ["while (" <> queueName <> ".length > 0) {"]
-    <> indent
-      2
-      ( Js
-          [ "const " <> temp <> " = " <> queueName <> ".shift();"
-          , temp <> "();"
-          ]
-      )
-    <> Js ["}"]
+  pure $
+    Js ["while (" <> queueName <> ".length > 0) {"]
+      <> indent
+        2
+        ( Js
+            [ "const " <> temp <> " = " <> queueName <> ".shift();",
+              temp <> "();"
+            ]
+        )
+      <> Js ["}"]
 
 renderHtml :: Path -> Html -> PageBuilder (Template IO Builder)
 renderHtml path h = do
   go Nothing h
- where
-  go :: Maybe String -> Html -> PageBuilder (Template IO Builder)
-  go _ (Html children) = do
-    writeQueueName <- asks pbe_writeQueueName
-    children' <- fold <$> traverse (go Nothing) children
-    postScript <- gets pbs_postScript
+  where
+    go :: Maybe String -> Html -> PageBuilder (Template IO Builder)
+    go _ (Html children) = do
+      writeQueueName <- asks pbe_writeQueueName
+      children' <- fold <$> traverse (go Nothing) children
 
-    flushQueueJs <- flushQueue writeQueueName
+      flushQueueJs <- flushQueue writeQueueName
 
-    domEventSubscriptions <- gets pbs_domEventSubscriptions
-    domEventSubscriptionsJs <- fmap fold . for (Map.toList domEventSubscriptions) $ \((elId, de), callback) -> do
-      arg <- ("arg_" <>) <$> freshId
-      pure
-        $ Js
-          [elId <> ".addEventListener("]
-        <> indent
-          2
-          ( Js
-              [ renderDomEvent de <> ","
-              , "(" <> arg <> ") => {"
-              ]
-              <> indent
-                2
-                ( callback arg
-                    <> flushQueueJs
-                )
-              <> Js ["}"]
-          )
-        <> Js [");"]
-
-    onLoadSubscriptions <- gets pbs_onLoadSubscriptions
-    onLoadSubscriptionsJs <- do
-      var <- ("var_" <>) <$> freshId
-      pure
-        $ Js ["window.addEventListener("]
-        <> indent
-          2
-          ( Js ["\"load\","]
-              <> Js ["(" <> var <> ") => {"]
-              <> indent 2 (onLoadSubscriptions var)
-              <> Js ["}"]
-          )
-        <> Js [");"]
-
-    postScriptJs <- liftIO $ runTemplate postScript
-    pure
-      $ "<!doctype html>\n"
-      <> "<html>\n"
-      <> children'
-      <> "<script>\n"
-      <> fromBuilder
-        ( Builder.byteString
-            $ ByteString.Char8.pack
-            . foldMap (<> "\n")
-            $ getJs (postScriptJs <> domEventSubscriptionsJs <> onLoadSubscriptionsJs)
-        )
-      <> "</script>"
-      <> "</html>\n"
-  go mId (Node name attrs children) = do
-    let nameBytes = ByteString.Char8.pack name
-    children' <- fold <$> traverse (go Nothing) children
-    pure
-      $ "<"
-      <> fromBuilder (Builder.byteString nameBytes)
-      <> foldMap
-        (\(attrName, attrValue) -> " " <> attrName <> "=\"" <> attrValue <> "\"")
-        ( maybe [] (pure . (,) "id" . fromString) mId
-            <> fmap
-              ( bimap
-                  (fromBuilder . Builder.byteString . ByteString.Char8.pack)
-                  (fromBuilder . Builder.byteString . ByteString.Char8.pack)
+      domEventSubscriptions <- gets pbs_domEventSubscriptions
+      domEventSubscriptionsJs <- fmap fold . for (Map.toList domEventSubscriptions) $ \((elId, de), callback) -> do
+        arg <- ("arg_" <>) <$> freshId
+        pure $
+          Js
+            [elId <> ".addEventListener("]
+            <> indent
+              2
+              ( Js
+                  [ renderDomEvent de <> ",",
+                    "(" <> arg <> ") => {"
+                  ]
+                  <> indent
+                    2
+                    ( callback arg
+                        <> flushQueueJs
+                    )
+                  <> Js ["}"]
               )
-              attrs
-        )
-      <> ">"
-      <> (case children of [] -> ""; [Text{}] -> ""; _ -> "\n")
-      <> children'
-      <> "</"
-      <> fromBuilder (Builder.byteString nameBytes)
-      <> ">\n"
-  go _ (Text t) =
-    -- TODO: escape text
-    pure . fromBuilder $ Builder.byteString (ByteString.Char8.pack t)
-  go mId (OnEvent element (event, action)) = do
-    elId <- maybe (("element_" <>) <$> freshId) pure mId
-    fnId <- ByteString.Char8.pack . ("function_" <>) <$> freshId
-    arg <- ("arg_" <>) <$> freshId
-    modify $ \s -> s{pbs_rpcs = Map.insert fnId (RPC $ \_ resp -> action *> resp "") (pbs_rpcs s)}
-    element' <- go (Just elId) element
-    pure
-      . (element' <>)
-      . foldMap (<> "\n")
-      $ [ "<script>"
-        , "const " <> fromString elId <> " = document.getElementById(\"" <> fromString elId <> "\");"
-        , fromString elId <> ".addEventListener("
-        , "  " <> renderDomEvent event <> ", "
-        , "  (" <> fromString arg <> ") => { "
-        ]
-      <> fmap ("  " <>) (fetch path (fromBuilder $ Builder.byteString fnId) "{}")
-      <> [ "  }"
-         , ");"
-         , "</script>"
-         ]
-  go mId (WithScript el script) = do
-    el' <- go mId el
-    pure $ el' <> "<script>\n" <> fromBuilder (Builder.byteString $ ByteString.Char8.pack script) <> "</script>\n"
-  go _mId (ReactiveText ra) = do
-    elId <- ("element_" <>) <$> freshId
-    reactiveKey <- initReactive ra
-    ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
-    event <- mkEvent
-    subscribe (Event $ pure event) $ \value -> Js [elId <> ".textContent = " <> value <> ";"]
-    pure $ "<span id=\"" <> fromBuilder (fromString elId) <> "\">" <> Template (fmap fromString initial) <> "</span>"
+            <> Js [");"]
+
+      hasTrigger <- gets pbs_hasTrigger
+      socketVar <- ("socket_" <>) <$> freshId
+      when hasTrigger . appendPostScript . pure $
+        Js [ "var " <> socketVar <> ";" ]
+
+      onLoadSubscriptions <- gets pbs_onLoadSubscriptions
+      triggerSubscriptions <- gets pbs_triggerSubscriptions
+      onLoadSubscriptionsJs <- do
+        var <- ("var_" <>) <$> freshId
+        socketOpenVar <- ("var_" <>) <$> freshId
+        socketMessageVar <- ("var_" <>) <$> freshId
+        pure $
+          Js ["window.addEventListener("]
+            <> indent
+              2
+              ( Js ["\"load\","]
+                  <> Js ["(" <> var <> ") => {"]
+                  <> indent
+                    2
+                    ( ( if hasTrigger
+                          then
+                            Js
+                              [ socketVar <> " = new WebSocket(\"ws://localhost:8000" <> renderPath path <> "?clientId=xxx\");",
+                                socketVar <> ".addEventListener("
+                              ]
+                              <> indent
+                                2
+                                ( Js
+                                    [ "\"open\",",
+                                      "(" <> socketOpenVar <> ") => {"
+                                    ]
+                                    <> indent
+                                      2
+                                      ( Js
+                                          [socketVar <> ".addEventListener("]
+                                          <> indent 2 (
+                                            Js [
+                                            "\"message\",",
+                                            "(" <> socketMessageVar <> ") => {"
+                                            ] <>
+                                            triggerSubscriptions socketMessageVar <>
+                                            Js ["}"]
+                                          )
+                                          <> Js [");"]
+                                      )
+                                    <> Js ["}"]
+                                )
+                              <> Js [");"]
+                          else mempty
+                      )
+                        <> onLoadSubscriptions var
+                    )
+                  <> Js ["}"]
+              )
+            <> Js [");"]
+
+      postScript <- gets pbs_postScript
+      postScriptJs <- liftIO $ runTemplate postScript
+      pure $
+        "<!doctype html>\n"
+          <> "<html>\n"
+          <> children'
+          <> "<script>\n"
+          <> fromBuilder
+            ( Builder.byteString
+                $ ByteString.Char8.pack
+                  . foldMap (<> "\n")
+                $ getJs (postScriptJs <> domEventSubscriptionsJs <> onLoadSubscriptionsJs)
+            )
+          <> "</script>"
+          <> "</html>\n"
+    go mId (Node name attrs children) = do
+      let nameBytes = ByteString.Char8.pack name
+      children' <- fold <$> traverse (go Nothing) children
+      pure $
+        "<"
+          <> fromBuilder (Builder.byteString nameBytes)
+          <> foldMap
+            (\(attrName, attrValue) -> " " <> attrName <> "=\"" <> attrValue <> "\"")
+            ( maybe [] (pure . (,) "id" . fromString) mId
+                <> fmap
+                  ( bimap
+                      (fromBuilder . Builder.byteString . ByteString.Char8.pack)
+                      (fromBuilder . Builder.byteString . ByteString.Char8.pack)
+                  )
+                  attrs
+            )
+          <> ">"
+          <> (case children of [] -> ""; [Text {}] -> ""; _ -> "\n")
+          <> children'
+          <> "</"
+          <> fromBuilder (Builder.byteString nameBytes)
+          <> ">\n"
+    go _ (Text t) =
+      -- TODO: escape text
+      pure . fromBuilder $ Builder.byteString (ByteString.Char8.pack t)
+    go mId (OnEvent element (event, action)) = do
+      elId <- maybe (("element_" <>) <$> freshId) pure mId
+      fnId <- ByteString.Char8.pack . ("function_" <>) <$> freshId
+      arg <- ("arg_" <>) <$> freshId
+      modify $ \s -> s {pbs_rpcs = Map.insert fnId (RPC $ \_ _ resp -> action *> resp "") (pbs_rpcs s)}
+      element' <- go (Just elId) element
+      pure
+        . (element' <>)
+        . foldMap (<> "\n")
+        $ [ "<script>",
+            "const " <> fromString elId <> " = document.getElementById(\"" <> fromString elId <> "\");",
+            fromString elId <> ".addEventListener(",
+            "  " <> renderDomEvent event <> ", ",
+            "  (" <> fromString arg <> ") => { "
+          ]
+          <> fmap ("  " <>) (fetch path (fromBuilder $ Builder.byteString fnId) "{}")
+          <> [ "  }",
+               ");",
+               "</script>"
+             ]
+    go mId (WithScript el script) = do
+      el' <- go mId el
+      pure $ el' <> "<script>\n" <> fromBuilder (Builder.byteString $ ByteString.Char8.pack script) <> "</script>\n"
+    go _mId (ReactiveText ra) = do
+      elId <- ("element_" <>) <$> freshId
+      reactiveKey <- initReactive ra
+      ReactiveInfo initial mkEvent _ <- gets $ (DMap.! reactiveKey) . pbs_reactives
+      event <- mkEvent
+      subscribe (Event $ pure event) $ \value -> Js [elId <> ".textContent = " <> value <> ";"]
+      pure $ "<span id=\"" <> fromBuilder (fromString elId) <> "\">" <> Template (fmap fromString initial) <> "</span>"
 
 -- | [[ App ]] = Path -> Maybe Page
 newtype App = App (Map Path Page)
@@ -981,16 +1073,18 @@ compile (App paths) = do
             p' <- renderPage ("" <> path) p
             rpcs <- gets pbs_rpcs
             pure (rpcs, p')
-          pure
-            $ if Map.null actions
+          pure $
+            if Map.null actions
               then Map.singleton methodGet (Right content)
               else Map.insert methodGet (Right content) $ Map.singleton methodPost (Left actions)
       )
       paths
+
+  connectionsVar <- newTVarIO mempty
+
   pure $ \request respond -> do
-    let
-      requestPath :: Path
-      requestPath = Path . fmap Text.unpack $ Wai.pathInfo request
+    let requestPath :: Path
+        requestPath = Path . fmap Text.unpack $ Wai.pathInfo request
 
     case Map.lookup requestPath actionsAndPages of
       Nothing ->
@@ -1013,19 +1107,21 @@ compile (App paths) = do
                           Nothing ->
                             respond $ Wai.responseLBS badRequest400 [] "invalid action request"
                           Just (RPC action) -> do
-                            action (Json.encode arg) (respond . Wai.responseBuilder ok200 [] . Builder.lazyByteString)
+                            conns <- atomically $ readTVar connectionsVar
+                            -- TODO: correct session id
+                            action SessionEnv {sessionId = SessionId 0, connections = conns} (Json.encode arg) (respond . Wai.responseBuilder ok200 [] . Builder.lazyByteString)
                   Right mkContents -> do
                     contents <- runTemplate mkContents
                     respond $ Wai.responseBuilder ok200 [] contents
- where
-  decodeJsonBody :: (FromJSON a) => Wai.Request -> IO (Either String a)
-  decodeJsonBody request = go mempty
-   where
-    go acc = do
-      bs <- Wai.getRequestBodyChunk request
-      if ByteString.null bs
-        then pure . Json.eitherDecode' $ Builder.toLazyByteString acc
-        else go (acc <> Builder.byteString bs)
+  where
+    decodeJsonBody :: (FromJSON a) => Wai.Request -> IO (Either String a)
+    decodeJsonBody request = go mempty
+      where
+        go acc = do
+          bs <- Wai.getRequestBodyChunk request
+          if ByteString.null bs
+            then pure . Json.eitherDecode' $ Builder.toLazyByteString acc
+            else go (acc <> Builder.byteString bs)
 
 serve :: App -> IO ()
 serve app = do

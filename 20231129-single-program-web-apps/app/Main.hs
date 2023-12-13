@@ -1,12 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Main where
 
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (forever)
 import Data.Foldable (fold)
+import Data.Functor (void)
+import Data.IORef
 import Data.Time.Clock (getCurrentTime)
 import Lib
 import System.Random (randomRIO)
+import Control.Monad.IO.Class (liftIO)
 
 app :: App
 app =
@@ -17,7 +23,7 @@ app =
             [ Node "head" [] [Node "title" [] [Text "Examples"]]
             , Node
                 "body"
-                []
+                [("style", "background-color: #222222")]
                 [ Node "p" [] [Text "Index of examples"]
                 , Node
                     "ul"
@@ -28,6 +34,7 @@ app =
                     , Node "li" [] [Node "a" [href ("example" <> "map")] [Text "Example 4 - \"map\""]]
                     , Node "li" [] [Node "a" [href ("example" <> "counter")] [Text "Example 5 - \"counter\""]]
                     , Node "li" [] [Node "a" [href ("example" <> "onload")] [Text "Example 6 - \"onload\""]]
+                    , Node "li" [] [Node "a" [href ("example" <> "trigger")] [Text "Example 7 - \"trigger\""]]
                     ]
                 ]
             ]
@@ -161,7 +168,7 @@ app =
     , pageM
         ("example" <> "onload")
         ( do
-            onLoad $ putStrLn . ("page loaded at " <>) . show =<< getCurrentTime
+            onLoad . liftIO $ putStrLn . ("page loaded at " <>) . show =<< getCurrentTime
 
             pure
               $ Html
@@ -173,6 +180,35 @@ app =
                         "p"
                         []
                         [Text "When the page loads, the server will run an action."]
+                    ]
+                ]
+        )
+    , pageM
+        ("example" <> "trigger")
+        ( do
+            (sendCount, eCount) <- mkTrigger @Int
+
+            onLoad . void . forkSession $ do
+              countRef <- liftIO $ newIORef 0
+              forever $ do
+                count <- liftIO $ readIORef countRef
+                liftIO $ writeIORef countRef $ count + 1
+                sendCount count
+                liftIO $ threadDelay 1000000
+
+            rec rCount <- stepper "no count recieved" $ toString <$> eCount
+
+            pure
+              $ Html
+                [ Node "head" [] [Node "title" [] [Text "Example - trigger"]]
+                , Node
+                    "body"
+                    [("style", "background-color: #222222")]
+                    [ Node
+                        "p"
+                        []
+                        [Text "When the page loads, the server will start counting, sending the counter to the client, and the client renders the counter."]
+                    , Node "p" [] [ReactiveText rCount]
                     ]
                 ]
         )
