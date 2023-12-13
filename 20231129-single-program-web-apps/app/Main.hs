@@ -4,6 +4,7 @@
 
 module Main where
 
+import Compiler.Plugin.Interface (toString)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
@@ -11,7 +12,15 @@ import Data.Foldable (fold)
 import Data.Functor (void)
 import Data.IORef
 import Data.Time.Clock (getCurrentTime)
-import Lib
+import SPWA.App (App, page, pageM, serve)
+import SPWA.DomEvent (DomEvent (..))
+import SPWA.Element (html)
+import SPWA.Event (domEvent, sample)
+import SPWA.Html (Html (..))
+import SPWA.Interact (element, mkTrigger, onLoad, perform, request, stepper, stepperM, textInput)
+import SPWA.Path (href)
+import SPWA.Reactive (current)
+import SPWA.Session (forkSession)
 import System.Random (randomRIO)
 
 app :: App
@@ -215,4 +224,4 @@ app =
     ]
 
 main :: IO ()
-main = serve app
+main = serve 8000 app

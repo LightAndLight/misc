@@ -16,7 +16,26 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Lib
+    exposed-modules:
+        SPWA.Html
+        SPWA.Reactive
+        SPWA.Behavior
+        SPWA.Interact
+        SPWA.Send
+        SPWA.Element
+        SPWA.Event
+        SPWA.MemoRef
+        SPWA.PageBuilder
+        SPWA.RPC
+        SPWA.Js
+        SPWA.Template
+        SPWA.Session
+        SPWA.Supply
+        SPWA.Path
+        SPWA.ExprToJavascript
+        SPWA.DomEvent
+        SPWA.Page
+        SPWA.App
     -- other-modules:
     -- other-extensions:
     build-depends:    
