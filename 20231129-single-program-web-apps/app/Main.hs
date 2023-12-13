@@ -4,15 +4,15 @@
 
 module Main where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (threadDelay)
 import Control.Monad (forever)
+import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (fold)
 import Data.Functor (void)
 import Data.IORef
 import Data.Time.Clock (getCurrentTime)
 import Lib
 import System.Random (randomRIO)
-import Control.Monad.IO.Class (liftIO)
 
 app :: App
 app =
@@ -23,7 +23,7 @@ app =
             [ Node "head" [] [Node "title" [] [Text "Examples"]]
             , Node
                 "body"
-                [("style", "background-color: #222222")]
+                []
                 [ Node "p" [] [Text "Index of examples"]
                 , Node
                     "ul"
@@ -203,7 +203,7 @@ app =
                 [ Node "head" [] [Node "title" [] [Text "Example - trigger"]]
                 , Node
                     "body"
-                    [("style", "background-color: #222222")]
+                    []
                     [ Node
                         "p"
                         []
