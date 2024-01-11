@@ -127,41 +127,82 @@ record Result (a : Set) (input : List Char) : Set where
     consumed : Suffix input suffix
     value : Maybe a
 
+data IsSuc {a : Set} : ∀{@0 input output : List a} → Suffix input output → Set where
+  is-suc : ∀{@0 x : a} {@0 input output} {@0 suffix : Suffix input output} → IsSuc (suc {x = x} suffix)
+
+data IsZero {a : Set} : ∀{@0 input output : List a} → Suffix input output → Set where
+  is-zero : ∀{@0 input} {@0 suffix : Suffix input input} → IsZero {input = input} {output = input} zero
+
+record Result'' (consumes : Bool) (a : Set) (input : List Char) : Set where
+  field
+    @0 {suffix} : List Char
+    consumed : Suffix input suffix
+    value : Maybe a
+    @0 {consumes-suc} : IsSuc consumed → (consumes ≡ true)
+    @0 {consumes-zero} : IsZero consumed → (consumes ≡ false)
+
+if-consumed : ∀{@0 consumes a input} {r : Bool → Set} → Result'' consumes a input → (@0 consumes ≡ false → r consumes) → (@0 consumes ≡ true → r consumes) → r consumes
+if-consumed {consumes = consumes} {a = a} {r = r} result case-false case-true =
+  go (Result''.consumed result) (Result''.consumes-suc result) (Result''.consumes-zero result)
+  where
+    go :
+      ∀{@0 input output} →
+      (consumed : Suffix input output) →
+      @0 (IsSuc consumed → (consumes ≡ true)) →
+      @0 (IsZero consumed → (consumes ≡ false)) →
+      r consumes
+    go consumed prf-suc-bwd prf-zero-bwd with consumed
+    ... | zero = case-false (prf-zero-bwd (is-zero { suffix = consumed }))
+    ... | suc res = case-true (prf-suc-bwd is-suc)
+
 data Result' (a : Set) : Bool → List Char → Set where
+  failed :
+    ∀{@0 input con} {@0 suffix : List Char} →
+    (consumed : Suffix input suffix) →
+    Result' a con input
   must-consume :
     ∀{@0 x xs} {@0 suffix : List Char} →
     (consumed : Suffix xs suffix) →
-    (value : Maybe a) →
+    (value : a) →
     Result' a true (x ∷ xs)
   may-consume :
     ∀{@0 input} {@0 suffix : List Char} →
     (consumed : Suffix input suffix) →
-    (value : Maybe a) →
+    (value : a) →
     Result' a false input
 
 @0 suffix' : ∀{@0 a consumed input} → Result' a consumed input → List Char
+suffix' (failed {suffix = suffix} consumed) = suffix
 suffix' (must-consume {suffix = suffix} consumed value) = suffix
 suffix' (may-consume {suffix = suffix} consumed value) = suffix
 
 consumed' : ∀{@0 a consumed input} → (result : Result' a consumed input) → Suffix input (suffix' result)
+consumed' (failed consumed) = consumed
 consumed' (must-consume consumed value) = suc consumed
 consumed' (may-consume consumed value) = consumed
 
 value' : ∀{@0 a consumed input} → (result : Result' a consumed input) → Maybe a
-value' (must-consume consumed value) = value
-value' (may-consume consumed value) = value
+value' (failed consumed) = nothing
+value' (must-consume consumed value) = just value
+value' (may-consume consumed value) = just value
+
+Parser : Set → Set
+Parser a = (input : List Char) → Result a input
 
 Parser' : Bool → Set → Set
 Parser' consumes a = (input : List Char) → Result' a consumes input
 
-Parser : Set → Set
-Parser a = (input : List Char) → Result a input
+Parser'' : Bool → Set → Set
+Parser'' consumes a = (input : List Char) → Result'' consumes a input
 
 pure : ∀{a} → a → Parser a
 pure a = λ input → record { consumed = zero ; value = just a }
 
 pure' : ∀{a} → a → Parser' false a
-pure' a = λ input → may-consume zero (just a)
+pure' a = λ input → may-consume zero a
+
+pure'' : ∀{a} → a → Parser'' false a
+pure'' a = λ input → record { consumed = zero ; value = just a ; consumes-suc = λ () ; consumes-zero = λ is-zero → refl }
 
 _<*>_ : ∀{a b} → Parser (a → b) → Parser a → Parser b
 pf <*> pa = λ input →
@@ -185,8 +226,127 @@ pf <*> pa = λ input →
 
 infixl 5 _<*>_
 
-_<*>'_ : ∀{a b} {con con'} → Parser' con (a → b) → Parser' con' a → Parser' (con ∨ con') b
-_<*>'_ = {!!}
+_<*>'_ : ∀{a b con con'} → Parser' con (a → b) → Parser' con' a → Parser' (con ∨ con') b
+_<*>'_ {a = a} {b = b} {con = con} {con' = con'} pf pa = λ input →
+  let rf = pf input in
+  go input rf
+  where
+    go2 : ∀{@0 suffix} → (a → b) → (input : List Char) → Suffix input suffix → Result' b con' input
+    go2 {suffix = suffix} f input fconsumed = {!!}
+      where
+        x : Subset (List Char) (λ x → x ≡ suffix)
+        x = Suffix-drop input fconsumed
+
+        input' : List Char
+        input' = Subset.value x
+
+        @0 input'≡suffix-rf : input' ≡ suffix
+        input'≡suffix-rf = Subset.prf x
+
+        ra : Result' a con' input'
+        ra = pa input'
+
+    go : (input : List Char) → Result' (a → b) con input → Result' b (con ∨ con') input
+    go input (failed consumed) = failed consumed
+    go (x ∷ xs) (must-consume {suffix = suffix} fconsumed f) =
+      case value' ra of λ{
+        nothing → failed (Suffix-trans (suc fconsumed) (subst-erased (λ x → Suffix x (suffix' ra)) input'≡suffix-rf (consumed' ra))) ;
+        (just a) → must-consume (Suffix-trans fconsumed ((subst-erased (λ x → Suffix x (suffix' ra)) input'≡suffix-rf (consumed' ra)))) (f a)
+      }
+      where
+        p1 : Subset (List Char) (λ x → x ≡ suffix)
+        p1 = Suffix-drop (x ∷ xs) (suc fconsumed)
+
+        input' : List Char
+        input' = Subset.value p1
+
+        @0 input'≡suffix-rf : input' ≡ suffix
+        input'≡suffix-rf = Subset.prf p1
+
+        ra : Result' a con' input'
+        ra = pa input'
+    go input (may-consume {suffix = suffix} fconsumed f) =
+      case value' ra of λ{
+        nothing → failed (Suffix-trans fconsumed (subst-erased (λ x → Suffix x (suffix' ra)) input'≡suffix-rf (consumed' ra))) ;
+        (just a) → {!!}
+      }
+      where
+        p1 : Subset (List Char) (λ x → x ≡ suffix)
+        p1 = Suffix-drop input fconsumed
+
+        input' : List Char
+        input' = Subset.value p1
+
+        @0 input'≡suffix-rf : input' ≡ suffix
+        input'≡suffix-rf = Subset.prf p1
+
+        ra : Result' a con' input'
+        ra = pa input'
+    {-
+  case value' rf of λ{
+    nothing → record { consumed = consumed' rf ; value = nothing } ;
+    (just f) →
+      let record { value = input' ; prf = input'≡suffix-rf } = Suffix-drop input (consumed' rf) in
+      let ra = pa input' in
+      record {
+        consumed =
+          Suffix-trans
+            (consumed' rf)
+            (subst-erased (λ x → Suffix x (suffix' ra)) input'≡suffix-rf (consumed' ra))
+        ; value = case value' ra of λ{
+            nothing → nothing ;
+            (just a) → just (f a)
+          }
+      }
+  }
+    -}
+
+
+
+_<*>''_ : ∀{a b con con'} → Parser'' con (a → b) → Parser'' con' a → Parser'' (con ∨ con') b
+_<*>''_ {con = con} {con' = con'} pf pa = λ input →
+  let rf = pf input in
+  case Result''.value rf of λ{
+    nothing →
+      record {
+        consumed = Result''.consumed rf
+        ; value = nothing
+        ; consumes-suc = λ x → let y = Result''.consumes-suc rf x in subst (λ x → x ∨ con' ≡ true) (sym y) refl
+        ; consumes-zero = λ x → let y = Result''.consumes-zero rf x in subst (λ x → x ∨ con' ≡ false) (sym y) {!!}
+        } ;
+    (just f) →
+      let record { value = input' ; prf = input'≡suffix-rf } = Suffix-drop input (Result''.consumed rf) in
+      let ra = pa input' in
+      {-
+          Suffix-trans
+            (Result''.consumed rf)
+            (subst-erased (λ x → Suffix x (Result''.suffix ra)) input'≡suffix-rf (Result''.consumed ra))
+      -}
+        case Result''.value ra of λ{
+            nothing → record {
+              consumed = 
+                Suffix-trans
+                  (Result''.consumed rf)
+                  (subst-erased (λ x → Suffix x (Result''.suffix ra)) input'≡suffix-rf (Result''.consumed ra))
+              ; value = nothing
+              ; consumes-suc = {!!}
+              ; consumes-zero = {!!}
+            } ;
+            (just a) → record {
+              consumed = 
+                Suffix-trans
+                  (Result''.consumed rf)
+                  (subst-erased (λ x → Suffix x (Result''.suffix ra)) input'≡suffix-rf (Result''.consumed ra))
+              ; value = just (f a)
+              ; consumes-suc = {!!}
+              ; consumes-zero = {!!}
+              }
+        }
+  }
+
+infixl 5 _<*>''_
+
+{-
 
 {-
 
@@ -215,11 +375,11 @@ instance Alternative Parser where
 
 -}
 
-char : Char → Parser ⊤
-char c = λ{ [] → record { consumed = zero ; value = nothing } ; (x ∷ xs) → 
+char : Char → Parser' true ⊤
+char c = λ{ [] → failed zero ; (x ∷ xs) → 
   if c Data.Char.== x
-  then record { consumed = suc zero ; value = just tt }
-  else record { consumed = zero ; value = nothing }
+  then must-consume zero tt
+  else failed zero
   }
 
 {-
@@ -303,19 +463,16 @@ infix 6 ↓'_
 
 infix 6 ↓?_
 
-_<*>ᵣ_ : ∀{a b : Set} → ∀[ Result' (a → b) true ⇒ □ (Result a) ⇒ Result' b true ]
-_<*>ᵣ_ {a = a} {b = b} {input = input} rf □-Result-a =
+_<*>ᵣ_ : ∀{a b : Set} {con} → ∀[ Result' (a → b) true ⇒ □ (Result' a con) ⇒ Result' b true ]
+_<*>ᵣ_ {a = a} {b = b} {con = con} {input = input} rf □-Result-a =
   case rf of λ{
-    (must-consume {suffix = suffix} consumed value) →
-      case value of λ{
-        nothing → must-consume consumed nothing ;
-        (just f) →
+    (must-consume {suffix = suffix} consumed f) →
           let
             record { value = input' ; prf = prf } = Suffix-drop input (suc consumed)
 
-            ra : Result a suffix
+            ra : Result' a con suffix
             ra =
-              subst-erased (λ x → Result a x) (prf) (
+              subst-erased (λ x → Result' a con x) (prf) (
               □-Result-a
                 input'
                 (s≤s (subst-erased (λ x → length x ≤' _) (sym prf) (Suffix-length-≤ _ consumed)))
@@ -323,13 +480,14 @@ _<*>ᵣ_ {a = a} {b = b} {input = input} rf □-Result-a =
               )
           in
           go consumed f ra
-      }
+      ;
+    (failed consumed) → failed consumed
   }
   where
-    go : ∀{@0 suffix b x xs} → Suffix xs suffix → (a → b) → Result a suffix → Result' b true (x ∷ xs)
-    go fconsumed f result with Result.value result
-    ... | nothing = must-consume fconsumed nothing
-    ... | just a = must-consume (Suffix-trans fconsumed (Result.consumed result)) (just (f a))
+    go : ∀{@0 suffix b x xs} → Suffix xs suffix → (a → b) → Result' a con suffix → Result' b true (x ∷ xs)
+    go fconsumed f result with value' result
+    ... | nothing = failed (suc fconsumed)
+    ... | just a = must-consume (Suffix-trans fconsumed (consumed' result)) (f a)
 
 infixl 5 _<*>ᵣ_
 
@@ -342,18 +500,17 @@ box {a} pa {input} = λ input' length-input'<length-input suffix → go input su
 
 infix 6 ↑_
 
-_<|>ᵣ_ : ∀{a : Set} → ∀[ □ (Result a) ⇒ □ (Result a) ⇒ □ (Result a) ]
+_<|>ᵣ_ : ∀{a : Set} {con con'} → ∀[ □ (Result' a con) ⇒ □ (Result' a con') ⇒ □ (Result' a (con ∨ con')) ]
 _<|>ᵣ_ = {!!}
 
 infixr 4 _<|>ᵣ_
 
-forget : ∀{a : Set} {con} → ∀[ □ (Result' a con) ⇒ □ (Result a) ]
-forget = {!!}
-
 some : ∀{a} → Parser' true a → Parser' true (List a)
 some pa =
-  fixₚ (λ self → ↓' (pure' _∷_ <*>' pa) <*>ᵣ (forget self <|>ᵣ box (↓ pure [])))
+  fixₚ (λ self → ↓' (pure' _∷_ <*>' pa) <*>ᵣ (self <|>ᵣ box (↓' pure' [])))
 
+_ : some (char 'c') ('c' ∷ 'c' ∷ 'c' ∷ []) ≡ must-consume (suc (suc zero)) (tt ∷ tt ∷ tt ∷ [])
+_ = refl
 {-
 fixP :: forall a. (Parser a -> Parser a) -> Parser a
 fixP f = Parser (go Z)
@@ -498,5 +655,7 @@ some', many' :: Parser a -> Parser [a]
         , \pa -> some_self pa <|> pure []
         )
     )
+
+-}
 
 -}
