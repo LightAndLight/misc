@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Autoresizing text area</title>
+</head>
+<body>
+<textarea id="it" rows="2" cols="80"></textarea>
+<script type="text/javascript">
+const textArea = document.getElementById("it");
+
+/*
+// Re-implementing paste behaviour and firing an input event.
+// The browser can no longer undo/redo edits (they must also be re-implemented in JS).
+
+textArea.addEventListener(
+  "paste",
+  (event) => {
+    event.preventDefault();
+    
+    const pastedText = event.clipboardData.getData("text/plain");
+    const prefix = event.target.value.substring(0, event.target.selectionStart);
+    const suffix = event.target.value.substring(event.target.selectionEnd);
+    event.target.value = prefix + pastedText + suffix;
+    
+    const newCursorPos = prefix.length + pastedText.length;
+    event.target.selectionStart = newCursorPos;
+    event.target.selectionEnd = newCursorPos;
+    
+    event.target.dispatchEvent(
+      new InputEvent("input", {
+        data: event.target.value
+      })
+    );
+  }
+);
+
+textArea.addEventListener(
+  "input",
+  (event) => {
+    const computedStyles = window.getComputedStyle(event.target);
+    const paddingTop = parseInt(computedStyles.getPropertyValue("padding-top"));
+    const paddingBottom = parseInt(computedStyles.getPropertyValue("padding-bottom"));
+    event.target.style.height = `${event.target.scrollHeight - paddingTop - paddingBottom}px`;
+  }
+);
+*/
+
+/*
+// Re-implementing paste behaviour, but without updating the `textarea`'s `value`.
+// Risks the re-implementation becoming out of sync with the browser's version of paste.
+textArea.addEventListener(
+  "paste",
+  (event) => {
+    event.preventDefault();
+    
+    const pastedText = event.clipboardData.getData("text/plain");
+    const prefix = event.target.value.substring(0, event.target.selectionStart);
+    const suffix = event.target.value.substring(event.target.selectionEnd);
+    event.target.value = prefix + pastedText + suffix;
+    
+    const newCursorPos = prefix.length + pastedText.length;
+    event.target.selectionStart = newCursorPos;
+    event.target.selectionEnd = newCursorPos;
+    
+    event.target.dispatchEvent(
+      new InputEvent("input", {
+        data: event.target.value
+      })
+    );
+  }
+);
+
+textArea.addEventListener(
+  "input",
+  (event) => {
+    const computedStyles = window.getComputedStyle(event.target);
+    const paddingTop = parseInt(computedStyles.getPropertyValue("padding-top"));
+    const paddingBottom = parseInt(computedStyles.getPropertyValue("padding-bottom"));
+    event.target.style.height = `${event.target.scrollHeight - paddingTop - paddingBottom}px`;
+  }
+);
+*/
+
+// It seems like pasting *does* trigger an input event, and input events fire *after*
+// the changed element has been updated. So this seems like the fully-general way to
+// grow/shrink the text box. It also respects the minimum bound given by `rows`, if any.
+textArea.addEventListener(
+  "input",
+  (event) => {
+    const computedStyles = window.getComputedStyle(event.target);
+    
+    const paddingYPixels = 
+      parseInt(computedStyles.getPropertyValue("padding-top")) +
+      parseInt(computedStyles.getPropertyValue("padding-bottom"));
+    
+    var offset = 0;
+    const boxSizing = computedStyles.getPropertyValue("box-sizing");
+    switch (boxSizing) {
+      case "content-box":
+        offset -= paddingYPixels;
+        break;
+      case "border-box":
+        const borderTopPixels = parseInt(computedStyles.getPropertyValue("border-top"));
+        const borderBottomPixels = parseInt(computedStyles.getPropertyValue("border-bottom"));
+        offset += paddingYPixels + borderTopPixels + borderBottomPixels;
+        break;
+      default:
+        console.warn(`Unknown box-sizing value: ${boxSizing}`);
+        break;
+    };
+    
+    event.target.style.height = "auto";
+    event.target.style.height = `${event.target.scrollHeight + offset}px`;
+  }
+);
+</script>
+</body>
+</html>
