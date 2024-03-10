@@ -1,0 +1,40 @@
+def three : [] -> [Int64] = 1 2 add;
+
+def 4three : [] -> [Int64, Int64] =
+  4 three
+;
+
+def thingo(x : [] -> [Int64], y : [] -> [Int64]) : [] -> [Int64] =
+  x y add
+;
+
+def pairing : [] -> [Int64 * Int64] =
+  1 2 pair
+;
+
+def unpairing : [] -> [Int64, Int64] =
+  pairing unpair
+;
+
+def summing : [] -> [Int64 + Int64, Int64 + Int64] =
+  1 inl
+  2 inr
+;
+
+def test1 : [] -> [Int64 + Int64, Int64 + Int64] =
+  summing
+;
+
+def test2 : [Int64 + Int64, Int64 + Int64] -> [Int64, Int64] =
+  par(
+    type [Int64 + Int64, Int64 + Int64],
+    type Int64,
+    type Int64,
+    #1 unsum(2 add, 3 add),
+    #0 unsum(2 add, 3 add)
+  )
+;
+
+def unsumming : [] -> [Int64] =
+  summing par(type [Int64 + Int64, Int64 + Int64], type Int64, type Int64, unsum(2 add, 3 add), unsum(2 add, 3 add)) add
+;

@@ -1,0 +1,86 @@
+import
+  sum(either)
+  product(both)
+  maybe(Maybe)
+;
+
+type List : Type -> Type;
+ctor nil : [] -> [List a];
+ctor cons : [List a, a] -> [List a];
+
+def split[xs : List Char, c : Char] -> [List Char + List Char * List Char] =
+  xs match(
+    nil = nil inl;
+    cons = 
+      \[xs, x]
+      x c eq
+      match(
+        true = xs nil pair inr;
+        false =
+          xs c split either(
+            x cons,
+            both(id, x cons),
+          );
+      );
+  )
+;
+
+def splits : [List Char, Char] -> [List (List Char)] =
+  split match(
+    inl = cons[nil];
+    inr = unpair par(splits, #0) cons;
+  )
+;
+
+def unfold[s : s, f : (Maybe (s * a))^s] -> [List a] =
+  f s app match(
+    nothing = nil;
+    just = unpair par(#1 f unfold, #0) cons;
+  )
+;
+
+def filter-map[xs : List a, f : (Maybe b)^a] -> [List b] =
+  xs match(
+    nil = nil;
+    cons = par(#1 f filter-map, #0 app[f]) maybe(id, cons);
+  )
+;
+
+def first : [List a] -> [a] =
+  match(
+    nil = undefined;
+    cons = #0;
+  )
+;
+
+def last : [List a] -> [a] =
+  match(
+    nil = undefined;
+    cons =
+      \[xs, x]
+      xs match(
+        nil = x;
+        cons = drop drop xs last;
+      );
+  )
+;
+
+def map[xs : List a, f : b^a] -> [List b] =
+  xs
+  match(
+    nil = nil;
+    cons = par(#1 f map, #0 app[f]) cons;
+  )
+;
+
+def foldl[xs : List a, z : b, f : b^(a * b)] -> [b] =
+  xs
+  match(
+    nil = z;
+    cons = \[xs, x] xs (f pair[x, z] app) f foldl;
+  )
+;
+
+def sum : [List Int] -> [Int] =
+  0 fn(unpair add) foldl
+;

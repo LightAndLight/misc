@@ -1,0 +1,10 @@
+type Maybe : Type -> Type;
+ctor nothing : [] -> [Maybe a];
+ctor just : [a] -> [Maybe a];
+
+def maybe(z : x -> b, f : [..x, a] -> b) : [..x, Maybe a] -> b =
+  match(
+    nothing = z;
+    just = f;
+  )
+;

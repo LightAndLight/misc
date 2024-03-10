@@ -1,0 +1,12 @@
+import 
+  maybe(Maybe)
+  list(unfold)
+;
+
+def uncons : [String] -> [Maybe (String * Char)] =
+  builtins.uncons
+;
+
+def chars : [String] -> [List Char] =
+  fn(#0 uncons) unfold
+;

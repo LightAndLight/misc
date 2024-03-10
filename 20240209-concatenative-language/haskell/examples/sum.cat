@@ -1,0 +1,6 @@
+either(f : a -> c, g : b -> d) : a + b -> c + d =
+  match(
+    inl = f inl;
+    inr = g inr;
+  )
+;

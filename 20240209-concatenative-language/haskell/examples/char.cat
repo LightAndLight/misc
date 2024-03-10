@@ -1,0 +1,17 @@
+import maybe(Maybe, just, nothing);
+
+def decimal-digit : [Char] -> [Maybe Int] =
+  match(
+    '0' = 0 just;
+    '1' = 1 just;
+    '2' = 2 just;
+    '3' = 3 just;
+    '4' = 4 just;
+    '5' = 5 just;
+    '6' = 6 just;
+    '7' = 7 just;
+    '8' = 8 just;
+    '9' = 9 just;
+    _ = nothing;
+  )
+;

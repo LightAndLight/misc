@@ -1,0 +1,16 @@
+import 
+  string(..)
+  list(..)
+  char(..)
+;
+
+def main : [String] -> [Int] =
+  chars '\n' splits
+  fn(
+    #0 decimal-digit filter-map
+    par(first 10 mul, last)
+    add
+  )
+  map
+  sum
+;
