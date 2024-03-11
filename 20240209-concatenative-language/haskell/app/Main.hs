@@ -9,7 +9,7 @@
 module Main where
 
 import qualified AOC2023.D1
-import Lib
+import Eval
 import Options.Applicative
 
 data Config
