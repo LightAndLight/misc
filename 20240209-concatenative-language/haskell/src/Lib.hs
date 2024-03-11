@@ -1,544 +1,412 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# OPTIONS_GHC -ddump-simpl
+    -dsuppress-idinfo
+    -dsuppress-coercions
+    -dsuppress-type-applications
+    -dsuppress-uniques
+    -dsuppress-module-prefixes 
+    -ddump-to-file #-}
 
 module Lib where
 
-import Control.Applicative ((<|>))
-import Control.Comonad (extract)
-import Control.Lens.Getter ((^.))
-import Data.Bifunctor (bimap, first)
-import Data.Either (partitionEithers)
-import Data.Foldable (fold, foldl', foldlM, toList, traverse_)
-import Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as HashMap
-import Data.Int (Int64)
-import Data.List (find, intercalate)
-import Data.List.NonEmpty (NonEmpty (..))
-import Data.Maybe (fromMaybe)
-import Text.Parser.Char
-import Text.Parser.Combinators
-import Text.Parser.Token hiding (brackets, parens)
-import qualified Text.Parser.Token
-import Text.Trifecta (DeltaParsing, Result (..), Span, Spanned (..), parseString, span, spanned, _errDoc)
-import Prelude hiding (Word, span, words)
+import Data.Kind (Type)
+import Data.List (intercalate)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Prelude hiding (drop, filter, foldl, foldr, id, last, map, sum, (.))
+import qualified Prelude
 
-data Word a
-  = Word String [Spanned a]
-  deriving (Show)
+data Ty
+  = TString
+  | TInt
+  | TChar
+  | TBool
+  | TSum Ty Ty
+  | TProd Ty Ty
+  | TExp Ty Ty
+  | TList Ty
+  | TMaybe Ty
 
-parens :: String -> String
-parens x = "(" <> x <> ")"
+data Ctx = Nil | (:.) Ctx Ty
 
-printWord :: (a -> String) -> Word a -> String
-printWord printArg (Word name args)
-  | null args = name
-  | otherwise = name <> parens (intercalate ", " (printArg . extract <$> args))
+infixl 5 :.
 
-newtype Program = Program (NonEmpty (Spanned (Word (Either Type (Spanned Program)))))
-  deriving (Show)
+data Index :: Ctx -> Ty -> Type where
+  Z :: Index (ctx :. a) a
+  S :: Index ctx a -> Index (ctx :. b) a
 
-printProgram :: Program -> String
-printProgram (Program words) = unwords . toList $ printWord (either printType (printProgram . extract)) . extract <$> words
+class Cat (t :: Ctx -> Ctx -> Type) where
+  id :: t a a
+  compose :: t a b -> t b c -> t a c
 
-data TypeArrow = TypeArrow Type Type
-  deriving (Show)
+  var :: Index x a -> t x (Nil :. a)
+  drop :: t (ctx :. a) ctx
 
-brackets :: String -> String
-brackets x = "[" <> x <> "]"
+  fix :: (t a b -> t a b) -> t a b
+  bind :: ((forall x'. t x' (x' :. a)) -> t x b) -> t (x :. a) b
 
-printTypeArrow :: TypeArrow -> String
-printTypeArrow (TypeArrow input output) =
-  brackets (printType input)
-    <> " -> "
-    <> brackets (printType output)
+  fn :: t (ctx :. a) (Nil :. b) -> t ctx (ctx :. TExp b a)
+  app :: t (ctx :. TExp b a :. a) (ctx :. b)
 
-data Type
-  = Context [Type]
-  | Var String
-  | Int64
-  | Product Type Type
-  | Sum Type Type
-  deriving (Eq, Show)
+  inl :: t (ctx :. a) (ctx :. TSum a b)
+  inr :: t (ctx :. b) (ctx :. TSum a b)
+  matchSum :: t (ctx :. a) ctx' -> t (ctx :. b) ctx' -> t (ctx :. TSum a b) ctx'
 
-printType :: Type -> String
-printType (Var a) = a
-printType (Context ts) = brackets . intercalate ", " $ printType <$> ts
-printType Int64 = "Int64"
-printType (Product a b) =
-  ( case a of
-      Sum{} -> parens
-      _ -> id
-  )
-    (printType a)
-    <> " * "
-    <> ( case b of
-          Product{} -> parens
-          Sum{} -> parens
-          _ -> id
-       )
-      (printType b)
-printType (Sum a b) =
-  printType a
-    <> " + "
-    <> ( case b of
-          Sum{} -> parens
-          _ -> id
-       )
-      (printType b)
+  pair :: t (ctx :. a :. b) (ctx :. TProd a b)
+  unpair :: t (ctx :. TProd a b) (ctx :. a :. b)
+  par :: t ctx a -> t ctx (Nil :. b) -> t ctx (a :. b)
 
-data ImportItem = All | Name String
-  deriving (Show)
+  true :: t ctx (ctx :. TBool)
+  false :: t ctx (ctx :. TBool)
+  ifte :: t ctx ctx' -> t ctx ctx' -> t (ctx :. TBool) ctx'
 
-printImportItem :: ImportItem -> String
-printImportItem All = ".."
-printImportItem (Name n) = n
+  char :: Char -> t a (a :. TChar)
+  matchChar :: [(Char, t ctx ctx')] -> t ctx ctx' -> t (ctx :. TChar) ctx'
+  eqChar :: t (ctx :. TChar :. TChar) (ctx :. TBool)
 
-data Decl
-  = Def String [(String, Either Kind TypeArrow)] TypeArrow (Spanned Program)
-  | Import [Word ImportItem]
-  deriving (Show)
+  string :: Text -> t a (a :. TString)
+  uncons :: t (ctx :. TString) (ctx :. TMaybe (TProd TString TChar))
+  consString :: t (ctx :. TString :. TChar) (ctx :. TString)
 
-printDecl :: Decl -> String
-printDecl (Def name args ty value) =
-  "def "
-    <> name
-    <> (if null args then mempty else parens (intercalate ", " $ (\(arg, argTy) -> arg <> " : " <> either printKind printTypeArrow argTy) <$> args))
-    <> " : "
-    <> printTypeArrow ty
-    <> " = "
-    <> printProgram (extract value)
-printDecl (Import imports) =
-  "import" <> foldMap (\word -> " " <> printWord printImportItem word) imports
+  int :: Int -> t a (a :. TInt)
+  add :: t (x :. TInt :. TInt) (x :. TInt)
+  mul :: t (x :. TInt :. TInt) (x :. TInt)
 
-newtype Module = Module [Decl]
-  deriving (Show)
+  nothing :: t x (x :. TMaybe a)
+  just :: t (x :. a) (x :. TMaybe a)
+  matchMaybe :: t ctx ctx' -> t (ctx :. a) ctx' -> t (ctx :. TMaybe a) ctx'
 
-printModule :: Module -> String
-printModule (Module defs) = intercalate "\n\n" $ printDecl <$> defs
+  nil :: t x (x :. TList a)
+  cons :: t (x :. TList a :. a) (x :. TList a)
+  matchList :: t ctx ctx' -> t (ctx :. TList a :. a) ctx' -> t (ctx :. TList a) ctx'
 
-data Kind
-  = Type
-  | Ctx
-  deriving (Eq, Show)
+(.) :: (Cat t) => t a b -> t b c -> t a c
+(.) = compose
 
-printKind :: Kind -> String
-printKind Type = "Type"
-printKind Ctx = "Ctx"
+infixr 5 .
 
-data WordSignature = WordSignature [Either (String, Kind) TypeArrow] TypeArrow
+mapSum ::
+  (Cat t) =>
+  t (Nil :. a) (Nil :. a') ->
+  t (Nil :. b) (Nil :. b') ->
+  t (ctx :. TSum a b) (ctx :. TSum a' b')
+mapSum f g =
+  matchSum
+    (par drop (var Z . f . inl))
+    (par drop (var Z . g . inr))
 
-data Side = Input | Output
-  deriving (Show)
+mapProduct ::
+  (Cat t) =>
+  t (Nil :. a) (Nil :. a') ->
+  t (Nil :. b) (Nil :. b') ->
+  t (ctx :. TProd a b) (ctx :. TProd a' b')
+mapProduct f g =
+  unpair
+    . par
+      ( par
+          (drop . drop)
+          (var (S Z) . f)
+      )
+      (var Z . g)
+    . pair
 
-data ArgSort = ArgValue | ArgType
-  deriving (Show)
-
-data TypeError
-  = NotFound String
-  | ArgCountMismatch String Int Int
-  | StackSizeMismatch Span Side Int Int
-  | TypeMismatch Type Type
-  | ArgMismatch ArgSort ArgSort
-  | KindMismatch Kind Kind
-  deriving (Show)
-
-checkType :: (String -> Maybe Kind) -> Type -> Kind -> Either TypeError ()
-checkType kinds (Var v) ki =
-  case kinds v of
-    Nothing ->
-      Left $ NotFound v
-    Just ki' ->
-      if ki == ki' then pure () else Left $ KindMismatch ki ki'
-checkType kinds (Context ts) ki = do
-  traverse_ (\t -> checkType kinds t Type) ts
-  if ki == Ctx
-    then pure ()
-    else Left $ KindMismatch Type ki
-checkType _ Int64 ki =
-  if ki == Type
-    then pure ()
-    else Left $ KindMismatch Type ki
-checkType kinds (Product a b) ki = do
-  checkType kinds a Type
-  checkType kinds b Type
-  if ki == Type
-    then pure ()
-    else Left $ KindMismatch Type ki
-checkType kinds (Sum a b) ki = do
-  checkType kinds a Type
-  checkType kinds b Type
-  if ki == Type
-    then pure ()
-    else Left $ KindMismatch Type ki
-
-appendContexts :: Type -> Type -> Type
-appendContexts (Context ts) (Context ts') = Context (ts <> ts')
-
-substTy :: HashMap String Type -> Type -> Type
-substTy subst ty@(Var x) =
-  fromMaybe ty $ HashMap.lookup x subst
-substTy subst (Context ts) =
-  Context $ substTy subst <$> ts
-substTy _ Int64 = Int64
-substTy subst (Product a b) =
-  Product (substTy subst a) (substTy subst b)
-substTy subst (Sum a b) =
-  Sum (substTy subst a) (substTy subst b)
-
-substTypeArrow :: HashMap String Type -> TypeArrow -> TypeArrow
-substTypeArrow subst (TypeArrow a b) = TypeArrow (substTy subst a) (substTy subst b)
-
-checkWordInputs ::
-  (String -> Maybe WordSignature) ->
-  (String -> Maybe Kind) ->
-  Spanned (Word (Either Type (Spanned Program))) ->
-  Type ->
-  Either TypeError Type
-checkWordInputs context kinds word expectedInputTy = do
-  checkType kinds expectedInputTy Ctx
-
-  let Word name args = extract word
-  case context name of
-    Just (WordSignature argTys (TypeArrow actualInputTy actualOutputTy)) -> do
-      let expectedArgCount = length argTys
-      let actualArgCount = length args
-      subst <-
-        if actualArgCount /= expectedArgCount
-          then Left $ ArgCountMismatch name expectedArgCount actualArgCount
-          else
-            foldlM
-              ( \subst (arg, argTy) -> do
-                  case (extract arg, argTy) of
-                    (Left tyArg, Left (n, tyArgKind)) -> do
-                      let tyArg' = substTy subst tyArg
-                      checkType kinds tyArg' tyArgKind
-                      pure $ HashMap.insert n tyArg' subst
-                    (Right valArg, Right valArgTy) -> do
-                      checkProgram context kinds valArg (substTypeArrow subst valArgTy)
-                      pure subst
-                    (Left _, Right _) ->
-                      Left $ ArgMismatch ArgValue ArgType
-                    (Right _, Left _) ->
-                      Left $ ArgMismatch ArgType ArgValue
-              )
-              mempty
-              (zip args argTys)
-      prefix <- checkInputTypes (word ^. span) (substTy subst expectedInputTy) (substTy subst actualInputTy)
-      pure $ appendContexts prefix (substTy subst actualOutputTy)
-    Nothing ->
-      case name of
-        "#"
-          | [Right (Program ((Word input [] :~ _) :| []) :~ _) :~ _] <- args
-          , Success n <- parseString intParser mempty input ->
-              _
-        _ ->
-          Left $ NotFound name
-
-checkProgram ::
-  (String -> Maybe WordSignature) ->
-  (String -> Maybe Kind) ->
-  Spanned Program ->
-  TypeArrow ->
-  Either TypeError ()
-checkProgram context kinds program ty = do
-  let Program words = extract program
-  go (program ^. span) words ty
- where
-  go s (word :| words) (TypeArrow expectedInputTy expectedOutputTy) = do
-    actualOutputTy <- checkWordInputs context kinds word expectedInputTy
-    case words of
-      word' : words' ->
-        go s (word' :| words') (TypeArrow actualOutputTy expectedOutputTy)
-      [] ->
-        checkOutputTypes s expectedOutputTy actualOutputTy
-
-equateType :: Type -> Type -> Either TypeError ()
-equateType expectedTy actualTy =
-  if expectedTy == actualTy
-    then pure ()
-    else Left $ TypeMismatch expectedTy actualTy
-
-checkInputTypes :: Span -> Type -> Type -> Either TypeError Type
-checkInputTypes s (Context expectedTys) (Context actualTys) = do
-  let expectedTysCount = length expectedTys
-  let actualTysCount = length actualTys
-  if expectedTysCount >= actualTysCount
-    then do
-      let (prefix, suffix) = splitAt (expectedTysCount - actualTysCount) expectedTys
-      traverse_ (uncurry equateType) $ zip suffix actualTys
-      pure $ Context prefix
-    else Left $ StackSizeMismatch s Input expectedTysCount actualTysCount
-checkInputTypes s a b =
-  error $ show s <> " " <> show a <> " " <> show b
-
-checkOutputTypes :: Span -> Type -> Type -> Either TypeError ()
-checkOutputTypes s (Context expectedTys) (Context actualTys) = do
-  let expectedTysCount = length expectedTys
-  let actualTysCount = length actualTys
-  if expectedTysCount >= actualTysCount
-    then traverse_ (uncurry equateType) $ zip expectedTys actualTys
-    else Left $ StackSizeMismatch s Output expectedTysCount actualTysCount
-
-lookupDef :: String -> Module -> Maybe (String, [(String, Either Kind TypeArrow)], TypeArrow, Spanned Program)
-lookupDef name (Module defs) = do
-  decl <- find (\case Def name' _ _ _ -> name == name'; _ -> False) defs
-  case decl of
-    Def a b c d -> pure (a, b, c, d)
-    _ -> Nothing
-
-lookupSignature :: String -> Module -> Maybe WordSignature
-lookupSignature name module_ = do
-  (_, args, ty, _) <- lookupDef name module_
-  pure $ WordSignature ((\(argName, argTy) -> first ((,) argName) argTy) <$> args) ty
-
-signatures :: Module -> HashMap String WordSignature
-signatures (Module decls) =
-  foldl'
-    ( \acc decl ->
-        case decl of
-          Def name args ty _ ->
-            HashMap.insert name (WordSignature ((\(argName, argTy) -> first ((,) argName) argTy) <$> args) ty) acc
-          _ ->
-            acc
-    )
-    mempty
-    decls
-
-checkImportArg :: Module -> ImportItem -> Either TypeError (HashMap String WordSignature)
-checkImportArg module_ item =
-  case item of
-    All ->
-      pure $ signatures module_
-    Name name ->
-      case lookupSignature name module_ of
-        Nothing -> Left $ NotFound name
-        Just signature -> pure $ HashMap.singleton name signature
-
-checkImport :: (String -> Maybe Module) -> Word ImportItem -> Either TypeError (HashMap String WordSignature)
-checkImport modules_ (Word name args) = do
-  module_ <- case modules_ name of
-    Nothing -> Left $ NotFound name
-    Just module_ -> pure module_
-  fold <$> traverse (checkImportArg module_ . extract) args
-
-checkDecl ::
-  (String -> Maybe Module) ->
-  (String -> Maybe WordSignature) ->
-  (String -> Maybe Kind) ->
-  Decl ->
-  Either TypeError (HashMap String WordSignature)
-checkDecl _ context kinds (Def name args ty value) = do
-  let (localKinds, localContext) =
-        bimap HashMap.fromList HashMap.fromList
-          . partitionEithers
-          $ ( \(argName, argTy) ->
-                bimap
-                  ((,) argName)
-                  ((,) argName . WordSignature [])
-                  argTy
+split :: (Cat t) => t (ctx :. TString :. TChar) (ctx :. TSum TString (TProd TString TString))
+split =
+  fix $ \self ->
+    bind $ \c ->
+      bind $ \str ->
+        str
+          . uncons
+          . matchMaybe
+            (str . inl)
+            ( unpair
+                . bind
+                  ( \c' ->
+                      c
+                        . c'
+                        . eqChar
+                        . ifte
+                          (string mempty . pair . inr)
+                          (c . self . mapSum (c' . consString) (mapProduct id (c' . consString)))
+                  )
             )
-          <$> args
-  checkProgram (\n -> HashMap.lookup n localContext <|> context n) (\n -> HashMap.lookup n localKinds <|> kinds n) value ty
-  pure $ HashMap.singleton name (WordSignature ((\(argName, argTy) -> first ((,) argName) argTy) <$> args) ty)
-checkDecl modules _ _ (Import imports) =
-  fold <$> traverse (checkImport modules) imports
 
-checkModule :: (String -> Maybe Module) -> (String -> Maybe WordSignature) -> Module -> Either TypeError ()
-checkModule modules context (Module defs) = go mempty defs
- where
-  go :: HashMap String WordSignature -> [Decl] -> Either TypeError ()
-  go _ [] = pure ()
-  go localContext (def : defs') = do
-    newDefs <- checkDecl modules (\name -> HashMap.lookup name localContext <|> context name) (const Nothing) def
-    go (newDefs <> localContext) defs'
+splits :: (Cat t) => t (ctx :. TString :. TChar) (ctx :. TList TString)
+splits =
+  fix $ \self ->
+    bind $ \c ->
+      c
+        . split
+        . matchSum
+          (bind $ \str -> nil . str . cons)
+          (unpair . par (drop . c . self) (var Z) . cons)
 
-builtinsCheck :: HashMap String WordSignature
-builtinsCheck =
-  HashMap.fromList
-    [ -- add : [Int64, Int64] -> [Int64]
-      ("add", WordSignature [] $ TypeArrow (Context [Int64, Int64]) (Context [Int64]))
-    , -- pair : [a, b] -> [a * b]
-      ("pair", WordSignature [] $ TypeArrow (Context [Int64, Int64]) (Context [Product Int64 Int64]))
-    , -- unpair : [a * b] -> [a, b]
-      ("unpair", WordSignature [] $ TypeArrow (Context [Product Int64 Int64]) (Context [Int64, Int64]))
-    , -- inl : [a] -> [a + b]
-      ("inl", WordSignature [] $ TypeArrow (Context [Int64]) (Context [Sum Int64 Int64]))
-    , -- inr : [b] -> [a + b]
-      ("inr", WordSignature [] $ TypeArrow (Context [Int64]) (Context [Sum Int64 Int64]))
-    , -- forall x y a b. ([..x, a] -> y, [..x, b] -> y) : [..x, a + b] -> y
+chars :: (Cat t) => t (ctx :. TString) (ctx :. TList TChar)
+chars =
+  fix $ \self ->
+    uncons
+      . matchMaybe
+        nil
+        (unpair . (bind $ \c -> self . c) . cons)
 
-      ( "unsum"
-      , WordSignature [Right $ TypeArrow (Context [Int64]) (Context [Int64]), Right $ TypeArrow (Context [Int64]) (Context [Int64])]
-          $ TypeArrow (Context [Sum Int64 Int64]) (Context [Int64])
-      )
-    , -- par(x : Ctx, a : Type, b : Type, f : x -> [a], g : x -> [b]) : x -> [a, b]
-
-      ( "par"
-      , WordSignature
-          [ Left ("x", Ctx)
-          , Left ("a", Type)
-          , Left ("b", Type)
-          , Right $ TypeArrow (Var "x") (Context [Var "a"])
-          , Right $ TypeArrow (Var "x") (Context [Var "b"])
-          ]
-          $ TypeArrow (Var "x") (Context [Var "a", Var "b"])
-      )
+decimalDigit :: (Cat t) => t (ctx :. TChar) (ctx :. TMaybe TInt)
+decimalDigit =
+  matchChar
+    [ ('0', int (0) . just)
+    , ('1', int (1) . just)
+    , ('2', int (2) . just)
+    , ('3', int (3) . just)
+    , ('4', int (4) . just)
+    , ('5', int (5) . just)
+    , ('6', int (6) . just)
+    , ('7', int (7) . just)
+    , ('8', int (8) . just)
+    , ('9', int (9) . just)
     ]
+    nothing
 
-intParser :: (TokenParsing m, Monad m) => m Int64
-intParser = do
-  val <- decimal
-  if val <= fromIntegral (maxBound :: Int64)
-    then pure $ fromIntegral val
-    else unexpected $ show val <> " exceeds max bound of Int64"
-
-syntaxesCheck :: String -> Maybe WordSignature
-syntaxesCheck input =
-  intSyntax
- where
-  intSyntax =
-    case parseString intParser mempty input of
-      Success{} -> Just $ WordSignature [] (TypeArrow (Context []) (Context [Int64]))
-      _ -> Nothing
-
-identParser :: (TokenParsing m) => m String
-identParser = token $ some alphaNum
-
-wordParser :: (DeltaParsing m) => m a -> m (Word a)
-wordParser argParser =
-  Word
-    <$> identParser
-    <*> fmap (fromMaybe []) (optional (Text.Parser.Token.parens (spanned argParser `sepBy` comma)))
-
-typeParser :: (TokenParsing m) => m Type
-typeParser = typeSumParser
- where
-  typeSumParser = foldl Sum <$> typeProductParser <*> many (symbolic '+' *> typeProductParser)
-  typeProductParser = foldl Product <$> typeAtomParser <*> many (symbolic '*' *> typeAtomParser)
-  typeAtomParser =
-    (Int64 <$ symbol "Int64")
-      <|> (Context <$> Text.Parser.Token.brackets (typeParser `sepBy` comma))
-      <|> (Var <$> identParser)
-
-typeArrowParser :: (TokenParsing m) => m TypeArrow
-typeArrowParser =
-  TypeArrow <$> typeParser <* symbol "->" <*> typeParser
-
-programParser :: (DeltaParsing m) => m Program
-programParser =
-  fmap Program
-    $ (:|)
-    <$> spanned (wordParser argParser)
-    <*> many (spanned $ wordParser argParser)
- where
-  argParser = Left <$ symbol "type" <*> typeParser <|> Right <$> spanned programParser
-
-kindParser :: (TokenParsing m) => m Kind
-kindParser =
-  Type <$ symbol "Type" <|> Ctx <$ symbol "Ctx"
-
-declParser :: (DeltaParsing m) => m Decl
-declParser =
-  defParser <|> importParser
- where
-  defParser =
-    Def
-      <$ symbol "def"
-      <*> identParser
-      <*> fmap
-        (fromMaybe [])
-        ( optional
-            . Text.Parser.Token.parens
-            $ ( (,)
-                  <$> identParser
-                  <* symbolic ':'
-                  <*> (Left <$> kindParser <|> Right <$> typeArrowParser)
+{-# INLINEABLE filterMap #-}
+filterMap :: (Cat t) => t (ctx :. TList a :. TExp (TMaybe b) a) (ctx :. TList b)
+filterMap =
+  fix $ \self ->
+    bind $ \f ->
+      matchList
+        nil
+        ( (bind $ \a -> f . a . app)
+            . matchMaybe
+              (f . self)
+              ( par
+                  (drop . f . self)
+                  ((var Z))
+                  . cons
               )
-            `sepBy` comma
         )
-      <* symbolic ':'
-      <*> typeArrowParser
-      <* symbolic '='
-      <*> spanned programParser
 
-  importParser =
-    Import
-      <$ symbol "import"
-      <*> many (wordParser $ All <$ symbol ".." <|> Name <$> identParser)
+first :: (Cat t) => t (ctx :. TList a) (ctx :. a)
+first =
+  matchList
+    undefined
+    (par (drop . drop) (var Z))
 
-moduleParser :: (DeltaParsing m) => m Module
-moduleParser =
-  fmap Module $ declParser `sepEndBy` symbolic ';'
+last :: (Cat t) => t (ctx :. TList a) (ctx :. a)
+last =
+  fix $ \self ->
+    matchList
+      undefined
+      ( bind $ \x ->
+          bind $ \xs ->
+            xs . matchList x (drop . drop . xs . self)
+      )
 
-newtype ParseError = ParseError String
-  deriving (Show)
+{-# INLINEABLE map #-}
+map :: (Cat t) => t (ctx :. TList a :. TExp b a) (ctx :. TList b)
+map =
+  bind $ \f ->
+    fn (var Z . unpair . par (var (S Z)) (var Z . bind (\a -> f . a) . app) . cons)
+      . nil
+      . foldr
 
-parseModule :: String -> Either ParseError Module
-parseModule input =
-  case parseString (moduleParser <* eof) mempty input of
-    Success a ->
-      Right a
-    Failure err ->
-      Left . ParseError . show $ _errDoc err
+foldr :: (Cat t) => t (ctx :. TList a :. TExp b (TProd b a) :. b) (ctx :. b)
+foldr =
+  fix $ \self ->
+    bind $ \z ->
+      bind $ \f ->
+        matchList
+          z
+          ( bind $ \a ->
+              (f . z . self)
+                . (bind (\b -> f . b) . a . pair)
+                . app
+          )
 
-data Value
-  = VInt64 Int64
-  | VPair Value Value
-  | VInl Value
-  | VInr Value
-  deriving (Eq)
+foldl :: (Cat t) => t (ctx :. TList a :. TExp b (TProd a b) :. b) (ctx :. b)
+foldl =
+  fix $ \self ->
+    bind $ \z ->
+      bind $ \f ->
+        matchList
+          z
+          ( bind (\a -> f . a . z)
+              . pair
+              . app
+              . bind (\z' -> f . z')
+              . self
+          )
 
-data Values
-  = Nil
-  | Snoc Values Value
-  deriving (Eq)
+sum :: (Cat t) => t (ctx :. TList TInt) (ctx :. TInt)
+sum = fn (var Z . unpair . add) . int 0 . foldl
 
-printValue :: Value -> String
-printValue (VInt64 i) = show i
-printValue (VPair a b) = parens (printValue a <> ", " <> printValue b)
-printValue (VInl a) = "inl" <> parens (printValue a)
-printValue (VInr a) = "inr" <> parens (printValue a)
+isPrefixOf :: (Cat t) => t (ctx :. TList TChar :. TList TChar) (ctx :. TBool)
+isPrefixOf =
+  fix $ \self ->
+    matchList
+      (drop . true)
+      ( bind $ \x -> bind $ \xs ->
+          matchList
+            false
+            ( bind $ \x' -> bind $ \xs' ->
+                (x . x' . eqChar)
+                  . ifte (xs' . xs . self) false
+            )
+      )
 
-printValues :: Values -> String
-printValues vs = "[" <> go vs <> "]"
+orElse :: (Cat t) => t (ctx :. TMaybe a :. TMaybe a) (ctx :. TMaybe a)
+orElse = bind $ \x -> x . matchMaybe id (drop . drop . x)
+
+data Value (ty :: Ty) where
+  VInt :: Int -> Value TInt
+  VChar :: Char -> Value TChar
+  VString :: Text -> Value TString
+  VBool :: Bool -> Value TBool
+  VClosure :: Values ctx -> Eval (ctx :. a) (Nil :. b) -> Value (TExp b a)
+  VLeft :: Value a -> Value (TSum a b)
+  VRight :: Value b -> Value (TSum a b)
+  VPair :: Value a -> Value b -> Value (TProd a b)
+  VNothing :: Value (TMaybe a)
+  VJust :: Value a -> Value (TMaybe a)
+  VListNil :: Value (TList a)
+  VListCons :: Value a -> Value (TList a) -> Value (TList a)
+
+class Reflect a where
+  type ReflectTy a :: Ty
+  reflect :: a -> Value (ReflectTy a)
+
+instance Reflect Text where
+  type ReflectTy Text = TString
+  reflect = VString
+
+instance Reflect Int where
+  type ReflectTy Int = TInt
+  reflect = VInt
+
+instance Reflect Bool where
+  type ReflectTy Bool = TBool
+  reflect = VBool
+
+instance (Reflect a) => Reflect (Maybe a) where
+  type ReflectTy (Maybe a) = TMaybe (ReflectTy a)
+  reflect Nothing = VNothing
+  reflect (Just a) = VJust (reflect a)
+
+data Values (ctx :: Ctx) where
+  VNil :: Values Nil
+  VSnoc :: Values ctx -> Value a -> Values (ctx :. a)
+
+getValue :: Index ctx a -> Values ctx -> Value a
+getValue Z (VSnoc _ a) = a
+getValue (S ix) (VSnoc ctx _) = getValue ix ctx
+
+newtype Eval (ctx :: Ctx) (ctx' :: Ctx) = Eval {unEval :: Values ctx -> Values ctx'}
+
+instance Cat Eval where
+  id = Eval (\x -> x)
+
+  compose (Eval f) (Eval g) = Eval (\x -> g (f x))
+
+  var ix = Eval $ \ctx -> VSnoc VNil (getValue ix ctx)
+
+  drop = Eval $ \(VSnoc ctx _) -> ctx
+
+  fix f = Eval $ \ctx -> unEval (f (fix f)) ctx
+
+  bind f = Eval $ \(VSnoc ctx a) -> unEval (f (Eval $ \ctx' -> VSnoc ctx' a)) ctx
+
+  fn f = Eval $ \ctx -> VSnoc ctx (VClosure ctx f)
+
+  app = Eval $ \(VSnoc (VSnoc ctx (VClosure env f)) x) -> let VSnoc VNil b = unEval f (VSnoc env x) in VSnoc ctx b
+
+  inl = Eval $ \(VSnoc ctx a) -> VSnoc ctx (VLeft a)
+
+  inr = Eval $ \(VSnoc ctx b) -> VSnoc ctx (VRight b)
+
+  matchSum l r = Eval $ \(VSnoc ctx s) ->
+    case s of
+      VLeft a -> unEval l (VSnoc ctx a)
+      VRight b -> unEval r (VSnoc ctx b)
+
+  pair = Eval $ \(VSnoc (VSnoc ctx a) b) -> VSnoc ctx (VPair a b)
+
+  unpair = Eval $ \(VSnoc ctx (VPair a b)) -> VSnoc (VSnoc ctx a) b
+
+  par f g = Eval $ \ctx ->
+    let
+      a = unEval f ctx
+      VSnoc VNil b = unEval g ctx
+     in
+      VSnoc a b
+
+  true = Eval $ \ctx -> VSnoc ctx (VBool True)
+
+  false = Eval $ \ctx -> VSnoc ctx (VBool False)
+
+  ifte f g = Eval $ \(VSnoc ctx (VBool b)) -> if b then unEval f ctx else unEval g ctx
+
+  char c = Eval $ \ctx -> VSnoc ctx (VChar c)
+
+  matchChar fs g = Eval $ \(VSnoc ctx (VChar c)) ->
+    Prelude.foldr
+      (\(c', f) rest -> if c == c' then unEval f ctx else rest)
+      (unEval g ctx)
+      fs
+
+  eqChar = Eval $ \(VSnoc (VSnoc ctx (VChar a)) (VChar b)) -> VSnoc ctx (VBool $ a == b)
+  string s = Eval $ \ctx -> VSnoc ctx (VString s)
+  uncons = Eval $ \(VSnoc ctx (VString s)) ->
+    case Text.uncons s of
+      Nothing -> VSnoc ctx VNothing
+      Just (c, cs) -> VSnoc ctx (VJust (VPair (VString cs) (VChar c)))
+  consString = Eval $ \(VSnoc (VSnoc ctx (VString cs)) (VChar c)) -> VSnoc ctx (VString $ Text.cons c cs)
+  int i = Eval $ \ctx -> VSnoc ctx (VInt i)
+  add = Eval $ \(VSnoc (VSnoc ctx (VInt a)) (VInt b)) -> VSnoc ctx (VInt $ a + b)
+  mul = Eval $ \(VSnoc (VSnoc ctx (VInt a)) (VInt b)) -> VSnoc ctx (VInt $ a * b)
+  nothing = Eval $ \ctx -> VSnoc ctx VNothing
+  just = Eval $ \(VSnoc ctx a) -> VSnoc ctx (VJust a)
+  matchMaybe f g = Eval $ \(VSnoc ctx a) ->
+    case a of
+      VNothing -> unEval f ctx
+      VJust x -> unEval g (VSnoc ctx x)
+  nil = Eval $ \ctx -> VSnoc ctx VListNil
+  cons = Eval $ \(VSnoc (VSnoc ctx xs) x) -> VSnoc ctx (VListCons x xs)
+  matchList f g = Eval $ \(VSnoc ctx xs) ->
+    case xs of
+      VListNil -> unEval f ctx
+      VListCons a as -> unEval g (VSnoc (VSnoc ctx as) a)
+
+eval :: Eval ctx ctx' -> Values ctx -> Values ctx'
+eval = unEval
+
+printValue :: Value ty -> String
+printValue v =
+  case v of
+    VInt n -> show n
+    VBool b -> if b then "true" else "false"
+    VChar c -> show c
+    VString s -> show s
+    VClosure{} -> "<<function>>"
+    VLeft v' -> "inr(" <> printValue v' <> ")"
+    VRight v' -> "inl(" <> printValue v' <> ")"
+    VPair a b -> "pair(" <> printValue a <> ", " <> printValue b <> ")"
+    VNothing -> "nothing"
+    VJust a -> "just(" <> printValue a <> ")"
+    VListNil -> printList v
+    VListCons{} -> printList v
+
+printList :: Value (TList a) -> String
+printList = ("[" <>) Prelude.. (<> "]") Prelude.. intercalate ", " Prelude.. go
  where
-  go Nil =
-    ""
-  go (Snoc Nil v) =
-    printValue v
-  go (Snoc vs'@Snoc{} v) =
-    go vs' <> ", " <> printValue v
+  go :: Value (TList a) -> [String]
+  go VListNil = []
+  go (VListCons a as) = printValue a : go as
 
-builtinsEval :: String -> Maybe (EvalContext -> [Either Type Program] -> Values -> Values)
-builtinsEval "add" =
-  Just $ \_ [] (Snoc (Snoc vs (VInt64 a)) (VInt64 b)) -> Snoc vs (VInt64 $ a + b)
-builtinsEval "pair" =
-  Just $ \_ [] (Snoc (Snoc vs a) b) -> Snoc vs (VPair a b)
-builtinsEval "unpair" =
-  Just $ \_ [] (Snoc vs (VPair a b)) -> Snoc (Snoc vs a) b
-builtinsEval "inl" =
-  Just $ \_ [] (Snoc vs a) -> Snoc vs (VInl a)
-builtinsEval "inr" =
-  Just $ \_ [] (Snoc vs a) -> Snoc vs (VInr a)
-builtinsEval _ = Nothing
-
-syntaxesEval :: String -> Maybe (EvalContext -> [Either Type Program] -> Values -> Values)
-syntaxesEval input =
-  case parseString intParser mempty input of
-    Success i -> Just $ \_ [] vs -> Snoc vs (VInt64 i)
-    _ -> Nothing
-
-newtype EvalContext = EvalContext {getEvalContext :: String -> Maybe (EvalContext -> [Either Type Program] -> Values -> Values)}
-
-evalProgram :: EvalContext -> Program -> Values -> Values
-evalProgram context (Program (word :| words)) input =
-  let Word name args = extract word
-   in case getEvalContext context name of
-        Nothing ->
-          error $ "not found: " <> name
-        Just evalWord ->
-          let value = evalWord context (fmap extract . extract <$> args) input
-           in case words of
-                [] ->
-                  value
-                word' : words' ->
-                  evalProgram context (Program (word' :| words')) value
+printValues :: Values ctx -> String
+printValues = intercalate ", " Prelude.. go
+ where
+  go :: Values ctx -> [String]
+  go VNil = []
+  go (VSnoc vs v) = go vs <> [printValue v]
