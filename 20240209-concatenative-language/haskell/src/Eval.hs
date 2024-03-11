@@ -54,7 +54,7 @@ instance Cat Eval where
     let
       a = unEval f ctx
       VSnoc VNil b = unEval g ctx
-     in
+    in
       VSnoc a b
 
   true = Eval $ \ctx -> VSnoc ctx (VBool True)

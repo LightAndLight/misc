@@ -15,10 +15,13 @@ library
     exposed-modules:
         Lib
         Eval
+        Compile
         AOC2023.D1
     build-depends:    
         base >=4.17 && <5,
-        text
+        bytestring,
+        text,
+        transformers
     hs-source-dirs:   src
     default-language: Haskell2010
     default-extensions:

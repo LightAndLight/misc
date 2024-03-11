@@ -12,6 +12,7 @@
             ghc
             cabal-install
             haskell-language-server
+            (haskell.lib.justStaticExecutables haskellPackages.fourmolu)
             
             (agda.withPackages [ agdaPackages.standard-library ])
           ];
