@@ -1,0 +1,1 @@
+/home/isaac/1brc/measurements_10000000.txt
