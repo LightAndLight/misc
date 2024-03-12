@@ -1,20 +1,13 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE TypeOperators #-}
-{-# OPTIONS_GHC -ddump-simpl
-    -dsuppress-idinfo
-    -dsuppress-coercions
-    -dsuppress-type-applications
-    -dsuppress-uniques
-    -dsuppress-module-prefixes 
-    -ddump-to-file #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 module AOC2023.D1 where
 
 import Data.Text (Text)
 import qualified Data.Text.IO as Text.IO
 import Lib
-import Prelude hiding (any, drop, foldr, id, last, map, sum, (.))
+import Lib.Prelude
+import Lib.Ty
+import Prelude (IO, ($))
 
 getInput :: IO Text
 getInput = Text.IO.readFile "src/AOC2023/d1.txt"

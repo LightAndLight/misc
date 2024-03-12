@@ -1,14 +1,21 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
+module Eval (
+  -- * Evaluation
+  Eval,
+  eval,
 
-module Eval where
+  -- * Values
+  Value (..),
+  printValue,
+  Values (..),
+  printValues,
+  Reflect (..),
+) where
 
 import Data.List (intercalate)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Lib
+import Lib.Ty
 
 data Values (ctx :: Ctx) where
   VNil :: Values Nil
@@ -94,6 +101,7 @@ instance Cat Eval where
       VListNil -> unEval f ctx
       VListCons a as -> unEval g (VSnoc (VSnoc ctx as) a)
 
+-- | Evaluate a 'Cat' expression.
 eval :: Eval ctx ctx' -> Values ctx -> Values ctx'
 eval = unEval
 
@@ -141,6 +149,7 @@ data Value (ty :: Ty) where
   VListNil :: Value (TList a)
   VListCons :: Value a -> Value (TList a) -> Value (TList a)
 
+-- | Lift Haskell values into 'Value'.
 class Reflect a where
   type ReflectTy a :: Ty
   reflect :: a -> Value (ReflectTy a)
