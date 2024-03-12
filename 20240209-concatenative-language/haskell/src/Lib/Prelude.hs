@@ -1,3 +1,27 @@
+{- | = Argument ordering
+
+Composition is associative:
+
+@(a . b) . f = a . (b . f)@
+
+When @f@ is a function, the left side of this equation reads as uncurried application
+(passing @a@ and @b@ to @f@),
+and the right side reads as curried application (passing @a@ to the partially-applied @b . f@).
+Arguments are ordered to maximise the usefulness of partial applications.
+
+For example, it seems more likely that a programs will split different strings using the same
+character, than splitting the same string using different characters. Therefore @split@ has type
+
+@
+Cat t => t (ctx :. TString :. TChar) (ctx :. TList TString)
+@
+
+so that @char '\n' . split@ has type
+
+@
+Cat t => t (ctx :. TString) (ctx :. TList TString)
+@
+-}
 module Lib.Prelude where
 
 import Lib
