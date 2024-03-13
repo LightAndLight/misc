@@ -1,25 +1,25 @@
 {- | = Argument ordering
 
-Composition is associative:
+Composition is associative, and data flows right-to-left:
 
-@(a . b) . f = a . (b . f)@
+@f . (a . b) . f = f . (a . b)@
 
 When @f@ is a function, the left side of this equation reads as uncurried application
 (passing @a@ and @b@ to @f@),
-and the right side reads as curried application (passing @a@ to the partially-applied @b . f@).
+and the right side reads as curried application (passing @b@ to the partially-applied @f . a@).
 Arguments are ordered to maximise the usefulness of partial applications.
 
 For example, it seems more likely that a programs will split different strings using the same
 character, than splitting the same string using different characters. Therefore @split@ has type
 
 @
-Cat t => t (ctx :. TString :. TChar) (ctx :. TList TString)
+Cat t => t (TChar ': TString ': ctx) (TList TString ': ctx)
 @
 
-so that @char '\n' . split@ has type
+so that @split . char '\n'@ has type
 
 @
-Cat t => t (ctx :. TString) (ctx :. TList TString)
+Cat t => t (TString ': ctx) (TList TString ': ctx)
 @
 -}
 module Lib.Prelude where
@@ -30,168 +30,162 @@ import Prelude hiding (drop, foldl, foldr, id, (.))
 
 mapSum ::
   (Cat t) =>
-  t (Nil :. a) (Nil :. a') ->
-  t (Nil :. b) (Nil :. b') ->
-  t (ctx :. TSum a b) (ctx :. TSum a' b')
+  t '[a] '[a'] ->
+  t '[b] '[b'] ->
+  t (TSum a b ': ctx) (TSum a' b' ': ctx)
 mapSum f g =
   matchSum
-    (par drop (var Z . f . inl))
-    (par drop (var Z . g . inr))
+    (par (inl . f . var Z) drop)
+    (par (inr . g . var Z) drop)
 
 mapProduct ::
   (Cat t) =>
-  t (Nil :. a) (Nil :. a') ->
-  t (Nil :. b) (Nil :. b') ->
-  t (ctx :. TProd a b) (ctx :. TProd a' b')
+  t '[a] '[a'] ->
+  t '[b] '[b'] ->
+  t (TProd a b ': ctx) (TProd a' b' ': ctx)
 mapProduct f g =
-  unpair
+  pair
     . par
+      (f . var Z)
       ( par
+          (g . var (S Z))
           (drop . drop)
-          (var (S Z) . f)
       )
-      (var Z . g)
-    . pair
+    . unpair
 
-split :: (Cat t) => t (ctx :. TString :. TChar) (ctx :. TSum TString (TProd TString TString))
+split :: (Cat t) => t (TChar ': TString ': ctx) (TSum TString (TProd TString TString) ': ctx)
 split =
   fix $ \self ->
     bind $ \c ->
       bind $ \str ->
-        str
+        matchMaybe
+          (inl . str)
+          ( bind
+              ( \c' ->
+                  ifte
+                    (inr . pair . string "")
+                    (mapSum (consString . c') (mapProduct (consString . c') id) . self . c)
+                    . eqChar
+                    . c'
+                    . c
+              )
+              . unpair
+          )
           . uncons
-          . matchMaybe
-            (str . inl)
-            ( unpair
-                . bind
-                  ( \c' ->
-                      c
-                        . c'
-                        . eqChar
-                        . ifte
-                          (string mempty . pair . inr)
-                          (c . self . mapSum (c' . consString) (mapProduct id (c' . consString)))
-                  )
-            )
+          . str
 
-splits :: (Cat t) => t (ctx :. TString :. TChar) (ctx :. TList TString)
+splits :: (Cat t) => t (TChar ': TString ': ctx) (TList TString ': ctx)
 splits =
   fix $ \self ->
     bind $ \c ->
-      c
+      matchSum
+        (bind $ \str -> cons . str . nil)
+        (cons . par (var Z) (self . c . drop) . unpair)
         . split
-        . matchSum
-          (bind $ \str -> nil . str . cons)
-          (unpair . par (drop . c . self) (var Z) . cons)
+        . c
 
-chars :: (Cat t) => t (ctx :. TString) (ctx :. TList TChar)
+chars :: (Cat t) => t (TString ': ctx) (TList TChar ': ctx)
 chars =
   fix $ \self ->
-    uncons
-      . matchMaybe
-        nil
-        (unpair . (bind $ \c -> self . c) . cons)
+    matchMaybe
+      nil
+      (cons . bind (\c -> c . self) . unpair)
+      . uncons
 
-decimalDigit :: (Cat t) => t (ctx :. TChar) (ctx :. TMaybe TInt)
+decimalDigit :: (Cat t) => t (TChar ': ctx) (TMaybe TInt ': ctx)
 decimalDigit =
   matchChar
-    [ ('0', int (0) . just)
-    , ('1', int (1) . just)
-    , ('2', int (2) . just)
-    , ('3', int (3) . just)
-    , ('4', int (4) . just)
-    , ('5', int (5) . just)
-    , ('6', int (6) . just)
-    , ('7', int (7) . just)
-    , ('8', int (8) . just)
-    , ('9', int (9) . just)
+    [ ('0', just . int 0)
+    , ('1', just . int 1)
+    , ('2', just . int 2)
+    , ('3', just . int 3)
+    , ('4', just . int 4)
+    , ('5', just . int 5)
+    , ('6', just . int 6)
+    , ('7', just . int 7)
+    , ('8', just . int 8)
+    , ('9', just . int 9)
     ]
     nothing
 
 {-# INLINEABLE filterMap #-}
-filterMap :: (Cat t) => t (ctx :. TList a :. TExp (TMaybe b) a) (ctx :. TList b)
+filterMap :: (Cat t) => t (TExp (TMaybe b) a ': TList a ': ctx) (TList b ': ctx)
 filterMap =
   fix $ \self ->
     bind $ \f ->
       matchList
         nil
-        ( (bind $ \a -> f . a . app)
-            . matchMaybe
-              (f . self)
-              ( par
-                  (drop . f . self)
-                  ((var Z))
-                  . cons
-              )
+        ( matchMaybe
+            (self . f)
+            ( cons
+                . par
+                  (var Z)
+                  (self . f . drop)
+            )
+            . app
+            . f
         )
 
-first :: (Cat t) => t (ctx :. TList a) (ctx :. a)
+first :: (Cat t) => t (TList a ': ctx) (a ': ctx)
 first =
   matchList
     undefined
-    (par (drop . drop) (var Z))
+    (par (var Z) (drop . drop))
 
-last :: (Cat t) => t (ctx :. TList a) (ctx :. a)
+last :: (Cat t) => t (TList a ': ctx) (a ': ctx)
 last =
   fix $ \self ->
     matchList
       undefined
       ( bind $ \x ->
           bind $ \xs ->
-            xs . matchList x (drop . drop . xs . self)
+            matchList x (self . xs . drop . drop) . xs
       )
 
-{-# INLINEABLE map #-}
-map :: (Cat t) => t (ctx :. TList a :. TExp b a) (ctx :. TList b)
-map =
-  bind $ \f ->
-    fn (var Z . unpair . par (var (S Z)) (var Z . bind (\a -> f . a) . app) . cons)
-      . nil
-      . foldr
-
-foldr :: (Cat t) => t (ctx :. TList a :. TExp b (TProd b a) :. b) (ctx :. b)
+foldr :: (Cat t) => t (TExp b (TProd a b) ': b ': TList a ': ctx) (b ': ctx)
 foldr =
   fix $ \self ->
-    bind $ \z ->
-      bind $ \f ->
+    bind $ \f ->
+      bind $ \z ->
         matchList
           z
-          ( bind $ \a ->
-              (f . z . self)
-                . (bind (\b -> f . b) . a . pair)
-                . app
-          )
+          (app . f . pair . par (var Z) (self . f . z . drop))
 
-foldl :: (Cat t) => t (ctx :. TList a :. TExp b (TProd a b) :. b) (ctx :. b)
+{-# INLINEABLE map #-}
+map :: (Cat t) => t (TExp b a ': TList a ': ctx) (TList b ': ctx)
+map =
+  bind $ \f ->
+    foldr
+      . fn (cons . app . f . unpair . var Z)
+      . nil
+
+foldl :: (Cat t) => t (TExp b (TProd b a) ': b ': TList a ': ctx) (b ': ctx)
 foldl =
   fix $ \self ->
-    bind $ \z ->
-      bind $ \f ->
+    bind $ \f ->
+      bind $ \z ->
         matchList
           z
-          ( bind (\a -> f . a . z)
-              . pair
-              . app
-              . bind (\z' -> f . z')
-              . self
-          )
+          (self . f . app . f . pair . z)
 
-sum :: (Cat t) => t (ctx :. TList TInt) (ctx :. TInt)
-sum = fn (var Z . unpair . add) . int 0 . foldl
+sum :: (Cat t) => t (TList TInt ': ctx) (TInt ': ctx)
+sum = foldl . fn (add . unpair . var Z) . int 0
 
-isPrefixOf :: (Cat t) => t (ctx :. TList TChar :. TList TChar) (ctx :. TBool)
+isPrefixOf :: (Cat t) => t (TList TChar ': TList TChar ': ctx) (TBool ': ctx)
 isPrefixOf =
   fix $ \self ->
     matchList
-      (drop . true)
-      ( bind $ \x -> bind $ \xs ->
-          matchList
-            false
-            ( bind $ \x' -> bind $ \xs' ->
-                (x . x' . eqChar)
-                  . ifte (xs' . xs . self) false
-            )
+      (true . drop)
+      ( bind $ \x ->
+          bind $ \xs ->
+            matchList
+              false
+              ( bind $ \x' ->
+                  bind $ \xs' ->
+                    ifte (self . xs . xs') false
+                      . (eqChar . x . x')
+              )
       )
 
-orElse :: (Cat t) => t (ctx :. TMaybe a :. TMaybe a) (ctx :. TMaybe a)
-orElse = bind $ \x -> x . matchMaybe id (drop . drop . x)
+orElse :: (Cat t) => t (TMaybe a ': TMaybe a ': ctx) (TMaybe a ': ctx)
+orElse = bind $ \x -> matchMaybe id (x . drop . drop) . x

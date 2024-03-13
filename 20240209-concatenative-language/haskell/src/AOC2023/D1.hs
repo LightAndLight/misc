@@ -21,95 +21,94 @@ part2_testInput = "two1nine\neightwothree\nabcone2threexyz\nxtwone3four\n4nineei
 {-# INLINEABLE sumLineDigits #-}
 sumLineDigits ::
   (Cat t) =>
-  (forall x. t (x :. TList TChar) (x :. TList TInt)) ->
-  t (ctx :. TString) (ctx :. TInt)
+  (forall x. t (TList TChar ': x) (TList TInt ': x)) ->
+  t (TString ': ctx) (TInt ': ctx)
 sumLineDigits getDigits =
-  char '\n'
-    . splits
-    . fn
-      ( var Z
-          . chars
-          . getDigits
-          . par (first . int 10 . mul) last
-          . add
-      )
+  sum
     . map
-    . sum
+    . fn
+      ( add
+          . par (mul . int 10 . first) last
+          . getDigits
+          . chars
+          . var Z
+      )
+    . splits
+    . char '\n'
 
-getDigitsPart1 :: (Cat t) => t (ctx :. TList TChar) (ctx :. TList TInt)
+getDigitsPart1 :: (Cat t) => t (TList TChar ': ctx) (TList TInt ': ctx)
 getDigitsPart1 =
-  fn (var Z . decimalDigit) . filterMap
+  filterMap . fn (decimalDigit . var Z)
 
-part1 :: (Cat t) => t (ctx :. TString) (ctx :. TInt)
+part1 :: (Cat t) => t (TString ': ctx) (TInt ': ctx)
 part1 = sumLineDigits getDigitsPart1
 
 {-# INLINEABLE getDigitsPart2 #-}
-getDigitsPart2 :: (Cat t) => t (ctx :. TList TChar) (ctx ':. TList TInt)
+getDigitsPart2 :: (Cat t) => t (TList TChar ': ctx) (TList TInt ': ctx)
 getDigitsPart2 =
   fix
     ( \self ->
         bind $ \xs ->
-          xs
-            . matchList
-              nil
-              ( drop
-                  . bind
-                    ( \xs' ->
-                        xs
-                          . digitPrefix
-                          . matchMaybe (xs' . self) (bind $ \n -> xs' . self . n . cons)
-                    )
-              )
+          matchList
+            nil
+            ( bind
+                ( \xs' ->
+                    matchMaybe (self . xs') (bind $ \n -> cons . n . self . xs')
+                      . digitPrefix
+                      . xs
+                )
+                . drop
+            )
+            . xs
     )
 
-digitPrefix :: (Cat t) => t (ctx :. TList TChar) (ctx :. TMaybe TInt)
+digitPrefix :: (Cat t) => t (TList TChar ': ctx) (TMaybe TInt ': ctx)
 digitPrefix =
   bind $ \xs ->
-    ( nil
-        . (int 9 . string "9" . pair)
-        . cons
-        . (int 8 . string "8" . pair)
-        . cons
-        . (int 7 . string "7" . pair)
-        . cons
-        . (int 6 . string "6" . pair)
-        . cons
-        . (int 5 . string "5" . pair)
-        . cons
-        . (int 4 . string "4" . pair)
-        . cons
-        . (int 3 . string "3" . pair)
-        . cons
-        . (int 2 . string "2" . pair)
-        . cons
-        . (int 1 . string "1" . pair)
-        . cons
-        . (int 0 . string "0" . pair)
-        . cons
-        . (int 9 . string "nine" . pair)
-        . cons
-        . (int 8 . string "eight" . pair)
-        . cons
-        . (int 7 . string "seven" . pair)
-        . cons
-        . (int 6 . string "six" . pair)
-        . cons
-        . (int 5 . string "five" . pair)
-        . cons
-        . (int 4 . string "four" . pair)
-        . cons
-        . (int 3 . string "three" . pair)
-        . cons
-        . (int 2 . string "two" . pair)
-        . cons
-        . (int 1 . string "one" . pair)
-        . cons
-        . (int 0 . string "zero" . pair)
-        . cons
-    )
-      . fn (var Z . unpair . bind (\prefix -> xs . prefix . chars) . isPrefixOf . ifte just (drop . nothing))
-      . map
-      . (fn (var Z . unpair . orElse) . nothing . foldr)
+    (foldr . fn (orElse . unpair . var Z) . nothing)
+      . (map . fn (ifte just (nothing . drop) . bind (\prefix -> isPrefixOf . chars . prefix . xs) . unpair . var Z))
+      . ( cons
+            . (pair . string "0" . int 0)
+            . cons
+            . (pair . string "1" . int 1)
+            . cons
+            . (pair . string "2" . int 2)
+            . cons
+            . (pair . string "3" . int 3)
+            . cons
+            . (pair . string "4" . int 4)
+            . cons
+            . (pair . string "5" . int 5)
+            . cons
+            . (pair . string "6" . int 6)
+            . cons
+            . (pair . string "7" . int 7)
+            . cons
+            . (pair . string "8" . int 8)
+            . cons
+            . (pair . string "9" . int 9)
+            . cons
+            . (pair . string "zero" . int 0)
+            . cons
+            . (pair . string "one" . int 1)
+            . cons
+            . (pair . string "two" . int 2)
+            . cons
+            . (pair . string "three" . int 3)
+            . cons
+            . (pair . string "four" . int 4)
+            . cons
+            . (pair . string "five" . int 5)
+            . cons
+            . (pair . string "six" . int 6)
+            . cons
+            . (pair . string "seven" . int 7)
+            . cons
+            . (pair . string "eight" . int 8)
+            . cons
+            . (pair . string "nine" . int 9)
+            . nil
+        )
 
-part2 :: (Cat t) => t (ctx :. TString) (ctx :. TInt)
+part2 :: (Cat t) => t (TString ': ctx) (TInt ': ctx)
 part2 = sumLineDigits getDigitsPart2

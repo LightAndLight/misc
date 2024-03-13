@@ -28,9 +28,9 @@ main = do
     "1" ->
       case part of
         "1" ->
-          putStrLn Prelude.. printValues Prelude.. eval AOC2023.D1.part1 Prelude.. VSnoc VNil Prelude.. reflect =<< AOC2023.D1.getInput
+          putStrLn Prelude.. printValues Prelude.. eval AOC2023.D1.part1 Prelude.. (`VCons` VNil) Prelude.. reflect =<< AOC2023.D1.getInput
         "2" ->
-          putStrLn Prelude.. printValues Prelude.. eval AOC2023.D1.part2 Prelude.. VSnoc VNil Prelude.. reflect =<< AOC2023.D1.getInput
+          putStrLn Prelude.. printValues Prelude.. eval AOC2023.D1.part2 Prelude.. (`VCons` VNil) Prelude.. reflect =<< AOC2023.D1.getInput
         _ ->
           error $ "invalid part " <> show part
     _ ->

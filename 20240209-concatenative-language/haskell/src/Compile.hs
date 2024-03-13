@@ -9,7 +9,7 @@ module Compile (
   module Control.Monad.Gen,
 ) where
 
-import Control.Monad ((>=>))
+import Control.Monad ((<=<))
 import Control.Monad.Gen
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.CPS (WriterT, execWriterT, tell)
@@ -23,10 +23,10 @@ import Lib
 import Lib.Ty
 import Numeric (showHex)
 
-newtype Compile m (ctx :: Ctx) (ctx' :: Ctx) = Compile (SCtx ctx -> WriterT Builder m (SCtx ctx'))
+newtype Compile m (ctx :: [Ty]) (ctx' :: [Ty]) = Compile (SList ctx -> WriterT Builder m (SList ctx'))
 
 -- | Compile a 'Cat' expression to Intel x86-64 assembly.
-compile :: (MonadGen Int m) => Compile m Nil ctx' -> m Lazy.Text
+compile :: (MonadGen Int m) => Compile m '[] ctx' -> m Lazy.Text
 compile (Compile f) = Builder.toLazyText <$> execWriterT (f SNil)
 
 emit :: (Monad m) => Builder -> WriterT Builder m ()
@@ -34,17 +34,17 @@ emit x = do
   tell x
   tell "\n"
 
-shift :: (Monad m) => SCtx ctx -> WriterT Builder m (SCtx ctx)
+shift :: (Monad m) => SList ctx -> WriterT Builder m (SList ctx)
 shift ctx =
   case ctx of
     SNil ->
       pure ctx
-    SSnoc{} -> do
+    SCons{} -> do
       emit "pop rbx"
       pure ctx
 
-pop :: (Monad m) => SCtx (ctx :. a) -> WriterT Builder m (SCtx ctx)
-pop (SSnoc ctx _a) = do
+pop :: (Monad m) => SList (a ': ctx) -> WriterT Builder m (SList ctx)
+pop (SCons _ ctx) = do
   emit "mov rax, rbx"
   shift ctx
 
@@ -67,7 +67,7 @@ printLiteral lit =
     LBool b -> if b then "1" else "0"
     LChar c -> Builder.fromString Prelude.. show $ ord c
 
-push' :: forall m a ctx. (Monad m) => Builder -> STy a -> SCtx ctx -> WriterT Builder m (SCtx (ctx :. a))
+push' :: forall m a ctx. (Monad m) => Builder -> STy a -> SList ctx -> WriterT Builder m (SList (a ': ctx))
 push' val ty ctx = do
   let
     m :: WriterT Builder m ()
@@ -75,19 +75,19 @@ push' val ty ctx = do
       case ctx of
         SNil ->
           pure ()
-        SSnoc ctx' _a -> do
+        SCons _ ctx' -> do
           let
             m' :: WriterT Builder m ()
             m' = case ctx' of
               SNil -> pure ()
-              SSnoc{} -> emit "push rbx"
+              SCons{} -> emit "push rbx"
           m'
           emit "mov rbx, rax"
   m
   emit $ "mov rax, " <> val
-  pure $ SSnoc ctx ty
+  pure $ SCons ty ctx
 
-push :: (Monad m) => Literal a -> SCtx ctx -> WriterT Builder m (SCtx (ctx :. a))
+push :: (Monad m) => Literal a -> SList ctx -> WriterT Builder m (SList (a ': ctx))
 push lit = push' (printLiteral lit) (litTy lit)
 
 genLabel :: (MonadGen Int m) => Builder -> m Builder
@@ -103,7 +103,7 @@ instance (MonadGen Int m) => Cat (Compile m) where
     Compile pure
 
   compose (Compile f) (Compile g) =
-    Compile (f >=> g)
+    Compile (f <=< g)
 
   drop =
     Compile pop
@@ -155,10 +155,10 @@ instance (MonadGen Int m) => Cat (Compile m) where
     Compile $ push (LChar c)
 
   eqChar =
-    Compile $ \(SSnoc (SSnoc ctx STChar) STChar) -> do
+    Compile $ \(SCons STChar (SCons STChar ctx)) -> do
       emit "cmp rax, rbx"
       emit "adc rax, 0"
-      shift $ SSnoc ctx STBool
+      shift $ SCons STBool ctx
 
   matchChar fs g = error "TODO: matchChar"
 
@@ -188,14 +188,14 @@ instance (MonadGen Int m) => Cat (Compile m) where
     Compile $ push (LInt i)
 
   add =
-    Compile $ \(SSnoc (SSnoc ctx STInt) STInt) -> do
+    Compile $ \(SCons STInt (SCons STInt ctx)) -> do
       emit "add rax, rbx"
-      shift $ SSnoc ctx STInt
+      shift $ SCons STInt ctx
 
   mul =
-    Compile $ \(SSnoc (SSnoc ctx STInt) STInt) -> do
+    Compile $ \(SCons STInt (SCons STInt ctx)) -> do
       emit "mul rax, rbx"
-      shift $ SSnoc ctx STInt
+      shift $ SCons STInt ctx
 
   nothing = error "TODO: nothing"
 

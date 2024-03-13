@@ -66,52 +66,52 @@ import Data.Text (Text)
 import Lib.Ty
 import Prelude hiding (drop, filter, foldl, foldr, id, last, map, sum, (.))
 
-class Cat (t :: Ctx -> Ctx -> Type) where
+class Cat (t :: [Ty] -> [Ty] -> Type) where
   id :: t a a
-  compose :: t a b -> t b c -> t a c
+  compose :: t b c -> t a b -> t a c
 
-  var :: Index x a -> t x (Nil :. a)
-  drop :: t (ctx :. a) ctx
-  bind :: ((forall x'. t x' (x' :. a)) -> t x b) -> t (x :. a) b
-  par :: t ctx a -> t ctx (Nil :. b) -> t ctx (a :. b)
+  var :: Index x a -> t x '[a]
+  drop :: t (a ': ctx) ctx
+  bind :: ((forall x'. t x' (a ': x')) -> t x b) -> t (a ': x) b
+  par :: t ctx '[a] -> t ctx b -> t ctx (a ': b)
 
   fix :: (t a b -> t a b) -> t a b
 
-  fn :: t (ctx :. a) (Nil :. b) -> t ctx (ctx :. TExp b a)
-  app :: t (ctx :. TExp b a :. a) (ctx :. b)
+  fn :: t (a ': ctx) '[b] -> t ctx (TExp b a ': ctx)
+  app :: t (TExp b a ': a ': ctx) (b ': ctx)
 
-  inl :: t (ctx :. a) (ctx :. TSum a b)
-  inr :: t (ctx :. b) (ctx :. TSum a b)
-  matchSum :: t (ctx :. a) ctx' -> t (ctx :. b) ctx' -> t (ctx :. TSum a b) ctx'
+  inl :: t (a ': ctx) (TSum a b ': ctx)
+  inr :: t (b ': ctx) (TSum a b ': ctx)
+  matchSum :: t (a ': ctx) ctx' -> t (b ': ctx) ctx' -> t (TSum a b ': ctx) ctx'
 
-  pair :: t (ctx :. a :. b) (ctx :. TProd a b)
-  unpair :: t (ctx :. TProd a b) (ctx :. a :. b)
+  pair :: t (a ': b ': ctx) (TProd a b ': ctx)
+  unpair :: t (TProd a b ': ctx) (a ': b ': ctx)
 
-  true :: t ctx (ctx :. TBool)
-  false :: t ctx (ctx :. TBool)
-  ifte :: t ctx ctx' -> t ctx ctx' -> t (ctx :. TBool) ctx'
+  true :: t ctx (TBool ': ctx)
+  false :: t ctx (TBool ': ctx)
+  ifte :: t ctx ctx' -> t ctx ctx' -> t (TBool ': ctx) ctx'
 
-  char :: Char -> t a (a :. TChar)
-  matchChar :: [(Char, t ctx ctx')] -> t ctx ctx' -> t (ctx :. TChar) ctx'
-  eqChar :: t (ctx :. TChar :. TChar) (ctx :. TBool)
+  char :: Char -> t ctx (TChar ': ctx)
+  matchChar :: [(Char, t ctx ctx')] -> t ctx ctx' -> t (TChar ': ctx) ctx'
+  eqChar :: t (TChar ': TChar ': ctx) (TBool ': ctx)
 
-  string :: Text -> t a (a :. TString)
-  uncons :: t (ctx :. TString) (ctx :. TMaybe (TProd TString TChar))
-  consString :: t (ctx :. TString :. TChar) (ctx :. TString)
+  string :: Text -> t ctx (TString ': ctx)
+  uncons :: t (TString ': ctx) (TMaybe (TProd TChar TString) ': ctx)
+  consString :: t (TChar ': TString ': ctx) (TString ': ctx)
 
-  int :: Int -> t a (a :. TInt)
-  add :: t (x :. TInt :. TInt) (x :. TInt)
-  mul :: t (x :. TInt :. TInt) (x :. TInt)
+  int :: Int -> t ctx (TInt ': ctx)
+  add :: t (TInt ': TInt ': ctx) (TInt ': ctx)
+  mul :: t (TInt ': TInt ': ctx) (TInt ': ctx)
 
-  nothing :: t x (x :. TMaybe a)
-  just :: t (x :. a) (x :. TMaybe a)
-  matchMaybe :: t ctx ctx' -> t (ctx :. a) ctx' -> t (ctx :. TMaybe a) ctx'
+  nothing :: t ctx (TMaybe a ': ctx)
+  just :: t (a ': ctx) (TMaybe a ': ctx)
+  matchMaybe :: t ctx ctx' -> t (a ': ctx) ctx' -> t (TMaybe a ': ctx) ctx'
 
-  nil :: t x (x :. TList a)
-  cons :: t (x :. TList a :. a) (x :. TList a)
-  matchList :: t ctx ctx' -> t (ctx :. TList a :. a) ctx' -> t (ctx :. TList a) ctx'
+  nil :: t ctx (TList a ': ctx)
+  cons :: t (a ': TList a ': ctx) (TList a ': ctx)
+  matchList :: t ctx ctx' -> t (a ': TList a ': ctx) ctx' -> t (TList a ': ctx) ctx'
 
-(.) :: (Cat t) => t a b -> t b c -> t a c
+(.) :: (Cat t) => t b c -> t a b -> t a c
 (.) = compose
 
-infixr 5 .
+infixl 5 .

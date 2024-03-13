@@ -13,13 +13,9 @@ data Ty
   | TList Ty
   | TMaybe Ty
 
-data Ctx = Nil | (:.) Ctx Ty
-
-infixl 5 :.
-
-data Index :: Ctx -> Ty -> Type where
-  Z :: Index (ctx :. a) a
-  S :: Index ctx a -> Index (ctx :. b) a
+data Index :: [Ty] -> Ty -> Type where
+  Z :: Index (a ': ctx) a
+  S :: Index ctx a -> Index (b ': ctx) a
 
 data STy (ty :: Ty) where
   STInt :: STy TInt
@@ -27,6 +23,6 @@ data STy (ty :: Ty) where
   STChar :: STy TChar
   STString :: STy TString
 
-data SCtx (ctx :: Ctx) where
-  SNil :: SCtx Nil
-  SSnoc :: SCtx ctx -> STy ty -> SCtx (ctx :. ty)
+data SList (ctx :: [Ty]) where
+  SNil :: SList '[]
+  SCons :: STy ty -> SList ctx -> SList (ty ': ctx)
