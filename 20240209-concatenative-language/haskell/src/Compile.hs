@@ -1,7 +1,18 @@
-module Compile (Compile, compile) where
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Compile (
+  Compile,
+  compile,
+  module Control.Monad.Gen,
+) where
 
 import Control.Monad ((>=>))
-import Control.Monad.Trans.Writer.CPS (Writer, execWriter, tell)
+import Control.Monad.Gen
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Writer.CPS (WriterT, execWriterT, tell)
 import qualified Data.ByteString as ByteString
 import Data.Char (ord)
 import qualified Data.Text.Encoding as Text.Encoding
@@ -12,18 +23,18 @@ import Lib
 import Lib.Ty
 import Numeric (showHex)
 
-newtype Compile (ctx :: Ctx) (ctx' :: Ctx) = Compile (SCtx ctx -> Writer Builder (SCtx ctx'))
+newtype Compile m (ctx :: Ctx) (ctx' :: Ctx) = Compile (SCtx ctx -> WriterT Builder m (SCtx ctx'))
 
 -- | Compile a 'Cat' expression to Intel x86-64 assembly.
-compile :: Compile Nil ctx' -> Lazy.Text
-compile (Compile f) = Builder.toLazyText $ execWriter (f SNil)
+compile :: (MonadGen Int m) => Compile m Nil ctx' -> m Lazy.Text
+compile (Compile f) = Builder.toLazyText <$> execWriterT (f SNil)
 
-emit :: Builder -> Writer Builder ()
+emit :: (Monad m) => Builder -> WriterT Builder m ()
 emit x = do
   tell x
   tell "\n"
 
-shift :: SCtx ctx -> Writer Builder (SCtx ctx)
+shift :: (Monad m) => SCtx ctx -> WriterT Builder m (SCtx ctx)
 shift ctx =
   case ctx of
     SNil ->
@@ -32,7 +43,7 @@ shift ctx =
       emit "pop rbx"
       pure ctx
 
-pop :: SCtx (ctx :. a) -> Writer Builder (SCtx ctx)
+pop :: (Monad m) => SCtx (ctx :. a) -> WriterT Builder m (SCtx ctx)
 pop (SSnoc ctx _a) = do
   emit "mov rax, rbx"
   shift ctx
@@ -56,17 +67,17 @@ printLiteral lit =
     LBool b -> if b then "1" else "0"
     LChar c -> Builder.fromString Prelude.. show $ ord c
 
-push' :: Builder -> STy a -> SCtx ctx -> Writer Builder (SCtx (ctx :. a))
+push' :: forall m a ctx. (Monad m) => Builder -> STy a -> SCtx ctx -> WriterT Builder m (SCtx (ctx :. a))
 push' val ty ctx = do
   let
-    m :: Writer Builder ()
+    m :: WriterT Builder m ()
     m =
       case ctx of
         SNil ->
           pure ()
         SSnoc ctx' _a -> do
           let
-            m' :: Writer Builder ()
+            m' :: WriterT Builder m ()
             m' = case ctx' of
               SNil -> pure ()
               SSnoc{} -> emit "push rbx"
@@ -76,10 +87,18 @@ push' val ty ctx = do
   emit $ "mov rax, " <> val
   pure $ SSnoc ctx ty
 
-push :: Literal a -> SCtx ctx -> Writer Builder (SCtx (ctx :. a))
+push :: (Monad m) => Literal a -> SCtx ctx -> WriterT Builder m (SCtx (ctx :. a))
 push lit = push' (printLiteral lit) (litTy lit)
 
-instance Cat Compile where
+genLabel :: (MonadGen Int m) => Builder -> m Builder
+genLabel prefix = do
+  n <- gen
+  pure $ prefix <> "_" <> Builder.fromString (show n)
+
+instance (MonadGen e m) => MonadGen e (WriterT w m) where
+  gen = lift gen
+
+instance (MonadGen Int m) => Cat (Compile m) where
   id =
     Compile pure
 
@@ -117,15 +136,19 @@ instance Cat Compile where
 
   ifte (Compile f) (Compile g) =
     Compile $ \ctx -> do
+      thenLabel <- genLabel "then"
+      elseLabel <- genLabel "else"
+      afterLabel <- genLabel "after"
+
       emit "cmp rax, 0"
       ctx' <- pop ctx
-      emit "je else"
-      emit "then:"
+      emit $ "je " <> elseLabel
+      emit $ thenLabel <> ":"
       _ <- f ctx'
-      emit "jmp after"
-      emit "else:"
+      emit $ "jmp " <> afterLabel
+      emit $ elseLabel <> ":"
       ctx'' <- g ctx'
-      emit "after:"
+      emit $ afterLabel <> ":"
       pure ctx''
 
   char c =
@@ -141,15 +164,17 @@ instance Cat Compile where
 
   string s =
     Compile $ \ctx -> do
+      stringLabel <- genLabel "string"
       emit $
-        "string: .byte "
+        stringLabel
+          <> ": .byte "
           <> sepBy
             ( fmap
                 (Builder.fromString Prelude.. ("0x" <>) Prelude.. ($ "") Prelude.. showHex)
                 (ByteString.unpack $ Text.Encoding.encodeUtf8 s)
             )
             ", "
-      push' "string" STString ctx
+      push' stringLabel STString ctx
    where
     sepBy [] _ = mempty
     sepBy [x] _ = x
