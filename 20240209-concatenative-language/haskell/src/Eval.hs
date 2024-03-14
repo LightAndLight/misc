@@ -170,3 +170,7 @@ instance (Reflect a) => Reflect (Maybe a) where
   type ReflectTy (Maybe a) = TMaybe (ReflectTy a)
   reflect Nothing = VNothing
   reflect (Just a) = VJust (reflect a)
+
+instance (Reflect a, Reflect b) => Reflect (a, b) where
+  type ReflectTy (a, b) = TProd (ReflectTy a) (ReflectTy b)
+  reflect (a, b) = VPair (reflect a) (reflect b)

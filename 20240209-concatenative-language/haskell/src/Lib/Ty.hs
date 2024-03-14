@@ -22,6 +22,7 @@ data STy (ty :: Ty) where
   STBool :: STy TBool
   STChar :: STy TChar
   STString :: STy TString
+  STProd :: STy a -> STy b -> STy (TProd a b)
 
 data SList (ctx :: [Ty]) where
   SNil :: SList '[]
