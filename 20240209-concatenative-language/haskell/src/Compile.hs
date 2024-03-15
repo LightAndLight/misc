@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
@@ -19,16 +20,39 @@ import qualified Data.Text.Encoding as Text.Encoding
 import qualified Data.Text.Lazy as Lazy
 import Data.Text.Lazy.Builder (Builder)
 import qualified Data.Text.Lazy.Builder as Builder
-import Lib
+import Lib hiding ((.))
 import Lib.Ty
 import Numeric (showHex)
 import Prelude hiding (drop)
 
-newtype Compile m (ctx :: [Ty]) (ctx' :: [Ty]) = Compile (SList ctx -> WriterT Builder m (SList ctx'))
+newtype Compile m (ctx :: [Ty]) (ctx' :: [Ty]) = Compile ((SList ctx, [Register]) -> WriterT Builder m (SList ctx'))
+
+data Register = Rax | Rbx | Rcx | Rdx | Rsi | Rdi | R8 | R9 | R10 | R11 | R12 | R13 | R14 | R15
+
+printRegister :: Register -> Builder
+printRegister r =
+  case r of
+    Rax -> "rax"
+    Rbx -> "rbx"
+    Rcx -> "rcx"
+    Rdx -> "rdx"
+    Rsi -> "rsi"
+    Rdi -> "rdi"
+    R8 -> "r8"
+    R9 -> "r9"
+    R10 -> "r10"
+    R11 -> "r11"
+    R12 -> "r12"
+    R13 -> "r13"
+    R14 -> "r14"
+    R15 -> "r15"
+
+initialTemporaries :: [Register]
+initialTemporaries = [Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15]
 
 -- | Compile a 'Cat' expression to Intel x86-64 assembly.
 compile :: (MonadGen Int m) => Compile m '[] ctx' -> m Lazy.Text
-compile (Compile f) = Builder.toLazyText <$> execWriterT (f SNil)
+compile (Compile f) = Builder.toLazyText <$> execWriterT (f (SNil, initialTemporaries))
 
 emit :: (Monad m) => Builder -> WriterT Builder m ()
 emit x = do
@@ -152,19 +176,35 @@ instance (MonadGen e m) => MonadGen e (WriterT w m) where
 
 instance (MonadGen Int m) => Cat (Compile m) where
   id =
-    Compile pure
+    Compile (pure . fst)
 
   compose (Compile f) (Compile g) =
-    Compile (f <=< g)
+    Compile (\(ctx, tmps) -> f . (,tmps) =<< g (ctx, tmps))
 
   drop =
-    Compile pop
+    Compile $ \(ctx, _tmps) -> pop ctx
 
   var ix = error "TODO: var"
 
   fix f = error "TODO: fix"
 
-  bind f = error "TODO: bind"
+  bind f = Compile $ \(SCons ty ctx, tmps) -> do
+    (tmp, tmps') <-
+      case tmps of
+        [] ->
+          error "TODO: not enough tmps"
+        tmp : tmps' -> do
+          emit $ "mov " <> printRegister tmp <> ", rax"
+          shiftl0 ctx
+          pure (tmp, tmps')
+    let Compile f' =
+          f
+            ( Compile $ \(x, _y) -> do
+                push' (printRegister tmp) ty x
+            )
+    ctx' <- f' (ctx, tmps')
+    emit $ "; drop " <> printRegister tmp
+    pure ctx'
 
   fn f = error "TODO: fn"
 
@@ -176,20 +216,20 @@ instance (MonadGen Int m) => Cat (Compile m) where
 
   matchSum l r = error "TODO: matchSum"
 
-  pair = Compile $ \(SCons a (SCons b ctx)) ->
+  pair = Compile $ \(SCons a (SCons b ctx), _tmps) ->
     pure $ SCons (STProd a b) ctx
 
-  unpair = Compile $ \(SCons (STProd a b) ctx) ->
+  unpair = Compile $ \(SCons (STProd a b) ctx, _tmps) ->
     pure $ SCons a (SCons b ctx)
 
   par f g = error "TODO: par"
 
-  true = Compile $ push (LBool True)
+  true = Compile $ \(ctx, _tmps) -> push (LBool True) ctx
 
-  false = Compile $ push (LBool False)
+  false = Compile $ \(ctx, _tmps) -> push (LBool False) ctx
 
   ifte (Compile f) (Compile g) =
-    Compile $ \ctx -> do
+    Compile $ \(ctx, tmps) -> do
       thenLabel <- genLabel "then"
       elseLabel <- genLabel "else"
       afterLabel <- genLabel "after"
@@ -198,18 +238,18 @@ instance (MonadGen Int m) => Cat (Compile m) where
       ctx' <- pop ctx
       emit $ "je " <> elseLabel
       emit $ thenLabel <> ":"
-      _ <- f ctx'
+      _ <- f (ctx', tmps)
       emit $ "jmp " <> afterLabel
       emit $ elseLabel <> ":"
-      ctx'' <- g ctx'
+      ctx'' <- g (ctx', tmps)
       emit $ afterLabel <> ":"
       pure ctx''
 
   char c =
-    Compile $ push (LChar c)
+    Compile $ \(ctx, _tmps) -> push (LChar c) ctx
 
   eqChar =
-    Compile $ \(SCons STChar (SCons STChar ctx)) -> do
+    Compile $ \(SCons STChar (SCons STChar ctx), _tmps) -> do
       emit "cmp rax, rbx"
       emit "adc rax, 0"
       shiftl0 ctx
@@ -219,7 +259,7 @@ instance (MonadGen Int m) => Cat (Compile m) where
   matchChar ((c, f) : fs) g = bind $ \c' -> ifte f (matchChar fs g `compose` c') `compose` eqChar `compose` char c `compose` c'
 
   string s =
-    Compile $ \ctx -> do
+    Compile $ \(ctx, tmps) -> do
       stringLabel <- genLabel "string"
       emit $
         stringLabel
@@ -241,16 +281,16 @@ instance (MonadGen Int m) => Cat (Compile m) where
   consString = error "TODO: consString"
 
   int i =
-    Compile $ push (LInt i)
+    Compile $ \(ctx, _tmps) -> push (LInt i) ctx
 
   add =
-    Compile $ \(SCons STInt (SCons STInt ctx)) -> do
+    Compile $ \(SCons STInt (SCons STInt ctx), _tmps) -> do
       emit "add rax, rbx"
       shiftl0 ctx
       pure $ SCons STInt ctx
 
   mul =
-    Compile $ \(SCons STInt (SCons STInt ctx)) -> do
+    Compile $ \(SCons STInt (SCons STInt ctx), _tmps) -> do
       emit "mul rax, rbx"
       shiftl0 ctx
       pure $ SCons STInt ctx
