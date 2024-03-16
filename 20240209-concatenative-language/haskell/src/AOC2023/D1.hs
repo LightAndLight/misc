@@ -20,8 +20,8 @@ part2_testInput = "two1nine\neightwothree\nabcone2threexyz\nxtwone3four\n4nineei
 
 {-# INLINEABLE sumLineDigits #-}
 sumLineDigits ::
-  (Cat t) =>
-  (forall x. t (TList TChar ': x) (TList TInt ': x)) ->
+  (Cat t, CtxC t ctx) =>
+  (forall x. (CtxC t x) => t (TList TChar ': x) (TList TInt ': x)) ->
   t (TString ': ctx) (TInt ': ctx)
 sumLineDigits getDigits =
   sum
@@ -36,15 +36,15 @@ sumLineDigits getDigits =
     . splits
     . char '\n'
 
-getDigitsPart1 :: (Cat t) => t (TList TChar ': ctx) (TList TInt ': ctx)
+getDigitsPart1 :: (Cat t, CtxC t ctx) => t (TList TChar ': ctx) (TList TInt ': ctx)
 getDigitsPart1 =
   filterMap . fn (decimalDigit . var Z)
 
-part1 :: (Cat t) => t (TString ': ctx) (TInt ': ctx)
+part1 :: (Cat t, CtxC t ctx) => t (TString ': ctx) (TInt ': ctx)
 part1 = sumLineDigits getDigitsPart1
 
 {-# INLINEABLE getDigitsPart2 #-}
-getDigitsPart2 :: (Cat t) => t (TList TChar ': ctx) (TList TInt ': ctx)
+getDigitsPart2 :: (Cat t, CtxC t ctx) => t (TList TChar ': ctx) (TList TInt ': ctx)
 getDigitsPart2 =
   fix
     ( \self ->
@@ -62,7 +62,7 @@ getDigitsPart2 =
             . xs
     )
 
-digitPrefix :: (Cat t) => t (TList TChar ': ctx) (TMaybe TInt ': ctx)
+digitPrefix :: (Cat t, CtxC t ctx) => t (TList TChar ': ctx) (TMaybe TInt ': ctx)
 digitPrefix =
   bind $ \xs ->
     (foldr . fn (orElse . unpair . var Z) . nothing)
@@ -110,5 +110,5 @@ digitPrefix =
             . nil
         )
 
-part2 :: (Cat t) => t (TString ': ctx) (TInt ': ctx)
+part2 :: (Cat t, CtxC t ctx) => t (TString ': ctx) (TInt ': ctx)
 part2 = sumLineDigits getDigitsPart2

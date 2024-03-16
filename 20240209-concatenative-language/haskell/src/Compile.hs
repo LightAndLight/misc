@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
@@ -10,7 +10,7 @@ module Compile (
   module Control.Monad.Gen,
 ) where
 
-import Control.Monad ((<=<))
+import Control.Monad.Fix (MonadFix)
 import Control.Monad.Gen
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.CPS (WriterT, execWriterT, tell)
@@ -25,7 +25,7 @@ import Lib.Ty
 import Numeric (showHex)
 import Prelude hiding (drop)
 
-newtype Compile m (ctx :: [Ty]) (ctx' :: [Ty]) = Compile ((SList ctx, [Register]) -> WriterT Builder m (SList ctx'))
+data Compile m (ctx :: [Ty]) (ctx' :: [Ty]) = Compile (SList ctx) (SList ctx') ([Register] -> WriterT Builder m ())
 
 data Register = Rax | Rbx | Rcx | Rdx | Rsi | Rdi | R8 | R9 | R10 | R11 | R12 | R13 | R14 | R15
 
@@ -51,8 +51,8 @@ initialTemporaries :: [Register]
 initialTemporaries = [Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15]
 
 -- | Compile a 'Cat' expression to Intel x86-64 assembly.
-compile :: (MonadGen Int m) => Compile m '[] ctx' -> m Lazy.Text
-compile (Compile f) = Builder.toLazyText <$> execWriterT (f (SNil, initialTemporaries))
+compile :: (MonadGen Int m) => Compile m '[] '[a] -> m Lazy.Text
+compile (Compile ctx ctx' f) = Builder.toLazyText <$> execWriterT (f initialTemporaries)
 
 emit :: (Monad m) => Builder -> WriterT Builder m ()
 emit x = do
@@ -174,21 +174,43 @@ genLabel prefix = do
 instance (MonadGen e m) => MonadGen e (WriterT w m) where
   gen = lift gen
 
-instance (MonadGen Int m) => Cat (Compile m) where
+instance (MonadGen Int m, MonadFix m) => Cat (Compile m) where
+  type CtxC (Compile m) = KnownCtx
+  type TyC (Compile m) = KnownTy
   id =
-    Compile (pure . fst)
+    Compile input input (const $ pure ())
+   where
+    input = ctxVal
 
-  compose (Compile f) (Compile g) =
-    Compile (\(ctx, tmps) -> f . (,tmps) =<< g (ctx, tmps))
+  compose (Compile _ ctx' f) (Compile ctx _ g) =
+    Compile ctx ctx' (\tmps -> g tmps *> f tmps)
 
   drop =
-    Compile $ \(ctx, _tmps) -> pop ctx
+    Compile input output $ \_tmps -> do
+      _ <- pop input
+      pure ()
+   where
+    input = ctxVal
+    output = ctxVal
 
   var ix = error "TODO: var"
 
-  fix f = error "TODO: fix"
+  fix f = Compile input output $ \tmps -> do
+    loopLabel <- genLabel "loop"
+    emit $ loopLabel <> ":"
+    rec let Compile _input _output f' =
+              f
+                ( Compile input output $ \_tmps -> do
+                    emit $ "jmp " <> loopLabel
+                )
+    f' tmps
+   where
+    input = ctxVal
+    output = ctxVal
 
-  bind f = Compile $ \(SCons ty ctx, tmps) -> do
+  bind f = Compile input output $ \tmps -> do
+    let SCons ty ctx = input
+
     (tmp, tmps') <-
       case tmps of
         [] ->
@@ -197,14 +219,19 @@ instance (MonadGen Int m) => Cat (Compile m) where
           emit $ "mov " <> printRegister tmp <> ", rax"
           shiftl0 ctx
           pure (tmp, tmps')
-    let Compile f' =
+    let Compile _input _output f' =
           f
-            ( Compile $ \(x, _y) -> do
-                push' (printRegister tmp) ty x
+            ( let input' = ctxVal
+              in Compile input' (SCons ty input') $ \_y -> do
+                  _ <- push' (printRegister tmp) ty input'
+                  pure ()
             )
-    ctx' <- f' (ctx, tmps')
+    ctx' <- f' tmps'
     emit $ "; drop " <> printRegister tmp
     pure ctx'
+   where
+    input = ctxVal
+    output = ctxVal
 
   fn f = error "TODO: fn"
 
@@ -216,50 +243,74 @@ instance (MonadGen Int m) => Cat (Compile m) where
 
   matchSum l r = error "TODO: matchSum"
 
-  pair = Compile $ \(SCons a (SCons b ctx), _tmps) ->
-    pure $ SCons (STProd a b) ctx
+  pair = Compile input output $ \_tmps -> pure ()
+   where
+    input = ctxVal
+    output = ctxVal
 
-  unpair = Compile $ \(SCons (STProd a b) ctx, _tmps) ->
-    pure $ SCons a (SCons b ctx)
+  unpair = Compile input output $ \_tmps -> pure ()
+   where
+    input = ctxVal
+    output = ctxVal
 
   par f g = error "TODO: par"
 
-  true = Compile $ \(ctx, _tmps) -> push (LBool True) ctx
+  true = Compile input output $ \_tmps -> do
+    _ <- push (LBool True) input
+    pure ()
+   where
+    input = ctxVal
+    output = ctxVal
 
-  false = Compile $ \(ctx, _tmps) -> push (LBool False) ctx
+  false = Compile input output $ \_tmps -> do
+    _ <- push (LBool False) input
+    pure ()
+   where
+    input = ctxVal
+    output = ctxVal
 
-  ifte (Compile f) (Compile g) =
-    Compile $ \(ctx, tmps) -> do
+  ifte (Compile _input1 _output1 f) (Compile _input2 _output2 g) =
+    Compile input3 output3 $ \tmps -> do
       thenLabel <- genLabel "then"
       elseLabel <- genLabel "else"
       afterLabel <- genLabel "after"
 
       emit "cmp rax, 0"
-      ctx' <- pop ctx
+      _ <- pop input3
       emit $ "je " <> elseLabel
       emit $ thenLabel <> ":"
-      _ <- f (ctx', tmps)
+      f tmps
       emit $ "jmp " <> afterLabel
       emit $ elseLabel <> ":"
-      ctx'' <- g (ctx', tmps)
+      g tmps
       emit $ afterLabel <> ":"
-      pure ctx''
+   where
+    input3 = ctxVal
+    output3 = ctxVal
 
   char c =
-    Compile $ \(ctx, _tmps) -> push (LChar c) ctx
+    Compile input output $ \_tmps -> do
+      _ <- push (LChar c) input
+      pure ()
+   where
+    input = ctxVal
+    output = ctxVal
 
   eqChar =
-    Compile $ \(SCons STChar (SCons STChar ctx), _tmps) -> do
+    Compile input output $ \_tmps -> do
+      let SCons STChar (SCons STChar ctx) = input
       emit "cmp rax, rbx"
       emit "adc rax, 0"
       shiftl0 ctx
-      pure $ SCons STBool ctx
+   where
+    input = ctxVal
+    output = ctxVal
 
   matchChar [] g = g `compose` drop
   matchChar ((c, f) : fs) g = bind $ \c' -> ifte f (matchChar fs g `compose` c') `compose` eqChar `compose` char c `compose` c'
 
   string s =
-    Compile $ \(ctx, tmps) -> do
+    Compile input output $ \_tmps -> do
       stringLabel <- genLabel "string"
       emit $
         stringLabel
@@ -270,8 +321,12 @@ instance (MonadGen Int m) => Cat (Compile m) where
                 (ByteString.unpack $ Text.Encoding.encodeUtf8 s)
             )
             ", "
-      push' stringLabel STString ctx
+      _ <- push' stringLabel STString input
+      pure ()
    where
+    input = ctxVal
+    output = ctxVal
+
     sepBy [] _ = mempty
     sepBy [x] _ = x
     sepBy (x : xs) sep = x <> sep <> sepBy xs sep
@@ -281,19 +336,30 @@ instance (MonadGen Int m) => Cat (Compile m) where
   consString = error "TODO: consString"
 
   int i =
-    Compile $ \(ctx, _tmps) -> push (LInt i) ctx
+    Compile input output $ \_tmps -> do
+      _ <- push (LInt i) input
+      pure ()
+   where
+    input = ctxVal
+    output = ctxVal
 
   add =
-    Compile $ \(SCons STInt (SCons STInt ctx), _tmps) -> do
+    Compile input output $ \_tmps -> do
+      let SCons STInt (SCons STInt ctx) = input
       emit "add rax, rbx"
       shiftl0 ctx
-      pure $ SCons STInt ctx
+   where
+    input = ctxVal
+    output = ctxVal
 
   mul =
-    Compile $ \(SCons STInt (SCons STInt ctx), _tmps) -> do
+    Compile input output $ \_tmps -> do
+      let SCons STInt (SCons STInt ctx) = input
       emit "mul rax, rbx"
       shiftl0 ctx
-      pure $ SCons STInt ctx
+   where
+    input = ctxVal
+    output = ctxVal
 
   nothing = error "TODO: nothing"
 
