@@ -2,11 +2,18 @@
 module Main where
 
 import Data.Char (isPrint)
-import Data.Foldable (fold)
+import Data.Foldable (fold, foldl', traverse_)
 import qualified Data.Text.Lazy.IO as Text.Lazy.IO
 import qualified Data.Text.Lazy as Text.Lazy
 import qualified Data.Text.Lazy as Lazy (Text)
 import Data.Int (Int64)
+import Data.Maybe (mapMaybe)
+import Debug.Trace (traceShow)
+import Control.Applicative ((<|>), Alternative, empty)
+import Control.Monad (guard)
+import Data.List (scanl')
+import qualified Data.Text.Lazy.Builder as Builder
+import Data.Semigroup (stimes)
 
 chunksOf :: Int -> [a] -> [[a]]
 chunksOf n xs =
@@ -17,44 +24,18 @@ chunksOf n xs =
   then [prefix]
   else prefix : chunksOf n suffix
 
-zipWithPadded :: (a -> a -> b) -> a -> [a] -> [a] -> [b]
-zipWithPadded f z [] [] = []
-zipWithPadded f z [] (x:xs) = f z x : zipWithPadded f z [] xs
-zipWithPadded f z (x:xs) [] = f x z : zipWithPadded f z xs []
-zipWithPadded f z (x:xs) (y:ys) = f x y : zipWithPadded f z xs ys
+scanMaxWidths :: (a -> Int64) -> Int -> [[a]] -> [[Int64]]
+scanMaxWidths f numCols =
+  scanl' (\acc row -> zipWith max acc (fmap f row <> repeat 0)) (replicate numCols 0)
 
-maxWidths :: (a -> Int64) -> [[a]] -> [Int64]
-maxWidths f = foldr (zipWithPadded max 0 . fmap f) []
-
-columns :: (Lazy.Text -> Int64) -> Int -> [Lazy.Text] -> [Lazy.Text]
-columns len numCols input =
-  fmap
-    (fold . 
-      zipWith 
-        (\width content ->
-          content <>
-          Text.Lazy.replicate (2 + width - len content) (Text.Lazy.singleton ' ')
-        )
-        widths
-    )
-    chunked
-  where
-    chunked = chunksOf numCols input
-    widths = maxWidths len chunked
-
-columnize :: (Lazy.Text -> Int64) -> Int64 -> [Lazy.Text] -> [Lazy.Text]
-columnize len maxWidth input =
-  head $
-    filter 
-      (all ((maxWidth >=) . Text.Lazy.length))
-      (fmap
-        (\numCols -> columns len numCols input)
-        [numItems, numItems - 1 .. 2]
-      )
-    <>
-    [input]
-  where
-    numItems = length input
+toRow :: (Lazy.Text -> Int64) -> [Int64] -> [Lazy.Text] -> Lazy.Text
+toRow len widths =
+  foldMap
+    (\(width, content) ->
+      content <>
+      Text.Lazy.replicate (2 + width - len content) (Text.Lazy.singleton ' ')
+    ) . 
+    zip widths
 
 printableLen :: Lazy.Text -> Int64
 printableLen = Text.Lazy.length . Text.Lazy.filter isPrint
@@ -74,10 +55,26 @@ termPrintableLen = go 0
               | isPrint c -> go (1 + acc) cs
               | otherwise -> go acc cs
 
+allWithLast :: (a -> Bool) -> [a] -> Maybe a
+allWithLast f = go
+  where
+    go [] = Nothing
+    go [x] = if f x then Just x else Nothing
+    go (x:xs) = if f x then go xs else Nothing
+
 main :: IO ()
 main = do
-  input <- Text.Lazy.IO.getContents
-  Text.Lazy.IO.putStr .
-    Text.Lazy.unlines .
-    columnize termPrintableLen 120 $
-    Text.Lazy.lines input
+  lines <- Text.Lazy.lines <$> Text.Lazy.IO.getContents
+  let numItems = length lines
+  let maxWidth = 120
+  traverse_ Text.Lazy.IO.putStrLn . head $
+    mapMaybe
+      (\numCols -> do
+        let chunks = chunksOf numCols lines
+        let widthsScan = scanMaxWidths termPrintableLen numCols chunks
+        let totalPadding = (fromIntegral numCols - 1) * 2
+        guard $ all (\widths -> sum widths + totalPadding <= maxWidth) widthsScan
+        pure $ fmap (toRow termPrintableLen $ last widthsScan) chunks
+      )
+      [numItems, numItems - 1 .. 2] <>
+    [lines]

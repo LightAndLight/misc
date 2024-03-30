@@ -10,12 +10,16 @@ fn term_printable_len(input: &str) -> usize {
                 continue;
             }
             _ => {
-                if !c.is_control() && !in_escape {
-                    count += 1;
-                }
-
-                if c == 'm' && in_escape {
-                    in_escape = false;
+                if in_escape {
+                    // in_escape &&
+                    if c == 'm' {
+                        in_escape = false;
+                    }
+                } else {
+                    // !in_escape &&
+                    if !c.is_control() {
+                        count += 1;
+                    }
                 }
 
                 continue;
