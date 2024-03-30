@@ -1,4 +1,40 @@
-use std::io::{BufRead, BufReader};
+use std::io::Read;
+
+const MAX_WIDTH: usize = 120;
+const PADDING: usize = 2;
+
+fn main() -> Result<(), std::io::Error> {
+    let mut stdin_bytes = Vec::new();
+    std::io::stdin().read_to_end(&mut stdin_bytes)?;
+
+    let stdin_str = simdutf8::basic::from_utf8(&stdin_bytes).unwrap();
+    let lines = stdin_str.lines().collect::<Vec<&str>>();
+
+    let len = &term_printable_len;
+    let line_cb = |line: &str| {
+        println!("{}", line);
+    };
+
+    let mut widths = Vec::new();
+    let mut satisfied = None;
+    for num_cols in (2..=lines.len()).rev() {
+        if summarise_widths(len, MAX_WIDTH, num_cols, &mut widths, &lines) {
+            satisfied = Some(num_cols);
+            break;
+        }
+    }
+
+    match satisfied {
+        Some(num_cols) => {
+            write_result(len, num_cols, &widths, &lines, line_cb);
+        }
+        None => {
+            lines.into_iter().for_each(line_cb);
+        }
+    }
+
+    Ok(())
+}
 
 fn term_printable_len(input: &str) -> usize {
     let mut in_escape = false;
@@ -29,47 +65,12 @@ fn term_printable_len(input: &str) -> usize {
     count
 }
 
-const MAX_WIDTH: usize = 120;
-
-fn main() -> Result<(), std::io::Error> {
-    let lines = BufReader::new(std::io::stdin())
-        .lines()
-        .collect::<Result<Vec<String>, std::io::Error>>()?;
-
-    let len = &term_printable_len;
-    let line_cb = |line: &str| {
-        println!("{}", line);
-    };
-
-    let mut widths = Vec::new();
-    let mut satisfied = None;
-    for num_cols in (2..=lines.len()).rev() {
-        if summarise_widths(len, MAX_WIDTH, num_cols, &mut widths, &lines) {
-            satisfied = Some(num_cols);
-            break;
-        }
-    }
-
-    match satisfied {
-        Some(num_cols) => {
-            write_result(len, num_cols, &widths, &lines, line_cb);
-        }
-        None => {
-            lines.into_iter().for_each(|line| line_cb(&line));
-        }
-    }
-
-    Ok(())
-}
-
-const PADDING: usize = 2;
-
 fn summarise_widths(
     len: &dyn Fn(&str) -> usize,
     max_width: usize,
     num_cols: usize,
     widths: &mut Vec<usize>,
-    input: &[String],
+    input: &[&str],
 ) -> bool {
     let max_padding = (num_cols - 1) * PADDING;
 
@@ -97,7 +98,7 @@ fn write_result<F: FnMut(&str)>(
     len: &dyn Fn(&str) -> usize,
     num_cols: usize,
     widths: &[usize],
-    input: &[String],
+    input: &[&str],
     mut cb: F,
 ) {
     let mut line = String::new();

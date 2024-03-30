@@ -3,5 +3,14 @@
 version = 3
 
 [[package]]
+name = "simdutf8"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f27f6278552951f1f2b8cf9da965d10969b2efdea95a6ec47987ab46edfe263a"
+
+[[package]]
 name = "text-columns"
 version = "0.1.0"
+dependencies = [
+ "simdutf8",
+]
