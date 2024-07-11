@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+
+<head>
+<meta charset="UTF-8"/>
+<title>Install - My PWA test</title>
+</head>
+
+<body>
+<p>This app can be installed for offline use.</p>
+
+<p id="status"></p>
+
+<script>
+const statusEl = document.getElementById("status");
+if ("serviceWorker" in navigator) {
+  statusEl.textContent = "Your browser supports installation";
+  statusEl.after((() => {
+    const a = document.createElement("a");
+    a.textContent = "Install";
+    a.setAttribute("href", "/pwa/installing.html");
+    return a;
+  })());
+} else {
+  statusEl.textContent = "Your browser does not support installation";
+}
+</script>
+</body>
+</html>

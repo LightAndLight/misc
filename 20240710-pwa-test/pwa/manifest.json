@@ -1,0 +1,12 @@
+{
+  "name": "PWA Test",
+  "description": "A simple Progressive Web App to see how it all works",
+  "start_url" : "/pwa",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "144x144"
+    }
+  ],
+  "display": "standalone"
+}

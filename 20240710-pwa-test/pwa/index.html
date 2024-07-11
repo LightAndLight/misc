@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+
+<head>
+<meta charset="UTF-8"/>
+<title>My PWA test</title>
+</head>
+
+<body>
+<p>Hello from PWA!</p>
+
+<p>Links:</p>
+<ul>
+<li><a href="/page1.html">Page 1</a></li>
+<li><a href="/page2.html">Page 2</a></li>
+<li><a href="/nested/page3.html">Page 3 (nested)</a></li>
+</ul>
+<script>
+// https://www.reddit.com/r/PWA/comments/ulbsq7/how_to_create_a_pwa_service_worker_that_only/i7znmgi/
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("service-worker.js").then(
+    (registration) => {
+      console.log("Service worker registration successful:", registration);
+    },
+    (error) => {
+      console.error(`Service worker registration failed: ${error}`);
+    },
+  );
+} else {
+  console.error("Service workers are not supported.");
+}
+</script>
+</body>
+
+</html>

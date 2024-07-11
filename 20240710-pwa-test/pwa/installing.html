@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+
+<head>
+<meta charset="UTF-8"/>
+<link rel="manifest" href="manifest.json"/>
+<title>Installing - My PWA test</title>
+</head>
+
+<body>
+<p id="status">Installing...</p>
+
+<pre id="messages"></pre>
+
+<div id="final-steps" hidden>
+<p>Click your browser's "Install app" icon:</p>
+<ol>
+<li><img src="install-app.png" style="width: 80%; vertical-align: top;"/></li>
+<li><img src="install-app-confirm.png" style="width: 80%; vertical-align: top;"/></li>
+</ol>
+</div>
+
+<script>
+const messages = document.getElementById("messages");
+const status = document.getElementById("status");
+const finalSteps = document.getElementById("final-steps");
+
+if ("serviceWorker" in navigator) {
+  // https://web.dev/learn/pwa/detection#detecting_the_transfer
+  window.addEventListener('DOMContentLoaded', () => {
+    window.matchMedia('(display-mode: standalone)')
+      .addEventListener('change', (event) => {
+        if (event.matches) {
+          console.log("redirecting to home");
+          window.location.assign("/pwa");
+        }
+      });
+  });
+  
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    switch (event.data.type) {
+      case "installEvent":
+        messages.textContent += `${event.data.value}\n`;
+        break;
+      case "installSuccess":
+        status.textContent += " Done.";
+        // finalSteps.removeAttribute("hidden");
+        finalSteps.hidden = false;
+        break;
+      default:
+        break;
+    }
+  });
+
+  navigator.serviceWorker.register("service-worker.js").then(
+    (registration) => {
+      console.log("Service worker registration successful:", registration);
+    },
+    (error) => {
+      console.error(`Service worker registration failed: ${error}`);
+    },
+  );
+} else {
+  console.error("Service workers are not supported.");
+}
+</script>
+</body>
+</html>
