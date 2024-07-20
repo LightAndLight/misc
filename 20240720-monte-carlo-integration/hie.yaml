@@ -1,0 +1,4 @@
+cradle:
+  cabal:
+    - path: "app/Main.hs"
+      component: "monte-carlo-integration:exe:monte-carlo-integration"
