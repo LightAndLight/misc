@@ -1,0 +1,7 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:functional-image-rendering"
+
+    - path: "app/Main.hs"
+      component: "functional-image-rendering:exe:functional-image-rendering"

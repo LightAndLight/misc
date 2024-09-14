@@ -1,0 +1,58 @@
+cabal-version:      3.0
+name:               functional-image-rendering
+version:            0.1.0.0
+-- synopsis:
+-- description:
+license:            MIT
+license-file:       LICENSE
+author:             Isaac Elliott
+maintainer:         isaace71295@gmail.com
+-- copyright:
+category:           Graphics
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+-- extra-source-files:
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+    exposed-modules:
+        Animation
+        FRP
+        FRP.Mono
+        Image
+        Image.Pure
+        Image.X11
+    -- other-modules:
+    -- other-extensions:
+    build-depends:
+        X11,
+        JuicyPixels,
+        async,
+        base ^>=4.18.2.1,
+        containers,
+        stm,
+        time,
+        transformers,
+        vector
+    hs-source-dirs:   src
+    default-language: Haskell2010
+
+executable functional-image-rendering
+    import:           warnings
+    main-is:          Main.hs
+    -- other-modules:
+    -- other-extensions:
+    build-depends:
+        X11,
+        async,
+        base ^>=4.18.2.1,
+        functional-image-rendering,
+        stm,
+        time
+
+    hs-source-dirs:   app
+    default-language: Haskell2010
+    ghc-options:      -threaded
