@@ -1,0 +1,3 @@
+name: denotational-union-find
+include: src
+depend: standard-library
