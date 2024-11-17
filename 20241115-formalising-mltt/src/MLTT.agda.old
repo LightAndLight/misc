@@ -1,0 +1,910 @@
+{-# OPTIONS --safe --without-K #-}
+module MLTT where
+
+open import Function using (case_of_)
+open import Data.Nat using (ℕ; zero; suc)
+open import Data.Product using (Σ-syntax; _×_; _,_)
+open import Relation.Nullary using (¬_)
+open import Relation.Binary.PropositionalEquality as Eq
+  using (_≡_; refl; sym; cong; cong₂)
+  renaming (subst to ≡-subst)
+open Eq.≡-Reasoning
+
+data Term : Set where
+  Tm-Var : ℕ → Term
+
+  Tm-Type : Term
+
+  -- types
+  Tm-Unit : Term
+  Tm-Pi : (A : Term) → (B : Term) → Term
+
+  -- terms
+  Tm-Lam : (A : Term) → (e : Term) → Term
+  Tm-App : (f : Term) → (x : Term) → Term
+
+rename-under : (ℕ → ℕ) → ℕ → ℕ
+rename-under f zero = zero
+rename-under f (suc ix) = suc (f ix)
+
+rename : (ℕ → ℕ) → Term → Term
+rename f (Tm-Var ix) = Tm-Var (f ix)
+rename f Tm-Type = Tm-Type
+rename f (Tm-Pi A B) = Tm-Pi (rename f A) (rename (rename-under f) B)
+rename f Tm-Unit = Tm-Unit
+rename f (Tm-Lam A e) = Tm-Lam (rename f A) (rename (rename-under f) e)
+rename f (Tm-App a b) = Tm-App (rename f a) (rename f b)
+
+rename-id-under :
+  {f : ℕ → ℕ} →
+  ((ix : ℕ) → f ix ≡ ix) →
+  (ix : ℕ) → rename-under f ix ≡ ix
+rename-id-under f zero = refl
+rename-id-under f (suc ix) = cong suc (f ix)
+
+rename-id :
+  {f : ℕ → ℕ} →
+  ((ix : ℕ) → f ix ≡ ix) →
+  (x : Term) → rename f x ≡ x
+rename-id f (Tm-Var ix) = cong Tm-Var (f ix)
+rename-id f Tm-Type = refl
+rename-id f (Tm-Pi A B) = cong₂ Tm-Pi (rename-id f A) (rename-id (rename-id-under f) B)
+rename-id f Tm-Unit = refl
+rename-id f (Tm-Lam A e) = cong₂ Tm-Lam (rename-id f A) (rename-id (rename-id-under f) e)
+rename-id f (Tm-App a b) = cong₂ Tm-App (rename-id f a) (rename-id f b)
+
+subst-under : (ℕ → Term) → ℕ → Term
+subst-under f zero = Tm-Var zero
+subst-under f (suc ix) = rename suc (f ix)
+
+subst : (ℕ → Term) → Term → Term
+subst f (Tm-Var ix) = f ix
+subst f Tm-Type = Tm-Type
+subst f (Tm-Pi A B) = Tm-Pi (subst f A) (subst (subst-under f) B)
+subst f Tm-Unit = Tm-Unit
+subst f (Tm-Lam A e) = Tm-Lam (subst f A) (subst (subst-under f) e)
+subst f (Tm-App a b) = Tm-App (subst f a) (subst f b)
+
+subst-TmVar-id-under :
+  {f : ℕ → Term} →
+  ((ix : ℕ) → f ix ≡ Tm-Var ix) →
+  (ix : ℕ) → subst-under f ix ≡ Tm-Var ix
+subst-TmVar-id-under {f} f-id =
+  λ{
+    zero → refl
+    ;
+    (suc ix) → 
+      begin
+        rename suc (f ix)
+      ≡⟨ cong (rename suc) (f-id ix) ⟩
+        rename suc (Tm-Var ix)
+      ≡⟨⟩
+        Tm-Var (suc ix)
+      ∎
+  }
+
+subst-TmVar-id :
+  {f : ℕ → Term} →
+  ((ix : ℕ) → f ix ≡ Tm-Var ix) →
+  (x : Term) → subst f x ≡ x
+subst-TmVar-id f (Tm-Var ix) = f ix
+subst-TmVar-id f Tm-Type = refl
+subst-TmVar-id f (Tm-Pi A B) =
+  cong₂ Tm-Pi (subst-TmVar-id f A) (subst-TmVar-id (subst-TmVar-id-under f) B)
+subst-TmVar-id f Tm-Unit = refl
+subst-TmVar-id f (Tm-Lam A e) =
+  cong₂ Tm-Lam (subst-TmVar-id f A) (subst-TmVar-id (subst-TmVar-id-under f) e)
+subst-TmVar-id f (Tm-App a b) = cong₂ Tm-App (subst-TmVar-id f a) (subst-TmVar-id f b)
+
+inst1 : Term → ℕ → Term
+inst1 tm zero = tm
+inst1 tm (suc ix) = Tm-Var ix
+
+_[_] : Term → Term → Term
+tm [ x ] = subst (inst1 x) tm
+
+{-
+data Inst1[_] (tm : Term) : ℕ → Term → Set where
+  Inst1-zero : Inst1[ tm ] zero tm
+  Inst1-suc : {ix : ℕ} → Inst1[ tm ] (suc ix) (Tm-Var ix)
+
+Inst1-correct' : {x tm : Term} {ix : ℕ} → Inst1[ x ] ix tm → inst1 x ix ≡ tm
+Inst1-correct' Inst1-zero = refl
+Inst1-correct' Inst1-suc = refl
+
+data Subst-Under (S : ℕ → Term → Set) : ℕ → Term → Set where
+  Subst-Under-zero : Subst-Under S zero (Tm-Var zero)
+  Subst-Under-suc : {ix : ℕ} {tm : Term} → S ix tm → Subst-Under S (suc ix) (rename suc tm)
+
+Subst-Under-correct :
+  {S : ℕ → Term → Set} {f : ℕ → Term} →
+  (S-correct : (ix : ℕ) → S ix (f ix)) →
+  (ix : ℕ) →
+  Subst-Under S ix (subst-under f ix)
+Subst-Under-correct S-correct zero = Subst-Under-zero
+Subst-Under-correct S-correct (suc ix) = Subst-Under-suc (S-correct ix)
+
+Subst-Under-correct' :
+  {S : ℕ → Term → Set} {f : ℕ → Term} {tm : Term} →
+  (S-correct : {tm : Term} {ix : ℕ} → S ix tm → f ix ≡ tm) →
+  {ix : ℕ} →
+  Subst-Under S ix tm →
+  subst-under f ix ≡ tm
+Subst-Under-correct' S-correct {zero} Subst-Under-zero = refl
+Subst-Under-correct' S-correct {suc ix} (Subst-Under-suc sub) = cong (rename suc) (S-correct sub)
+
+data Subst[_,_]≡_ (S : ℕ → Term → Set) : Term → Term → Set where
+  Subst-Tm-Var :
+    {ix : ℕ} {tm : Term} →
+    S ix tm →
+    Subst[ S , Tm-Var ix ]≡ tm
+  Subst-Tm-Type : Subst[ S , Tm-Type ]≡ Tm-Type
+  Subst-Tm-Pi :
+    {A A' B B' : Term} →
+    Subst[ S , A ]≡ A' →
+    Subst[ Subst-Under S , B ]≡ B' →
+    Subst[ S , Tm-Pi A B ]≡ Tm-Pi A' B'
+  Subst-Tm-Lam :
+    {A A' e e' : Term} →
+    Subst[ S , A ]≡ A' →
+    Subst[ Subst-Under S , e ]≡ e' →
+    Subst[ S , Tm-Lam A e ]≡ Tm-Lam A' e'
+  Subst-Tm-App :
+    {a a' b b' : Term} →
+    Subst[ S , a ]≡ a' →
+    Subst[ S , b ]≡ b' →
+    Subst[ S , Tm-App a b ]≡ Tm-App a' b'
+
+Subst-correct :
+  {S : ℕ → Term → Set} {f : ℕ → Term} →
+  (S-correct : (ix : ℕ) → S ix (f ix)) →
+  (tm : Term) →
+  Subst[ S , tm ]≡ subst f tm
+Subst-correct S-correct (Tm-Var ix) = Subst-Tm-Var (S-correct ix)
+Subst-correct S-correct Tm-Type = Subst-Tm-Type
+Subst-correct {S} {f} S-correct (Tm-Pi A B) with Subst-correct {S} {f} S-correct A | Subst-correct {S = Subst-Under S} {f = subst-under f} (Subst-Under-correct S-correct) B
+... | A-correct | B-correct = Subst-Tm-Pi A-correct B-correct
+Subst-correct {S} {f} S-correct (Tm-Lam A e) with Subst-correct {S} {f} S-correct A | Subst-correct {S = Subst-Under S} {f = subst-under f} (Subst-Under-correct S-correct) e
+... | A-correct | e-correct = Subst-Tm-Lam A-correct e-correct
+Subst-correct {S} {f} S-correct (Tm-App a b) with Subst-correct {S} {f} S-correct a | Subst-correct {S} {f} S-correct b
+... | a-correct | b-correct = Subst-Tm-App a-correct b-correct
+
+Subst-correct' :
+  {S : ℕ → Term → Set} {f : ℕ → Term} {tm tm' : Term} →
+  (S-correct : {tm : Term} {ix : ℕ} → S ix tm → f ix ≡ tm) →
+  Subst[ S , tm ]≡ tm' →
+  subst f tm ≡ tm'
+Subst-correct' S-correct (Subst-Tm-Var S-ix-tm') = S-correct S-ix-tm'
+Subst-correct' S-correct Subst-Tm-Type = refl
+Subst-correct' S-correct (Subst-Tm-Pi sub1 sub2) =
+  cong₂ Tm-Pi (Subst-correct' S-correct sub1) (Subst-correct' (Subst-Under-correct' S-correct) sub2)
+Subst-correct' S-correct (Subst-Tm-Lam sub1 sub2) = 
+  cong₂ Tm-Lam (Subst-correct' S-correct sub1) (Subst-correct' (Subst-Under-correct' S-correct) sub2)
+Subst-correct' S-correct (Subst-Tm-App sub1 sub2) = 
+  cong₂ Tm-App (Subst-correct' S-correct sub1) (Subst-correct' S-correct sub2)
+-}
+
+Type : Set
+Type = Term
+
+data Context : Set where
+  ◆ : Context
+  _,_ : Context → Type → Context
+
+data _∈_ : Type → Context → Set where
+  here : {Γ : Context} {A : Type} → _∈_ A (Γ , A)
+  there : {Γ : Context} {A X : Type} → _∈_ A Γ → _∈_ A (Γ , X)
+
+∈-to-ℕ : {Γ : Context} {A : Term} → A ∈ Γ → ℕ
+∈-to-ℕ here = zero
+∈-to-ℕ (there ix) = suc (∈-to-ℕ ix)
+
+mutual
+  data ⊢_ctx : Context → Set where
+    judge-◆ : ⊢ ◆ ctx
+    judge-, : {Γ : Context} {A : Type} → ⊢ Γ ctx → Γ ⊢ A ∶ Tm-Type → ⊢ Γ , A ctx
+
+  data _⊢_∶_ (Γ : Context) : Term → Type → Set where
+    judge-Tm-Var :
+      {A : Type} →
+      (ix : A ∈ Γ) →
+      Γ ⊢ Tm-Var (∈-to-ℕ ix) ∶ A
+
+    judge-Tm-Pi :
+      {A B : Term} →
+      Γ ⊢ A ∶ Tm-Type →
+      (Γ , A) ⊢ B ∶ Tm-Type →
+      Γ ⊢ Tm-Pi A B ∶ Tm-Type
+
+    judge-Tm-Unit :
+      Γ ⊢ Tm-Unit ∶ Tm-Type
+
+    judge-Tm-Lam :
+      {A B : Type} {e : Term} →
+      Γ ⊢ A ∶ Tm-Type →
+      (Γ , A) ⊢ e ∶ B →
+      Γ ⊢ Tm-Lam A e ∶ Tm-Pi A B
+
+    judge-Tm-App :
+      {A B B' : Type} {f x : Term} →
+      Γ ⊢ f ∶ Tm-Pi A B →
+      Γ ⊢ x ∶ A →
+      {_ : B [ x ] ≡ B'} →
+      Γ ⊢ Tm-App f x ∶ B'
+
+weaken-Type' :
+  {Γ : Context} {A B X : Term} →
+  Γ ⊢ A ∶ Tm-Type →
+  (Γ , A) ⊢ B ∶ Tm-Type →
+  ((Γ , X) , rename suc A) ⊢ rename (rename-under suc) B ∶ Tm-Type
+weaken-Type' A∶Type (judge-Tm-Var ix) = {!!}
+weaken-Type' A∶Type (judge-Tm-Pi ty ty₁) = {!!}
+weaken-Type' A∶Type judge-Tm-Unit = {!!}
+weaken-Type' A∶Type (judge-Tm-App ty ty₁) = {!!}
+
+weaken-Type :
+  {Γ : Context} {T A : Term} →
+  Γ ⊢ T ∶ Tm-Type →
+  (Γ , A) ⊢ rename suc T ∶ Tm-Type
+weaken-Type (judge-Tm-Var ix) = judge-Tm-Var (there ix)
+weaken-Type (judge-Tm-Pi A B) = judge-Tm-Pi (weaken-Type A) {!!}
+weaken-Type judge-Tm-Unit = judge-Tm-Unit
+weaken-Type (judge-Tm-App a b) = judge-Tm-App {!!} {!!}
+
+othertest :
+  {Γ : Context} {X A B x : Term} →
+  Γ ⊢ x ∶ X →
+  (Γ , X) ⊢ A ∶ Tm-Type →
+  ((Γ , X) , A) ⊢ B ∶ Tm-Type →
+  (Γ , subst (inst1 x) A) ⊢ subst (subst-under (inst1 x)) B ∶ Tm-Type
+othertest x∶X A∶Type (judge-Tm-Var (there ix)) = {!!}
+othertest x∶X A∶Type (judge-Tm-Pi ty ty₁) = {!!}
+othertest x∶X A∶Type judge-Tm-Unit = {!!}
+othertest x∶X A∶Type (judge-Tm-App ty ty₁) = {!!}
+
+test :
+  {Γ : Context} {X T x : Term} →
+  Γ ⊢ x ∶ X →
+  (Γ , X) ⊢ T ∶ Tm-Type →
+  Γ ⊢ (T [ x ]) ∶ Tm-Type
+test x∶X (judge-Tm-Var ix) with ix
+... | here = x∶X
+... | there ix = judge-Tm-Var ix
+test x∶X (judge-Tm-Pi A B) = judge-Tm-Pi (test x∶X A) {!!}
+test x∶X judge-Tm-Unit = judge-Tm-Unit
+test x∶X (judge-Tm-App a b) = {!!}
+{-
+Γ⊢T-, : {Γ : Context} {T A : Term} → Γ ⊢ T → Γ ⊢ A ∶ Tm-Type → (Γ , A) ⊢ T
+Γ⊢T-, record { index = index ; Γ-ctx = Γ-ctx } Γ⊢A∶Type =
+  record { index = there index ; Γ-ctx = judge-, Γ-ctx Γ⊢A∶Type }
+
+Γ⊢A⇒⊢Γctx :
+  {Γ : Context} {A : Type} →
+  Γ ⊢ A →
+  ⊢ Γ ctx
+Γ⊢A⇒⊢Γctx = _⊢_.Γ-ctx
+-}
+
+{-
+Γ⊢e∶T⇒⊢Γctx :
+  {Γ : Context} {e : Term} {T : Type} →
+  Γ ⊢ e ∶ T →
+  ⊢ Γ ctx
+Γ⊢e∶T⇒⊢Γctx (judge-Tm-Var ix) = _⊢_.Γ-ctx ix
+Γ⊢e∶T⇒⊢Γctx (judge-Tm-Pi A B) = Γ⊢e∶T⇒⊢Γctx A
+Γ⊢e∶T⇒⊢Γctx (judge-Tm-Unit ⊢Γctx) = ⊢Γctx
+Γ⊢e∶T⇒⊢Γctx (judge-Tm-Lam A e) = Γ⊢e∶T⇒⊢Γctx A
+Γ⊢e∶T⇒⊢Γctx (judge-Tm-App f x) = Γ⊢e∶T⇒⊢Γctx f
+
+judge-inst1-Type :
+  {Γ : Context} {A B x : Term} →
+  (Γ , A) ⊢ B ∶ Tm-Type →
+  Γ ⊢ x ∶ A →
+  Γ ⊢ B [ x ] ∶ Tm-Type
+judge-inst1-Type (judge-Tm-Var record { ix = .zero ; index = here ; Γ-ctx = Γ-ctx }) Γ⊢x∶A =
+  Γ⊢x∶A
+judge-inst1-Type (judge-Tm-Var record { ix = .(suc _) ; index = (there index) ; Γ-ctx = judge-, Γ-ctx _ }) Γ⊢x∶A =
+  judge-Tm-Var (record { index = index ; Γ-ctx = Γ-ctx })
+judge-inst1-Type (judge-Tm-Pi A B) Γ⊢x∶A = judge-Tm-Pi (judge-inst1-Type A Γ⊢x∶A) {!!}
+judge-inst1-Type (judge-Tm-App f x) Γ⊢x∶A = {!!}
+-}
+
+record Subst (Γ Γ' : Context) : Set where
+  field
+    run' : ℕ → Term
+    run : {A : Term} → (ix : A ∈ Γ) → Γ' ⊢ run' (∈-to-ℕ ix) ∶ subst run' A
+
+{-
+Subst-run-ctx :
+  {Γ Γ' : Context} →
+  Subst Γ Γ' →
+  ⊢ Γ ctx → 
+  ⊢ Γ' ctx
+Subst-run-ctx {Γ} {◆} s ⊢Γctx = judge-◆
+Subst-run-ctx {.◆} {G , x} record { run' = run' ; run = run } judge-◆ = judge-, {!!} {!!}
+Subst-run-ctx {.(_ , _)} {G , x} s (judge-, P x₁) = judge-, {!!} {!!}
+
+Subst-run' : {Γ Γ' : Context} → (s : Subst Γ Γ') → Term → Term
+Subst-run' s = subst (Subst.run' s)
+
+Subst-run :
+  {Γ Γ' : Context} {e T : Term} →
+  (s : Subst Γ Γ') →
+  Γ ⊢ e ∶ T →
+  Γ' ⊢ Subst-run' s e ∶ Subst-run' s T
+Subst-run s (judge-Tm-Var ix) = Subst.run s ix
+Subst-run s (judge-Tm-Pi A B) = judge-Tm-Pi (Subst-run s A) (Subst-run {!!} B)
+Subst-run s judge-Tm-Unit = judge-Tm-Unit
+Subst-run s (judge-Tm-Lam A e) = judge-Tm-Lam (Subst-run s A) (Subst-run {!!} e)
+Subst-run s (judge-Tm-App a b) = judge-Tm-App (Subst-run s a) (Subst-run s b)
+-}
+
+Subst-id : {Γ : Context} → Subst Γ Γ
+Subst-id {Γ} =
+  record {
+    run' = Tm-Var
+    ;
+    run = λ {A} ix →
+      ≡-subst
+        (λ x → Γ ⊢ Tm-Var (∈-to-ℕ ix) ∶ x)
+        (sym (subst-TmVar-id (λ _ → refl) A))
+        (judge-Tm-Var ix)
+  }
+
+Subst-∘ : {Γ Γ' Γ'' : Context} → Subst Γ Γ' → Subst Γ' Γ'' → Subst Γ Γ''
+Subst-∘ record { run = run1 ; run' = run'1 } record { run = run2 ; run' = run'2 } =
+  record {
+    run' = λ ix → subst run'2 (run'1 ix)
+    ;
+    run = λ ix → let xx = run1 ix in {!!}
+  }
+
+{-
+thingo :
+  {Γ Γ' : Context} {e A A' X : Term} {f : ℕ → Term} {s : Subst Γ Γ'} {ix : ℕ} →
+  Γ' ⊢ X ∶ Tm-Type →
+  subst (Subst.run' s) A ≡ A' →
+  Γ' ⊢ e ∶ A' →
+  (Γ' , X) ⊢ rename suc e ∶ subst (subst-under (Subst.run' s)) A
+thingo Γ'⊢x∶Type prf (judge-Tm-Var record { index = index ; Γ-ctx = Γ-ctx }) = judge-Tm-Var (record { index = there {!!} ; Γ-ctx = judge-, Γ-ctx Γ'⊢x∶Type })
+thingo Γ'⊢x∶Type prf (judge-Tm-Pi tm tm₁) = {!!}
+thingo Γ'⊢x∶Type prf (judge-Tm-Lam tm tm₁) = {!!}
+thingo Γ'⊢x∶Type prf (judge-Tm-App tm tm₁) = {!!}
+
+subst-under-run :
+  {Γ Γ' : Context} {X : Term} {s : Subst Γ Γ'} →
+  ({A : Term} → (ix : Γ ⊢ A) → Γ' ⊢ Subst.run' s (_⊢_.ix ix) ∶ subst (Subst.run' s) A) →
+  {A : Term} → (ix : (Γ , X) ⊢ A) → (Γ' , subst (Subst.run' s) X) ⊢ subst-under (Subst.run' s) (_⊢_.ix ix) ∶ subst (subst-under (Subst.run' s)) A
+subst-under-run f record { ix = .zero ; index = here ; Γ-ctx = Γ-ctx } =
+  judge-Tm-Var (record { index = {!!} ; Γ-ctx = judge-, {!!} {!!} })
+subst-under-run {Γ} {Γ'} {X} {s} f {A} record { ix = suc ix ; index = (there index) ; Γ-ctx = (judge-, Γ-ctx x) } =
+  let
+    xx : Γ' ⊢ Subst.run' s ix ∶ subst (Subst.run' s) A
+    xx = f (record { index = index ; Γ-ctx = Γ-ctx })
+
+    goal : (Γ' , subst (Subst.run' s) X) ⊢ rename suc (Subst.run' s ix) ∶ subst (subst-under (Subst.run' s)) A
+    goal = {!!}
+  in
+    goal
+
+-}
+Subst-under :
+  {Γ Γ' : Context} {A : Term} →
+  (s : Subst Γ Γ') →
+  Subst (Γ , A) (Γ' , subst (Subst.run' s) A)
+Subst-under {Γ} {Γ'} s =
+  record {
+    run' = subst-under (Subst.run' s)
+    ;
+    run = {!!}
+      -- subst-under-run (Subst.run s)
+  }
+
+Γ⊢e∶T⇒Γ⊢T∶Type :
+  {Γ : Context} {e : Term} {T : Type} →
+  Γ ⊢ e ∶ T →
+  Γ ⊢ T ∶ Tm-Type
+Γ⊢e∶T⇒Γ⊢T∶Type (judge-Tm-Var ix) = {!!}
+Γ⊢e∶T⇒Γ⊢T∶Type (judge-Tm-Pi A B) = {!!}
+Γ⊢e∶T⇒Γ⊢T∶Type (judge-Tm-Lam A e) = {!!}
+Γ⊢e∶T⇒Γ⊢T∶Type {Γ} (judge-Tm-App {A} {B} f x {sub}) with Γ⊢e∶T⇒Γ⊢T∶Type f
+... | judge-Tm-Pi Γ⊢A∶Type Γ,A⊢B∶Type = ≡-subst (λ x → Γ ⊢ x ∶ Tm-Type) sub {!!}
+
+{-
+∈-to-ℕ-correct :
+  {Γ : Context} {T : Term} →
+  (ix : T ∈ Γ) → Γ⊢T⇒ℕ ix ≡ _⊢_.ix ix
+∈-to-ℕ-correct ix with _⊢_.index ix
+... | here = refl
+... | there ix' with _⊢_.Γ-ctx ix
+... | judge-, Γ-ctx' _ = cong suc (Γ⊢T⇒N-correct (record { index = ix' ; Γ-ctx = Γ-ctx' }))
+
+Γ⊢e∶T⇒Term :
+  {Γ : Context} {e : Term} {T : Type} →
+  Γ ⊢ e ∶ T → Term
+Γ⊢e∶T⇒Term (judge-Tm-Var ix) = Tm-Var (Γ⊢T⇒ℕ ix)
+Γ⊢e∶T⇒Term (judge-Tm-Pi A B) = Tm-Pi (Γ⊢e∶T⇒Term A) (Γ⊢e∶T⇒Term B)
+Γ⊢e∶T⇒Term (judge-Tm-Lam A e) = Tm-Lam (Γ⊢e∶T⇒Term A) (Γ⊢e∶T⇒Term e)
+Γ⊢e∶T⇒Term (judge-Tm-App f x) = Tm-App (Γ⊢e∶T⇒Term f) (Γ⊢e∶T⇒Term x)
+
+Γ⊢e∶T⇒Term-correct :
+  {Γ : Context} {e : Term} {T : Type} →
+  (tm : Γ ⊢ e ∶ T) →
+  Γ⊢e∶T⇒Term tm ≡ e
+Γ⊢e∶T⇒Term-correct (judge-Tm-Var ix) = cong Tm-Var (Γ⊢T⇒N-correct ix)
+Γ⊢e∶T⇒Term-correct (judge-Tm-Pi A B) = cong₂ Tm-Pi (Γ⊢e∶T⇒Term-correct A) (Γ⊢e∶T⇒Term-correct B)
+Γ⊢e∶T⇒Term-correct (judge-Tm-Lam A e) = cong₂ Tm-Lam (Γ⊢e∶T⇒Term-correct A) (Γ⊢e∶T⇒Term-correct e)
+Γ⊢e∶T⇒Term-correct (judge-Tm-App f x) = cong₂ Tm-App (Γ⊢e∶T⇒Term-correct f) (Γ⊢e∶T⇒Term-correct x)
+
+Γ⊢e∶T⇒Term-lift :
+  {Γ : Context} {e : Term} {T : Type} →
+  (tm : Γ ⊢ e ∶ T) →
+  Γ ⊢ Γ⊢e∶T⇒Term tm ∶ T
+Γ⊢e∶T⇒Term-lift {Γ} {e} {T} tm = ≡-subst (λ x → Γ ⊢ x ∶ T) (sym (Γ⊢e∶T⇒Term-correct tm)) tm
+-}
+
+data Subst' : Context → Context → Set where
+  Subst'-nil : {Γ : Context} → Subst' Γ Γ
+  Subst'-cons :
+    {Γ Γ' : Context} {e A : Term} →
+    Subst' Γ Γ' →
+    Γ' ⊢ e ∶ A →
+    Subst' (Γ , A) Γ'
+
+{-
+Subst'-run :
+  {Γ Γ' : Context} →
+  Subst' Γ Γ' →
+  ℕ → Term
+Subst'-run Subst'-nil ix = Tm-Var ix
+Subst'-run (Subst'-cons s x) zero = Γ⊢e∶T⇒Term x
+Subst'-run (Subst'-cons s x) (suc ix) = Subst'-run s ix
+
+Subst'-run-judge :
+  {Γ Γ' : Context} {T : Term} →
+  (s : Subst' Γ Γ') →
+  (ix : Γ ⊢ T) → Γ' ⊢ Subst'-run s (_⊢_.ix ix) ∶ subst (Subst'-run s) T
+Subst'-run-judge {Γ} {Γ'} {T} Subst'-nil ix =
+  ≡-subst
+    (λ x → Γ ⊢ Tm-Var (_⊢_.ix ix) ∶ x)
+    (sym (subst-TmVar-id (λ _ → refl) T))
+    (judge-Tm-Var ix)
+Subst'-run-judge (Subst'-cons s x) ix with _⊢_.index ix | _⊢_.Γ-ctx ix
+... | here | judge-, Γ-ctx X = let xx = Γ⊢e∶T⇒Term-lift x in {!!}
+... | there res | res' = {!!}
+-}
+
+{-
+-- Variables from a smaller context can be embedded into a larger context.
+data Embedding (Γ : Context) : Context → Set where
+  Embedding-nil : Embedding Γ Γ
+  Embedding-cons :
+    {Γ' : Context} {A : Term} →
+    Embedding Γ Γ' →
+    Γ' ⊢ A ∶ Tm-Type →
+    Embedding Γ (Γ' , A)
+  {-
+  Embedding-under :
+    {Γ' : Context} {A : Term} →
+    Embedding Γ Γ' →
+    Embedding (Γ , A) (Γ' , A)
+  -}
+
+Embedding-run : {Γ Γ' : Context} → Embedding Γ Γ' → {A : Term} → Γ ⊢ A → Γ' ⊢ A
+Embedding-run Embedding-nil Γ⊢A = Γ⊢A
+Embedding-run (Embedding-cons {Γ'} {X} embedding Γ'⊢X∶Type) Γ⊢A = Γ⊢T-, (Embedding-run embedding Γ⊢A) Γ'⊢X∶Type
+
+Embedding-run' : {Γ Γ' : Context} → Embedding Γ Γ' → ℕ → ℕ
+Embedding-run' Embedding-nil ix = ix
+Embedding-run' (Embedding-cons embedding x) ix = suc (Embedding-run' embedding ix)
+
+Embedding-run-commutes :
+  {Γ Γ' : Context} {T : Term} →
+  (embedding : Embedding Γ Γ') →
+  (ix : Γ ⊢ T) →
+  Embedding-run' embedding (_⊢_.ix ix) ≡ _⊢_.ix (Embedding-run embedding ix)
+Embedding-run-commutes Embedding-nil ix = refl
+Embedding-run-commutes (Embedding-cons embedding _) ix = cong suc (Embedding-run-commutes embedding ix)
+
+Embedding-∘ :
+  {Γ Γ' Γ'' : Context} →
+  Embedding Γ Γ' →
+  Embedding Γ' Γ'' →
+  Embedding Γ Γ''
+Embedding-∘ e1 Embedding-nil = e1
+Embedding-∘ e1 (Embedding-cons e2 x) = Embedding-cons (Embedding-∘ e1 e2) x
+
+weaken :
+  {Γ : Context} {e T A : Term} →
+  Γ ⊢ e ∶ T →
+  Γ ⊢ A ∶ Tm-Type →
+  (Γ , A) ⊢ rename suc e ∶ T
+weaken (judge-Tm-Var record { index = index ; Γ-ctx = Γ-ctx }) Γ⊢A∶Type =
+  judge-Tm-Var (record { index = there index ; Γ-ctx = judge-, Γ-ctx Γ⊢A∶Type })
+weaken (judge-Tm-Pi A B) Γ⊢A∶Type = judge-Tm-Pi (weaken A Γ⊢A∶Type) {!!}
+weaken (judge-Tm-Lam A e) Γ⊢A∶Type = {!judge-Tm-Lam ? ?!}
+weaken {Γ} {A = X} (judge-Tm-App {A} {B} {B'} {f'} {x'} f x {sub}) Γ⊢A∶Type =
+  let
+    ff : (Γ , X) ⊢ rename suc f' ∶ Tm-Pi A B
+    ff = weaken f Γ⊢A∶Type
+
+    xx : (Γ , X) ⊢ rename suc x' ∶ A
+    xx = weaken x Γ⊢A∶Type
+
+    goal : (Γ , X) ⊢ Tm-App (rename suc f') (rename suc x') ∶ (B [ x' ])
+    goal = {!!}
+  in
+    ≡-subst (λ x → (Γ , X) ⊢ Tm-App (rename suc f') (rename suc x') ∶ x) sub goal
+    -- judge-Tm-App {!!} {!!}
+
+thing :
+  {Γ Γ' : Context} {A B : Term} →
+  Γ ⊢ A ∶ Tm-Type →
+  Γ ⊢ B ∶ Tm-Type →
+  Embedding ((Γ , A) , rename suc B) ((Γ , B) , rename suc A)
+thing Γ⊢A∶Type Γ⊢B∶Type = Embedding-cons {!!} {!!}
+
+Embedding-under :
+  {Γ Γ' : Context} {A : Term} →
+  -- If I can embed a smaller context in a larger one
+  (e : Embedding Γ Γ') →
+  -- Then I can do this over the "tail" of a context
+  Embedding (Γ , A) (Γ' , rename (Embedding-run' e) A)
+Embedding-under {Γ} {Γ'} {A} Embedding-nil =
+  ≡-subst (λ x → Embedding (Γ , A) (Γ , x)) (sym (rename-id (λ x → refl) A)) Embedding-nil
+Embedding-under (Embedding-cons {Γ'} {B} e Γ'⊢B∶Type) = 
+  Embedding-∘ (Embedding-under e) {!!} -- (Embedding-∘ (Embedding-cons Embedding-nil {!!}) {!!})
+{-
+  let
+    xx : Embedding (Γ , B) (Γ' , rename (Embedding-run' e) B)
+    xx = Embedding-under {A = B} e
+  in
+  Embedding-∘ (Embedding-cons {!!} {!!}) {!!}
+-}
+  
+
+embed :
+  {Γ Γ' : Context} {e T : Term} →
+  (embedding : Embedding Γ Γ') →
+  Γ ⊢ e ∶ T →
+  Γ' ⊢ rename (Embedding-run' embedding) e ∶ T
+embed {Γ} {Γ'} {_} {T} embedding (judge-Tm-Var ix) =
+  let
+    x1 : Γ' ⊢ Tm-Var (_⊢_.ix (Embedding-run embedding ix)) ∶ T
+    x1 = judge-Tm-Var (Embedding-run embedding ix)
+
+    goal : Γ' ⊢ Tm-Var (Embedding-run' embedding (_⊢_.ix ix)) ∶ T
+    goal = ≡-subst (λ x → Γ' ⊢ Tm-Var x ∶ T) (sym (Embedding-run-commutes embedding ix)) x1
+  in
+    goal
+embed {Γ} {Γ'} embedding (judge-Tm-Pi {A} {B} Γ⊢A∶Type Γ,A⊢B∶Type) =
+  judge-Tm-Pi
+    (embed embedding Γ⊢A∶Type)
+    let
+      xx = embed {!!} Γ,A⊢B∶Type
+
+      goal : (Γ' , rename (Embedding-run' embedding) A) ⊢ rename (rename-under (Embedding-run' embedding)) B ∶ Tm-Type
+      goal = {!!}
+    in
+      goal
+embed embedding (judge-Tm-Lam tm tm₁) = {!!}
+embed embedding (judge-Tm-App tm tm₁) = {!!}
+-}
+
+{-
+Γ⊢T⇒Type :
+  {Γ : Context} {T : Type} →
+  Γ ⊢ T →
+  Σ[ Γ' ∈ Context ] (Embedding Γ' Γ × (Γ' ⊢ T ∶ Tm-Type))
+Γ⊢T⇒Type record { ix = ix ; index = index ; Γ-ctx = Γ-ctx } with index | Γ-ctx
+... | here | judge-, Γ-ctx' Γ⊢T = _ , (λ x → Γ⊢T-, x Γ⊢T) , Γ⊢T
+... | there ix' | judge-, Γ-ctx' Γ⊢X∶Type with Γ⊢T⇒Type (record { index = ix' ; Γ-ctx = Γ-ctx' })
+... | Γ' , embedding , yy = _ , Embedding-, embedding Γ⊢X∶Type , yy
+
+Γ⊢e∶T⇒Type :
+  {Γ : Context} {e : Term} {T : Type} →
+  Γ ⊢ e ∶ T →
+  Γ ⊢ T ∶ Tm-Type
+Γ⊢e∶T⇒Type (judge-Tm-Var ix) = let Γ' , embedding , Γ'⊢T∶Type = Γ⊢T⇒Type ix in {!!}
+Γ⊢e∶T⇒Type (judge-Tm-Pi tm tm₁) = {!!}
+Γ⊢e∶T⇒Type (judge-Tm-Lam tm tm₁) = {!!}
+Γ⊢e∶T⇒Type (judge-Tm-App tm tm₁) = {!!}
+-}
+
+{-
+module Subst where
+  open import Data.Product using (Σ-syntax; _,_)
+
+  mutual
+    data Subst : Context → Context → Set where
+      Subst-nil : {Γ : Context} → Subst Γ Γ
+      _Subst-,_ :
+        {Γ Γ' : Context} {e T : Term} →
+        (s : Subst Γ Γ') →
+        Γ' ⊢ e ∶ subst (run s) T →
+        Subst (Γ , T) Γ'
+
+    run : {Γ Γ' : Context} → Subst Γ Γ' → ℕ → Term
+    run Subst-nil ix = Tm-Var ix
+    run (s Subst-, x) zero = Γ⊢e∶T⇒Term x
+    run (s Subst-, x) (suc ix) = run s ix
+
+  {-
+  Subst-under :
+    {Γ Γ' : Context} {A : Term} →
+    (s : Subst Γ Γ') →
+    Subst (Γ , A) (Γ' , subst (run s) A)
+  Subst-under {Γ} {.Γ} {A} Subst-nil =
+    ≡-subst
+      (λ x → Subst (Γ , A) (Γ , x))
+      (sym (subst-TmVar-id (λ ix → refl) A))
+      Subst-nil
+  Subst-under (s Subst-, x) = {!!} -- {!!} Subst-, {!!}
+  -}
+
+  Subst-lookup :
+    {Γ Γ' : Context} {T : Term} →
+    (s : Subst Γ Γ') →
+    (ix : Γ ⊢ T) →
+    Σ[ e ∈ Term ] (Γ' ⊢ e ∶ subst (run s) T)
+  Subst-lookup {Γ} {.Γ} {T} Subst-nil ix =
+    _ , ≡-subst (λ x → Γ ⊢ _ ∶ x) (sym (subst-TmVar-id (λ x → refl) T)) (judge-Tm-Var ix)
+  Subst-lookup (s Subst-, x) ix with _⊢_.index ix
+  ... | here = _ , let xx = _⊢_.Γ-ctx ix in let res = Γ⊢e∶T⇒Term-lift x in {!!}
+  ... | there ix' with _⊢_.Γ-ctx ix
+  ... | judge-, Γ-ctx' _ = {!!}
+
+  {-
+  apply-judge-ix :
+    {Γ Γ' : Context} {T : Term} →
+    (s : Subst Γ Γ') →
+    (ix : Γ ⊢ T) →
+    Γ' ⊢ run s (_⊢_.ix ix) ∶ T
+  apply-judge-ix Subst-nil ix = judge-Tm-Var ix
+  apply-judge-ix (s Subst-, x) ix with _⊢_.index ix
+  ... | here = Γ⊢e∶T⇒Term-lift x
+  ... | there ix' with _⊢_.Γ-ctx ix
+  ... | judge-, Γ-ctx' _ = apply-judge-ix s (record { index = ix' ; Γ-ctx = Γ-ctx' })
+  -}
+  mutual
+    apply-judge-ix :
+      {Γ Γ' : Context} {T : Term} →
+      (s : Subst Γ Γ') →
+      (ix : Γ ⊢ T) →
+      Γ' ⊢ run s (_⊢_.ix ix) ∶ subst (run s) T
+    apply-judge-ix {Γ} {.Γ} {T} Subst-nil ix =
+      ≡-subst
+        (λ x → Γ ⊢ Tm-Var (_⊢_.ix ix) ∶ x)
+        (sym (subst-TmVar-id (λ ix → refl) T))
+        (judge-Tm-Var ix)
+    apply-judge-ix (s Subst-, x) ix with _⊢_.index ix
+    ... | here = let res = Γ⊢e∶T⇒Term-lift x in {!!}
+    ... | there ix' with _⊢_.Γ-ctx ix
+    ... | judge-, Γ-ctx' _ = {!!}
+
+    apply-judge :
+      {Γ Γ' : Context} {e T : Term} →
+      (s : Subst Γ Γ') →
+      Γ ⊢ e ∶ T →
+      Γ' ⊢ subst (run s) e ∶ subst (run s) T
+    apply-judge s (judge-Tm-Var ix) = apply-judge-ix s ix
+    apply-judge s (judge-Tm-Pi A B) = judge-Tm-Pi (apply-judge s A) (apply-judge {!!} B)
+    apply-judge s (judge-Tm-Lam A e) = {!judge-Tm-Lam ? ?!}
+    apply-judge s (judge-Tm-App f x) = {!!} -- judge-Tm-App {!apply-judge s f!} {!!}
+-}
+
+{-
+_ :
+  {Γ : Context} {A : Type} →
+  Γ ⊢ A →
+  Σ[ Γ' ∈ Context ] Σ[ s ∈ Subst Γ Γ' ] (apply s (Γ ⊢ A ∶ Tm-Type))
+_ = _⊢_.Γ-ctx
+
+mutual
+  weaken-Term : {Γ : Context} {e : Term} {T A : Type} → Γ ⊢ e ∶ T → (Γ , A) ⊢ rename-Term suc e ∶ T
+  weaken-Term (judge-Tm-Var ix) = judge-Tm-Var (there ix)
+  weaken-Term (judge-Tm-Type ty) = judge-Tm-Type (weaken-Type ty)
+  weaken-Term (judge-Tm-Lam e) = {!!}
+  weaken-Term (judge-Tm-App f x) = {!!}
+
+  weaken-Type : {Γ : Context} {T A : Type} → Γ ⊢ T type → (Γ , A) ⊢ rename-Type suc T type
+  weaken-Type (judge-Ty-Term tm) = judge-Ty-Term {!!}
+  weaken-Type (judge-Ty-Pi A B) = judge-Ty-Pi (weaken-Type A) {!!}
+
+otherthing' :
+  {Γ : Context} {ix : ℕ} {T : Type} →
+  ix ∶ T ∈ Γ →
+  -- this isn't true. if T ∈ Γ, then *some renaming* of T is a type under gamma.
+  -- T ∈ Γ depends on only the elements to the left of it. It needs to be moved to the far right of Γ, incrementing its bound variables,
+  -- to finally allow checking against the entirety of Γ.
+  Γ ⊢ T type
+otherthing' (here Γ⊢Ttype) = {!Γ⊢Ttype!}
+otherthing' (there ix) = {!!}
+
+otherthing :
+  {Γ : Context} {e : Term} {T : Type} →
+  Γ ⊢ e ∶ T →
+  Γ ⊢ T type
+otherthing (judge-Tm-Var ix) = {!!}
+otherthing (judge-Tm-Type ty) = {!!}
+otherthing (judge-Tm-Lam judge) = {!!}
+otherthing (judge-Tm-App judge judge₁) = {!!}
+
+thing :
+  {Γ : Context} {e : Term} {T A : Type} →
+  Γ ⊢ e ∶ T →
+  (Γ , A) ⊢ rename-Term suc e ∶ rename-Type suc T
+thing (judge-Tm-Var ix) = judge-Tm-Var (there {!!})
+thing (judge-Tm-Type ty) = {!!}
+thing (judge-Tm-Lam judge) = {!!}
+thing (judge-Tm-App judge judge₁) = {!!}
+
+{-
+mutual
+  subst-Tm-correct :
+    {Γ Γ' : Context} {e : Term} {T : Type} →
+    (f : ℕ  → Term) →
+    {f-correct : {ix : ℕ} {A : Type} → ix ∶ A ∈ Γ → Γ' ⊢ f ix ∶ subst-Term-Type f A} →
+    Γ ⊢ e ∶ T →
+    Γ' ⊢ (subst-Term-Term f e) ∶ subst-Term-Type f T
+  subst-Tm-correct f {f-correct} (judge-Tm-Var ix) = f-correct ix
+  subst-Tm-correct f {f-correct} (judge-Tm-Type ty) = judge-Tm-Type (subst-Ty-correct f {f-correct} ty)
+  subst-Tm-correct {Γ} {Γ'} f {f-correct} (judge-Tm-Lam tm) with subst-Tm-correct (λ{ zero → Tm-Var zero ; (suc ix) → rename-Term suc (f ix)}) {λ{ here → judge-Tm-Var (here {Γ'}) ; (there ix) → let f-correct' = f-correct ix in {!!} }} tm
+  ... | tm' = judge-Tm-Lam {!!}
+  subst-Tm-correct f (judge-Tm-App judge judge₁) = {!!}
+
+  subst-Ty-correct :
+    {Γ Γ' : Context} {T : Type} →
+    (f : ℕ  → Term) →
+    {f-correct : {ix : ℕ} {A : Type} → ix ∶ A ∈ Γ → Γ' ⊢ f ix ∶ subst-Term-Type f A} →
+    Γ ⊢ T type →
+    Γ' ⊢ (subst-Term-Type f T) type
+  subst-Ty-correct f {f-correct} (judge-Ty-Term tm) = judge-Ty-Term (subst-Tm-correct f {f-correct} tm)
+  subst-Ty-correct f (judge-Ty-Pi A B) = {!!}
+ -}
+
+module _ where
+  _ : {A : Type} → ◆ ⊢ Tm-Lam A (Tm-Var 0) ∶ Ty-Pi A A
+  _ = judge-Tm-Lam (judge-Tm-Var (here {!!}))
+{-
+mutual
+  data Context : Set where
+    ◆ : Context
+    _,_ : (Γ : Context) → Type Γ → Context
+
+  data Renaming : (Γ Γ' : Context) → Set where
+    Renaming-nil : {Γ : Context} → Renaming Γ Γ
+    Renaming-weaken : {Γ Γ' : Context} {A : Type Γ'} → Renaming Γ Γ' → Renaming Γ (Γ' , A)
+
+  data Type : Context → Set where
+    Ty-Type : {Γ : Context} → Type Γ
+    Ty-Var : {Γ : Context} → Index Γ Ty-Type → Type Γ
+
+  data Index : (Γ : Context) → Type Γ → Set where
+    Z :
+      {Γ : Context} {A : Type Γ} {A' : Type (Γ , A)} →
+      Rename-Type (Renaming-weaken Renaming-nil) A A' →
+      Index (Γ , A) A'
+    S :
+      {Γ : Context} {A B : Type Γ} {A' : Type (Γ , B)} →
+      Index Γ A →
+      Rename-Type (Renaming-weaken Renaming-nil) A A' →
+      Index (Γ , B) A'
+
+  data Rename-Index : {Γ Γ' : Context} {A : Type Γ} {A' : Type Γ'} → Renaming Γ Γ' → Index Γ A → Index Γ' A' → Set where
+    Rename-Index-Renaming-nil : {Γ : Context} {A : Type Γ} {ix : Index Γ A} → Rename-Index Renaming-nil ix ix
+    Rename-Index-Renaming-weaken :
+      {Γ Γ' : Context} {A : Type Γ} {A' : Type Γ'} →
+      {ix : Index Γ A} {ix' : Index Γ' A'} →
+      (r : Renaming Γ Γ') →
+      Rename-Index r ix ix' →
+      Rename-Index (Renaming-weaken {A = A'} r) ix (S ix' {!!})
+
+  data Rename-Type : {Γ Γ' : Context} → Renaming Γ Γ' → Type Γ → Type Γ' → Set where
+    Rename-Type-Renaming-nil : {Γ : Context} {A : Type Γ} → Rename-Type Renaming-nil A A
+    Rename-Type-Renaming-weaken-Ty-Type : {Γ Γ' : Context} {A : Type Γ'} → (r : Renaming Γ Γ') → Rename-Type (Renaming-weaken {A = A} r) Ty-Type Ty-Type
+    Rename-Type-Renaming-weaken-Ty-Var :
+      {Γ Γ' : Context} →
+      {A : Type Γ'} →
+      (r : Renaming Γ Γ') →
+      (ix : Index Γ Ty-Type) →
+      {ix' : Index Γ' Ty-Type} →
+      Rename-Index r ix ix' →
+      Rename-Type (Renaming-weaken {A = A} r) (Ty-Var ix) (Ty-Var (S ix' (Rename-Type-Renaming-weaken-Ty-Type Renaming-nil)))
+
+  data Index : (Γ : Context) → Type Γ → Set where
+    Z :
+      {Γ : Context} {A : Type Γ} {A' : Type (Γ , A)} →
+      Rename-Type (Renaming-weaken Renaming-nil) A A' →
+      Index (Γ , A) A'
+    S :
+      {Γ : Context} {A B : Type Γ} {A' : Type (Γ , B)} →
+      Index Γ A →
+      Rename-Type (Renaming-weaken Renaming-nil) A A' →
+      Index (Γ , B) A'
+  -}
+
+{-
+  data Rename-Type : {Γ Γ' : Context} → Renaming Γ Γ' → Type Γ → Type Γ' → Set where
+    Rename-Type-r-Ty-Type : {Γ Γ' : Context} {r : Renaming Γ Γ'} → Rename-Type r Ty-Type Ty-Type
+    Rename-Type-Renaming-nil-Ty-Var : {Γ : Context} → (ix : Index Γ Ty-Type) → Rename-Type Renaming-nil (Ty-Var ix) (Ty-Var ix)
+    Rename-Type-Renaming-weaken-Ty-Var :
+      {Γ Γ' : Context} {ix' : Index Γ' Ty-Type} {B : Type Γ'} →
+      (ix : Index Γ Ty-Type) →
+      (r : Renaming Γ Γ') →
+      Rename-Index r Rename-Type-r-Ty-Type ix ix' →
+      Rename-Type (Renaming-weaken {A = B} r) (Ty-Var ix) (Ty-Var (S ix' Rename-Type-r-Ty-Type))
+
+  data Rename-Index : {Γ Γ' : Context} {A : Type Γ} {A' : Type Γ'} → (r : Renaming Γ Γ') → Rename-Type r A A' → Index Γ A → Index Γ' A' → Set where
+
+  data Term (Γ : Context) : Type Γ → Set where
+    Tm-Var : {A : Type Γ} → Index Γ A → Term Γ A
+    Tm-Type : Type Γ → Term Γ Ty-Type
+
+open import Relation.Binary.PropositionalEquality using (_≡_; refl)
+
+Rename-Type-Renaming-nil-id : {Γ : Context} → (A : Type Γ) → Rename-Type Renaming-nil A A
+Rename-Type-Renaming-nil-id Ty-Type = Rename-Type-r-Ty-Type
+Rename-Type-Renaming-nil-id (Ty-Var ix) = Rename-Type-Renaming-nil-Ty-Var ix
+
+mutual
+  rename-Type : {Γ Γ' : Context} → (r : Renaming Γ Γ') → Type Γ → Type Γ'
+  rename-Type r Ty-Type = Ty-Type
+  rename-Type Renaming-nil (Ty-Var ix) = Ty-Var ix
+  rename-Type (Renaming-weaken r) (Ty-Var ix) = Ty-Var (S (rename-Index r ix) Rename-Type-r-Ty-Type)
+
+  rename-Type-Renaming-nil-id : {Γ : Context} → (A : Type Γ) → rename-Type Renaming-nil A ≡ A
+  rename-Type-Renaming-nil-id Ty-Type = refl
+  rename-Type-Renaming-nil-id (Ty-Var ix) = refl
+
+  rename-Index : {Γ Γ' : Context} {A : Type Γ} → (r : Renaming Γ Γ') → Index Γ A → Index Γ' (rename-Type r A)
+  rename-Index {Γ} {Γ'} {A} Renaming-nil ix rewrite rename-Type-Renaming-nil-id A = ix
+  rename-Index (Renaming-weaken r) ix = S (rename-Index r ix) {!Rename-Type-complete ?!}
+
+  thing : {Γ Γ' : Context} → (ix : Index Γ Ty-Type) → (r : Renaming Γ Γ') → Rename-Index r Rename-Type-r-Ty-Type ix (rename-Index r ix)
+  thing = ?
+
+  Rename-Type-Renaming-weaken-complete :
+    {Γ Γ' : Context} {B : Type Γ'} →
+    (r : Renaming Γ Γ') →
+    (A : Type Γ) →
+    Rename-Type (Renaming-weaken {A = B} r) A (rename-Type (Renaming-weaken {A = B} r) A)
+  Rename-Type-Renaming-weaken-complete r Ty-Type = Rename-Type-r-Ty-Type
+  Rename-Type-Renaming-weaken-complete r (Ty-Var ix) = Rename-Type-Renaming-weaken-Ty-Var ix r {!!}
+
+  Rename-Type-complete : {Γ Γ' : Context} {A : Type Γ} → (r : Renaming Γ Γ') → Rename-Type r A (rename-Type r A)
+  Rename-Type-complete {Γ} {Γ'} {A} Renaming-nil rewrite rename-Type-Renaming-nil-id A = Rename-Type-Renaming-nil-id A
+  Rename-Type-complete {Γ} {Γ'} {A} (Renaming-weaken r) = Rename-Type-Renaming-weaken-complete r A
+
+{-
+weaken-Type : {Γ : Context} {X : Type Γ} → Type Γ → Type (Γ , X)
+weaken-Type Ty-Type = Ty-Type
+weaken-Type (Ty-Weaken ty) = {!!}
+-}
+
+module Print where
+  open import Data.String
+  open import Data.Nat using (ℕ; _+_)
+  open import Data.Nat.Show renaming (show to show-ℕ)
+
+  printIndex : {Γ : Context} {A : Type Γ} → Index Γ A → String
+  printIndex ix = show-ℕ (indexToNat ix)
+    where
+      indexToNat : {Γ : Context} {A : Type Γ} → Index Γ A → ℕ
+      indexToNat (Z r) = 0
+      indexToNat (S ix r) = 1 + indexToNat ix
+
+  printType : {Γ : Context} → Type Γ → String
+  printType Ty-Type = "Type"
+  printType (Ty-Var ix) = "#" ++ printIndex ix
+
+  module _ where
+    open import Relation.Binary.PropositionalEquality using (_≡_; refl)
+
+  printTerm : {Γ : Context} {A : Type Γ} → Term Γ A → String
+  printTerm (Tm-Var ix) = "#" ++ printIndex ix
+  printTerm (Tm-Type ty) = printType ty
+
+-}
+
+-}
