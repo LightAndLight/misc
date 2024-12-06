@@ -1,0 +1,19 @@
+[package]
+name = "crossplatform-font-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+env_logger = "0.11.5"
+font-kit = "0.14.2"
+log = "0.4.22"
+pathfinder_geometry = "0.5.1"
+pollster = "0.4.0"
+wgpu = "23.0.1"
+winit = "0.30.5"
+
+[profile.release]
+lto = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
