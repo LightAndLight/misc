@@ -1,0 +1,13 @@
+[package]
+name = "crossplatform-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = { version = "0.2.167", features = [] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
