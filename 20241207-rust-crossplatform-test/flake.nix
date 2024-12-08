@@ -19,7 +19,7 @@
         devShell =
           pkgs.mkShell {
             buildInputs = [
-              (pkgs.rust-bin.stable.${rustVersion}.default.override {
+              (pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
                 extensions = [
                   "cargo"
                   "clippy"
@@ -34,7 +34,7 @@
                   "x86_64-pc-windows-msvc"
                   "x86_64-apple-darwin"
                 ];
-              })
+              }))
             ];
           };
       }
