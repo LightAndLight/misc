@@ -6,9 +6,14 @@ extern crate alloc;
 use core::{ffi::c_void, panic::PanicInfo};
 
 use alloc::string::String;
-use libc::{abort, fwrite};
+use libc::{abort, exit, fwrite, sleep};
 
-use crossplatform_test::{alloc::LibcAllocator, io::print, stdio::stderr};
+use crossplatform_test::{
+    alloc::LibcAllocator,
+    io::{eprint, print},
+    stdio::stderr,
+    window::Display,
+};
 
 #[global_allocator]
 static LIBC_ALLOCATOR: LibcAllocator = LibcAllocator;
@@ -27,12 +32,25 @@ fn panic_handler(_panic_info: &PanicInfo) -> ! {
 // Test the global allocator
 #[inline(never)]
 fn message() -> String {
-    String::from("Hello, world!")
+    String::from("Hello, world!\n")
 }
 
 #[no_mangle]
 fn main() -> usize {
     print(&message());
+
+    let mut display = Display::open().unwrap_or_else(|| {
+        eprint("Failed to open display");
+        unsafe { exit(1) }
+    });
+
+    let window = display.create_window(0, 0, 640, 480);
+
+    unsafe {
+        sleep(2);
+    }
+
+    window.destroy();
 
     0
 }

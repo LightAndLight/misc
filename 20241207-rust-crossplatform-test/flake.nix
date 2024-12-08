@@ -18,6 +18,12 @@
       in {
         devShell =
           pkgs.mkShell {
+            LIBX11_MAN = "${pkgs.xorg.libX11.man}/share/man";
+            XORG_MAN = "${pkgs.xorg.xorgdocs}/share/man";
+
+            # LD_LIBRARY_PATH = "${pkgs.xorg.libX11}/lib";
+            DEV_LIBRARIES = "${pkgs.xorg.xorgproto}/include";
+
             buildInputs = [
               (pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
                 extensions = [
@@ -35,6 +41,8 @@
                   "x86_64-apple-darwin"
                 ];
               }))
+
+              pkgs.xorg.libX11.dev
             ];
           };
       }
