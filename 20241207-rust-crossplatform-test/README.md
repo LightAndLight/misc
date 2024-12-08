@@ -23,3 +23,13 @@ the `alloc` crate is pre-built with `panic = "unwind"`. Using a nightly Rust too
 and `build-std` fixes this.
 
 I've set the `build-std` packages in `.cargo/config.toml`.
+
+### Windows 11 issues
+
+After installing Rust on Windows 11, I got an error while building `libc`. It was complaining that
+a DLL wasn't found ("failed to run custom build command", with status `STATUS_DLL_NOT_FOUND`).
+I re-ran the command in the latest version of PowerShell, and a dialog told me that a specific DLL
+was missing: `vcruntime140.dll`. I searched for this in my Visual Studio installation and found
+it in `C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.42.34433\bin\Hostx64\x86`.
+I added this directory to my `PATH` environment variable, and `libc` build successfully.
+

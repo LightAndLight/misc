@@ -6,6 +6,16 @@ edition = "2021"
 [dependencies]
 libc = { version = "0.2.167", features = [] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.version = "0.59.0"
+windows-sys.features = [
+  "Win32",
+  "Win32_Graphics_Gdi",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging"
+]
+
 [profile.dev]
 panic = "abort"
 

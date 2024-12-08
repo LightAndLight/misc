@@ -1,12 +1,12 @@
 use core::alloc::GlobalAlloc;
 
-use libc::{c_void, free};
+use libc::c_void;
 
 #[cfg(not(target_os = "windows"))]
-use libc::aligned_alloc;
+use libc::{aligned_alloc, free};
 
 #[cfg(target_os = "windows")]
-use libc::aligned_malloc;
+use libc::{aligned_free, aligned_malloc};
 
 pub struct LibcAllocator;
 
@@ -19,11 +19,19 @@ unsafe impl GlobalAlloc for LibcAllocator {
 
         #[cfg(target_os = "windows")]
         {
-            aligned_malloc(layout.align(), layout.size()).cast::<u8>()
+            aligned_malloc(layout.size(), layout.align()).cast::<u8>()
         }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        free(ptr.cast::<c_void>())
+        #[cfg(not(target_os = "windows"))]
+        {
+            free(ptr.cast::<c_void>())
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            aligned_free(ptr.cast::<c_void>())
+        }
     }
 }

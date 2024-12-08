@@ -1,17 +1,19 @@
 #![no_std]
 #![no_main]
+#![windows_subsystem = "windows"]
 
 extern crate alloc;
 
 use core::{ffi::c_void, panic::PanicInfo};
 
 use alloc::string::String;
-use libc::{abort, exit, fwrite, sleep};
+use libc::{abort, exit, fwrite};
 
 use crossplatform_test::{
     alloc::LibcAllocator,
     io::{eprint, print},
     stdio::stderr,
+    thread::sleep,
     window::Display,
 };
 
@@ -46,9 +48,7 @@ fn main() -> usize {
 
     let window = display.create_window(0, 0, 640, 480);
 
-    unsafe {
-        sleep(2);
-    }
+    sleep(2);
 
     window.destroy();
 
