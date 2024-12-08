@@ -3,15 +3,12 @@
 
 extern crate alloc;
 
-use core::panic::PanicInfo;
+use core::{ffi::c_void, panic::PanicInfo};
 
 use alloc::string::String;
-use libc::{abort, fprintf};
+use libc::{abort, fwrite};
 
-use crossplatform_test::{
-    alloc::LibcAllocator,
-    stdio::{stderr, stdout},
-};
+use crossplatform_test::{alloc::LibcAllocator, io::print, stdio::stderr};
 
 #[global_allocator]
 static LIBC_ALLOCATOR: LibcAllocator = LibcAllocator;
@@ -19,7 +16,10 @@ static LIBC_ALLOCATOR: LibcAllocator = LibcAllocator;
 #[panic_handler]
 fn panic_handler(_panic_info: &PanicInfo) -> ! {
     unsafe {
-        fprintf(stderr(), "panic".as_ptr().cast::<i8>());
+        let s = "panic";
+        let ptr = s.as_ptr().cast::<c_void>();
+        let len = s.len();
+        let _bytes_written = fwrite(ptr, 1, len, stderr());
         abort()
     }
 }
@@ -32,9 +32,7 @@ fn message() -> String {
 
 #[no_mangle]
 fn main() -> usize {
-    unsafe {
-        fprintf(stdout(), message().as_ptr().cast::<i8>());
-    }
+    print(&message());
 
     0
 }
