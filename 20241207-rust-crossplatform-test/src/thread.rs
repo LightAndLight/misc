@@ -1,6 +1,6 @@
 pub fn sleep(num_seconds: u32) {
     #[cfg(target_os = "linux")]
-    {
+    unsafe {
         libc::sleep(num_seconds);
     }
 
