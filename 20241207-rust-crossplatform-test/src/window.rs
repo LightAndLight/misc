@@ -22,6 +22,16 @@ use windows_sys::{
     },
 };
 
+#[cfg(target_os = "macos")]
+use crate::macos::{
+    app_kit::{
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSWindow,
+        NSWindowStyleMask,
+    },
+    core_graphics::cg_geometry::{CGPoint, CGRect, CGSize},
+    objc::{nil, NO},
+};
+
 pub struct Display {
     #[cfg(target_os = "linux")]
     display: *mut x11::Display,
@@ -32,7 +42,10 @@ pub struct Display {
     #[cfg(windows)]
     instance: HINSTANCE,
 
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    app: NSApplication,
+
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     display: compile_error!("Display: unsupported target_os"),
 }
 
@@ -45,7 +58,10 @@ pub struct Window<'a> {
     #[cfg(windows)]
     window: HWND,
 
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(target_os = "macos")]
+    window: NSWindow,
+
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
     unsupported: compile_error!("Window: unsupported target_os"),
 }
 
@@ -61,7 +77,12 @@ impl Drop for Display {
             return;
         }
 
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            return;
+        }
+
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         compile_error!("Display::drop: unsupported target_os");
     }
 }
@@ -98,7 +119,14 @@ impl Display {
             });
         }
 
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            let mut app: NSApplication = NSApplication::sharedApplication();
+            let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+            return Some(Display { app });
+        }
+
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             compile_error!("Display::open: unsupported target_os")
         }
@@ -194,7 +222,33 @@ impl Display {
             }
         }
 
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            let rect = CGRect {
+                origin: CGPoint { x: 0., y: 0. },
+                size: CGSize {
+                    width: 640.,
+                    height: 480.,
+                },
+            };
+
+            let mut window: NSWindow = NSWindow::alloc().initWithContentRect(
+                rect,
+                NSWindowStyleMask::Titled
+                    | NSWindowStyleMask::Closable
+                    | NSWindowStyleMask::Miniaturizable,
+                NSBackingStoreType::Buffered,
+                NO,
+            );
+
+            window.makeKeyAndOrderFront(nil());
+            Window {
+                display: self,
+                window,
+            }
+        }
+
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             compile_error!("Display::create_window: unsupported target_os")
         }
@@ -213,7 +267,10 @@ impl Window<'_> {
             DestroyWindow(self.window);
         }
 
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        todo!("Window::destroy");
+
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             compile_error!("Window::destroy: unsupported target_os")
         }
