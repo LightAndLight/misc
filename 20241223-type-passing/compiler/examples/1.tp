@@ -1,0 +1,44 @@
+const_i32 (x : i32) (y : i32) : i32 = x;
+
+id (type a : Type) (x : a) : a = x;
+
+main () : i32 =
+begin
+  let x = trace_i32 (const_i32 1 2);
+  let y = const_i32 5;
+  let z = trace_i32 (y 10);
+  let w_arg : i32 = 5;
+  let w = trace_i32 (const_i32 w_arg w_arg);
+
+  let n : i32 = 1;
+  let f : i32 -> i32 = \x -> add_i32 x n;
+  let g : (i32 -> i32) -> (i32 -> i32) -> i32 = \f1 -> \f2 -> f2 (f1 0);
+  let h = trace_i32 (g f f);
+
+  let gg : (i32 -> i32) -> i32 = \f1 -> f1 (f1 0);
+  let gh = trace_i32 (gg f);
+
+  let aa = trace_bool (id (type bool) true);
+  let bb = trace_bool (id (type bool) false);
+  let cc = trace_i32 (id (type i32) 99);
+  let dd = trace_i32 (id (type i32 -> i32) (id (type i32)) 100);
+
+  let xs : Array i32 = [
+    1,
+    2,
+    3,
+    4,
+    5
+  ];
+  
+  let five_times : forall (a : Type). a -> Array a =
+    \(type a) -> \x -> [
+      x,
+      x,
+      x,
+      x,
+      x
+    ];
+
+  0
+end;

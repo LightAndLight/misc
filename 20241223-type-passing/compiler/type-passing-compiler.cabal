@@ -1,0 +1,96 @@
+cabal-version:      3.0
+name:               type-passing-compiler
+version:            0.1.0.0
+license:            GPL-3.0-only
+license-file:       LICENSE
+author:             Isaac Elliott (2024)
+maintainer:         isaace71295@gmail.com
+category:           Language
+build-type:         Simple
+
+data-files: data/**/*
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+    exposed-modules:
+        Compiler
+        Compiler.Builtins
+        Compiler.Check
+        Compiler.Codegen
+        Compiler.Codegen.Builder
+        Compiler.Core
+        Compiler.Core.Parse
+        Compiler.Fresh
+        Compiler.Kind
+        Compiler.OrderedSet
+        Compiler.Parse
+        Compiler.Syntax
+    build-depends:
+        base ^>=4.18.2.1,
+        dlist,
+        hashable,
+        mtl,
+        parsers,
+        sage,
+        text >=2.0,
+        transformers,
+        unordered-containers,
+        vector
+    hs-source-dirs:   src
+    default-language: Haskell2010
+    default-extensions:
+        OverloadedLists
+        OverloadedStrings
+
+executable type-passing-compiler
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:
+        base ^>=4.18.2.1,
+        diagnostica,
+        directory,
+        filepath,
+        optparse-applicative,
+        process,
+        sage,
+        text,
+        type-passing-compiler
+
+    hs-source-dirs:   app
+    other-modules:
+        Paths_type_passing_compiler
+    default-language: Haskell2010
+    default-extensions:
+        NoFieldSelectors
+        OverloadedRecordDot
+
+test-suite type-passing-compiler-test
+    import:           warnings
+    default-language: Haskell2010
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Main.hs
+    other-modules:
+        Test.Compiler.CheckSpec
+        Test.Compiler.CodegenSpec
+        Test.Compiler.CoreSpec
+        Test.Compiler.ParseSpec
+        Test.Compiler.TH
+    build-depends:
+        base ^>=4.18.2.1,
+        hspec,
+        parsers,
+        sage,
+        template-haskell,
+        text,
+        transformers,
+        type-passing-compiler,
+        unordered-containers,
+        vector
+    build-tool-depends: hspec-discover:hspec-discover
+    default-extensions:
+        OverloadedLists
+        OverloadedStrings
