@@ -1,0 +1,4 @@
+cradle:
+  cabal:
+    - path: "app/Main.hs"
+      component: "x20250318-memoizable-queries:exe:x20250318-memoizable-queries"
