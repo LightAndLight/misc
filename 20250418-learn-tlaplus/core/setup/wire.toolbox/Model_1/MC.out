@@ -1,0 +1,260 @@
+@!@!@STARTMSG 2262:0 @!@!@
+TLC2 Version 2.16 of 31 December 2020 (rev: cdddf55)
+@!@!@ENDMSG 2262 @!@!@
+@!@!@STARTMSG 2187:0 @!@!@
+Running breadth-first search Model-Checking with fp 121 and seed -2317235707272143807 with 4 workers on 8 cores with 2373MB heap and 5338MB offheap memory [pid: 17508] (Linux 6.6.63 amd64, AdoptOpenJDK 14.0.1 x86_64, OffHeapDiskFPSet, DiskStateQueue).
+@!@!@ENDMSG 2187 @!@!@
+@!@!@STARTMSG 2220:0 @!@!@
+Starting SANY...
+@!@!@ENDMSG 2220 @!@!@
+Parsing file /home/isaac/misc/20250418-learn-tlaplus/core/setup/wire.toolbox/Model_1/MC.tla
+Parsing file /home/isaac/misc/20250418-learn-tlaplus/core/setup/wire.toolbox/Model_1/wire.tla
+Parsing file /nix/store/5paxknzpm6nd4qa25qx7wwdk5s5zp1p6-tla-toolbox-1.7.1/toolbox/plugins/org.lamport.tlatools_1.0.0.202012311918/tla2sany/StandardModules/TLC.tla
+Parsing file /nix/store/5paxknzpm6nd4qa25qx7wwdk5s5zp1p6-tla-toolbox-1.7.1/toolbox/plugins/org.lamport.tlatools_1.0.0.202012311918/tla2sany/StandardModules/Integers.tla
+Parsing file /nix/store/5paxknzpm6nd4qa25qx7wwdk5s5zp1p6-tla-toolbox-1.7.1/toolbox/plugins/org.lamport.tlatools_1.0.0.202012311918/tla2sany/StandardModules/Naturals.tla
+Parsing file /nix/store/5paxknzpm6nd4qa25qx7wwdk5s5zp1p6-tla-toolbox-1.7.1/toolbox/plugins/org.lamport.tlatools_1.0.0.202012311918/tla2sany/StandardModules/Sequences.tla
+Parsing file /nix/store/5paxknzpm6nd4qa25qx7wwdk5s5zp1p6-tla-toolbox-1.7.1/toolbox/plugins/org.lamport.tlatools_1.0.0.202012311918/tla2sany/StandardModules/FiniteSets.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module wire
+Semantic processing of module MC
+@!@!@STARTMSG 2219:0 @!@!@
+SANY finished.
+@!@!@ENDMSG 2219 @!@!@
+@!@!@STARTMSG 2185:0 @!@!@
+Starting... (2025-04-18 07:37:12)
+@!@!@ENDMSG 2185 @!@!@
+@!@!@STARTMSG 2189:0 @!@!@
+Computing initial states...
+@!@!@ENDMSG 2189 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 2 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 4 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 8 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 16 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 32 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 64 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 128 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 256 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 512 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 1024 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 2048 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 4096 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 8192 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 16384 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2269:0 @!@!@
+Computed 32768 initial states...
+@!@!@ENDMSG 2269 @!@!@
+@!@!@STARTMSG 2190:0 @!@!@
+Finished computing initial states: 40000 distinct states generated at 2025-04-18 07:37:12.
+@!@!@ENDMSG 2190 @!@!@
+@!@!@STARTMSG 2110:1 @!@!@
+Invariant NoOverdrafts is violated.
+@!@!@ENDMSG 2110 @!@!@
+@!@!@STARTMSG 2121:1 @!@!@
+The behavior up to this point is:
+@!@!@ENDMSG 2121 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+1: <Initial predicate>
+/\ acct = [alice |-> 1, bob |-> 1]
+/\ amnt = <<1, 1>>
+/\ to = <<"alice", "alice">>
+/\ from = <<"alice", "alice">>
+/\ pc = <<"Check", "Check">>
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+2: <Check line 58, col 16 to line 62, col 54 of module wire>
+/\ acct = [alice |-> 1, bob |-> 1]
+/\ amnt = <<1, 1>>
+/\ to = <<"alice", "alice">>
+/\ from = <<"alice", "alice">>
+/\ pc = <<"Check", "Withdraw">>
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+3: <Check line 58, col 16 to line 62, col 54 of module wire>
+/\ acct = [alice |-> 1, bob |-> 1]
+/\ amnt = <<1, 1>>
+/\ to = <<"alice", "alice">>
+/\ from = <<"alice", "alice">>
+/\ pc = <<"Withdraw", "Withdraw">>
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+4: <Withdraw line 64, col 19 to line 67, col 51 of module wire>
+/\ acct = [alice |-> 0, bob |-> 1]
+/\ amnt = <<1, 1>>
+/\ to = <<"alice", "alice">>
+/\ from = <<"alice", "alice">>
+/\ pc = <<"Deposit", "Withdraw">>
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2217:4 @!@!@
+5: <Withdraw line 64, col 19 to line 67, col 51 of module wire>
+/\ acct = [alice |-> -1, bob |-> 1]
+/\ amnt = <<1, 1>>
+/\ to = <<"alice", "alice">>
+/\ from = <<"alice", "alice">>
+/\ pc = <<"Deposit", "Deposit">>
+
+@!@!@ENDMSG 2217 @!@!@
+@!@!@STARTMSG 2201:0 @!@!@
+The coverage statistics at 2025-04-18 07:37:13
+@!@!@ENDMSG 2201 @!@!@
+@!@!@STARTMSG 2773:0 @!@!@
+<Init line 50, col 1 to line 50, col 4 of module wire>: 80000:80000
+@!@!@ENDMSG 2773 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 51, col 12 to line 51, col 37 of module wire: 2
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 53, col 12 to line 53, col 45 of module wire: 200
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 54, col 12 to line 54, col 47 of module wire: 5000
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 55, col 12 to line 55, col 45 of module wire: 20000
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 56, col 12 to line 56, col 46 of module wire: 80000
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<Check line 58, col 1 to line 58, col 11 of module wire>: 150594:224008
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 58, col 19 to line 58, col 36 of module wire: 672047
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 58, col 19 to line 58, col 26 of module wire: 448039
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 59, col 22 to line 59, col 51 of module wire: 224008
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 60, col 27 to line 60, col 67 of module wire: 173606
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 61, col 27 to line 61, col 63 of module wire: 50402
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 62, col 19 to line 62, col 54 of module wire: 224008
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<Withdraw line 64, col 1 to line 64, col 14 of module wire>: 106212:128009
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 64, col 22 to line 64, col 42 of module wire: 576042
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 64, col 22 to line 64, col 29 of module wire: 448037
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 65, col 22 to line 65, col 88 of module wire: 128005
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 65, col 30 to line 65, col 88 of module wire: 128009
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 66, col 22 to line 66, col 58 of module wire: 128005
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 66, col 28 to line 66, col 58 of module wire: 128009
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 67, col 22 to line 67, col 51 of module wire: 128005
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<Deposit line 69, col 1 to line 69, col 13 of module wire>: 59210:64012
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 69, col 21 to line 69, col 40 of module wire: 512043
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 69, col 21 to line 69, col 28 of module wire: 448031
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 70, col 21 to line 70, col 83 of module wire: 64012
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 71, col 21 to line 71, col 54 of module wire: 64012
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 72, col 21 to line 72, col 50 of module wire: 64012
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2772:0 @!@!@
+<Terminating line 77, col 1 to line 77, col 11 of module wire>: 0:3200
+@!@!@ENDMSG 2772 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 77, col 40 to line 77, col 56 of module wire: 246418
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 77, col 40 to line 77, col 47 of module wire: 240018
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 77, col 31 to line 77, col 37 of module wire: 224013
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 78, col 19 to line 78, col 32 of module wire: 3200
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2774:0 @!@!@
+<NoOverdrafts line 40, col 1 to line 40, col 12 of module wire>
+@!@!@ENDMSG 2774 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  line 41, col 3 to line 42, col 16 of module wire: 356016
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 42, col 5 to line 42, col 16 of module wire: 712028
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2221:0 @!@!@
+  |line 41, col 12 to line 41, col 17 of module wire: 356016
+@!@!@ENDMSG 2221 @!@!@
+@!@!@STARTMSG 2202:0 @!@!@
+End of statistics.
+@!@!@ENDMSG 2202 @!@!@
+@!@!@STARTMSG 2200:0 @!@!@
+Progress(5) at 2025-04-18 07:37:13: 459,223 states generated (15,690,990 s/min), 356,016 distinct states found (12,164,555 ds/min), 131,995 states left on queue.
+@!@!@ENDMSG 2200 @!@!@
+@!@!@STARTMSG 2199:0 @!@!@
+459223 states generated, 356016 distinct states found, 131995 states left on queue.
+@!@!@ENDMSG 2199 @!@!@
+@!@!@STARTMSG 2194:0 @!@!@
+The depth of the complete state graph search is 5.
+@!@!@ENDMSG 2194 @!@!@
+@!@!@STARTMSG 2268:0 @!@!@
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 2 and the 95th percentile is 2).
+@!@!@ENDMSG 2268 @!@!@
+@!@!@STARTMSG 2186:0 @!@!@
+Finished in 1763ms at (2025-04-18 07:37:13)
+@!@!@ENDMSG 2186 @!@!@
