@@ -1,0 +1,20 @@
+[package]
+name = "x20250503-template-language"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+std = []
+
+[lib]
+name = "x20250503_template_language"
+
+[dependencies]
+libc = { version = "0.2.172", default-features = false }
+libc_alloc = "1.0.7"
+
+# [profile.dev]
+# panic = "abort"
+
+# [profile.release]
+# panic = "abort"
