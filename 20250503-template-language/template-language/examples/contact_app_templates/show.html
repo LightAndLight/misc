@@ -1,0 +1,24 @@
+{% require
+
+contact : {
+  id
+  first
+  last
+  phone
+  email
+}
+%}
+{% include "layout.html" %}
+{% define content %}
+<h1>{contact.first} {contact.last}</h1>
+
+<div>
+    <div>Phone: {contact.phone}</div>
+    <div>Email: {contact.email}</div>
+</div>
+
+<p>
+    <a href="/contacts/{contact.id}/edit">Edit</a>
+    <a href="/contacts">Back</a>
+</p>
+{% end content %}

@@ -11,9 +11,17 @@ fn main() {
         std::io::stdout().write_all(chunk).unwrap();
     };
 
-    run(
+    template.run(
         write,
-        &template,
-        &[Value::from("Simple HTML"), Value::from("Hello, world!")],
+        &[
+            Arg {
+                name: "title",
+                value: "Simple HTML".into(),
+            },
+            Arg {
+                name: "body",
+                value: "Hello, world!".into(),
+            },
+        ],
     );
 }

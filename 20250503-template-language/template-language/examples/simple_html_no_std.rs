@@ -8,7 +8,7 @@ use core::ffi::c_void;
 use core::panic::PanicInfo;
 
 use libc::size_t;
-use x20250503_template_language::compile::{Value, read_compile, run};
+use x20250503_template_language::compile::{Arg, read_compile};
 
 use libc_alloc::LibcAlloc;
 
@@ -46,9 +46,17 @@ fn main() {
         libc::write(libc::STDOUT_FILENO, buffer, size);
     };
 
-    run(
+    template.run(
         write,
-        &template,
-        &[Value::from("Simple HTML"), Value::from("Hello, world!")],
+        &[
+            Arg {
+                name: "title",
+                value: "Simple HTML".into(),
+            },
+            Arg {
+                name: "body",
+                value: "Hello, world!".into(),
+            },
+        ],
     );
 }

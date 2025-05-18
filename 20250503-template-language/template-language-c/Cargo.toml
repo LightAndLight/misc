@@ -1,0 +1,13 @@
+[package]
+name = "template-language-c"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "tpl"
+crate-type = ["cdylib"]
+
+[dependencies]
+libc = { version = "0.2.172", default-features = false }
+libc_alloc = { version = "1.0.7", features = ["global"] }
+template-language = { path = "../template-language" }

@@ -1,0 +1,23 @@
+{% require archiver_status %}
+{% let
+
+archiver_status_template = {
+  "waiting" = 
+    <button hx-post="/contacts/archive">
+        Download Contact Archive
+    </button>
+  "running" =
+    <div hx-get="/contacts/archive" hx-trigger="load delay:500ms">
+        Creating Archive...
+        <div class="progress" >
+            <div id="archive-progress" class="progress-bar" style="width:{{ archiver.progress() * 100 }}%"></div>
+        </div>
+    </div>
+  "complete" =
+    <a hx-boost="false" href="/contacts/archive/file" _="on load click() me">Archive Downloading!  Click here if the download does not start.</a>
+    <button hx-delete="/contacts/archive">Clear Download</button>
+}
+%}
+<div id="archive-ui" hx-target="this" hx-swap="outerHTML">
+    {archiver_status_template[archiver_status]}
+</div>

@@ -15,18 +15,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7581282928bc99698341d1de7590964c28db747c164eaac9409432a3eaed098a"
 
 [[package]]
-name = "template-language"
+name = "x20250503-template-language"
 version = "0.1.0"
 dependencies = [
  "libc",
  "libc_alloc",
-]
-
-[[package]]
-name = "template-language-c"
-version = "0.1.0"
-dependencies = [
- "libc",
- "libc_alloc",
- "template-language",
 ]
