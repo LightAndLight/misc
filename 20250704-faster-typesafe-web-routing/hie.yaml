@@ -1,0 +1,10 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:x20250704-faster-typesafe-web-routing"
+
+    - path: "app/Main.hs"
+      component: "x20250704-faster-typesafe-web-routing:exe:x20250704-faster-typesafe-web-routing"
+
+    - path: "test"
+      component: "x20250704-faster-typesafe-web-routing:test:x20250704-faster-typesafe-web-routing-test"
