@@ -1,88 +1,135 @@
 # Syntax
 
-* `{<expr>}`
+## Substitution
 
-  Substitute an expression into the template.
+`{<expr>}`
 
-  ### Variables
-  
-  `{<name>}`
+Substitute an [expression](#expressions) into the template.
 
-  Substitute the value of `<name>` into the template.
+### `include`
 
-  ### List comprehensions
+`{% include <path> %}`
 
-  `{for <name> in <expr> yield <fragment>}`
+Substitute the template at `<path>` into the current template.
 
-  Substitute many template fragments into the template, one after the other.
+Any unsatisfied `require`ments (see [`require`](#require), [`define`](#define)) in the included template are inherited by the including template.
 
-  For each item in `<expr>`, `<name>` is `define`d within the scope of `<fragment>`, with that item as its value.
+## Introducing and binding variables
 
-  ### Template fragments
+### `require`
 
-* `{% require <name> %}`
+`{% require <name> [: <type>] %}`
 
-  The template requires an argument `<name>` of type `String`.
+The template requires an argument `<name>`.
+`<name>` is exposed as a variable within the template.
+If the `<type>` is omitted, then the variable has type `String`.
 
-* `{% require <name> : <type> %}`
+Unsatisfied `require`ments in a template become arguments when the template is run.
 
-  The template requires an argument `<name>` of type `<type>`.
+### `define`
 
-  Unsatisfied `require`ments in a template are inherited by parent templates (see `include`).
-  `require`ments in a root template become arguments to the template.
-  
-  A `require`ment that is satisfied by a `define` is not visible outside the `define`ing template.
+`{% define <name> %}<fragment>{% end <name> %}`
 
-* `{% define <name> %}<fragment>{% end <name> %}`
+The template defines a variable named `<name>` with value `<fragment>`.
 
-  The template defines a variable named `<name>` with value `<fragment>`.
+If a template `require`s (inherited or not) a variable named `<name>`, then that requirement
+is satisfied by `define <name>`.
+A satisfied `require`ment is not visible outside the template in which it was satisfied.
 
-  If `<fragment>` contains `require`ments, then they are inherited wherever `<name>` is used.
-  
-  A `require`ment is in scope for `<name>`, then it is satified by the `define`.
-  The `require`ment will no longer be visible outside the template that contains the `define`.
+If the `define`d variable is substituted (e.g. `{% define <name> %}<fragment>{% end <name> %}...{name}`)
+then any unsatisfied `require`ments are inherited by its use-site.
 
-  ### Example
+#### Example (`define` satisfies `require`ment)
 
-  A single argument template:
+A single argument template:
 
-  ```
-  $ cat > test.tpl.1 <<EOF
-  {% require name %}
-  Hello, {name}!
-  EOF
+```
+$ cat > test.tpl.1 <<EOF
+{% require name %}
+Hello, {name}!
+EOF
 
-  $ tpl reqs test.tpl.1
-  name
-  
-  $ tpl run test.tpl.1
-  error: missing argument 'name'
+$ tpl reqs test.tpl.1
+name
 
-  $ tpl run test.tpl.1 --arg name "world"
-  Hello, world!
-  ```
+$ tpl run test.tpl.1
+error: missing argument 'name'
 
-  The same template, containing a `define` for the `require`d argument:
+$ tpl run test.tpl.1 --arg name "world"
+Hello, world!
+```
 
-  ```
-  $ cat > test.tpl.2 <<EOF
-  {% require name %}
-  Hello {name}!
-  {% define name %}world{% end name}
-  EOF
+The same template, containing a `define` for the `require`d argument:
 
-  $ tpl reqs test.tpl.2
-  (none)
+```
+$ cat > test.tpl.2 <<EOF
+{% require name %}
+Hello {name}!
+{% define name %}world{% end name}
+EOF
 
-  $ tpl run test.tpl.2
-  Hello, world!
+$ tpl reqs test.tpl.2
+(none)
 
-  $ tpl run test.tpl.2 --arg name "world"
-  error: unexpected argument 'name'
-  ```
+$ tpl run test.tpl.2
+Hello, world!
 
-* `{% include <path> %}`
+$ tpl run test.tpl.2 --arg name "world"
+error: unexpected argument 'name'
+```
 
-  Substitute an another template into the current template.
+#### Example (`require`ments in `define` are inherited by use-site)
 
-  Any unsatisfied `require`ments in the included template are inherited by the current template.
+```
+$ cat > test.tpl <<EOF
+{% define value %}{% require name %}{name}{% end value}
+Hello, {value}!
+EOF
+
+$ tpl reqs test.tpl
+name
+
+$ tpl run test.tpl --arg name "world"
+Hello, world!
+```
+
+```
+$ cat > test.tpl <<EOF
+{% require names : List %}
+{% define greeting %}
+{% require name %}
+Hello, {name}!
+{% end greeting %}
+{for name in names yield {greeting}}
+EOF
+
+$ tpl reqs test.tpl
+names
+
+# tpl run test.tpl --arg-list names '["world1", "world2"]'
+Hello, world1!
+Hello, world2!
+```
+
+## Expressions
+
+### Variables
+
+`<name>`
+
+Substitute the value of `<name>` into the template.
+
+Variables are introduced by [`require`](#require) and [`define`](#define).
+
+### List comprehensions
+
+`for <name> in <expr> yield <fragment>`
+
+Substitute many [template fragments](#template-fragments) into the template, one after the other.
+
+For each item in `<expr>`, `<name>` is `define`d within the scope of `<fragment>` (see [Template fragments](#template-fragements)), with that item as its value.
+
+### Template fragments
+
+Some expression contexts (such as the `yield`ed value in a list comprehension) allow template fragments.
+Anything that's permitted in a top-level template is also allowed in a template fragment.
