@@ -6,6 +6,10 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 module Lib where
 
 import Data.Vector (Vector)
@@ -15,7 +19,7 @@ import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Control.Monad.Writer (runWriter, MonadWriter (tell))
 import Data.Monoid (Any(..))
-import Data.Foldable (foldlM, foldl')
+import Data.Foldable (foldlM, foldl', traverse_, for_)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Vector as Vector
@@ -29,6 +33,15 @@ import Data.String (fromString)
 import GHC.Generics (Generic)
 import Codec.Serialise (Serialise, readFileDeserialise)
 import qualified Data.Text as Text
+import Data.ByteString (ByteString)
+import System.IO.Posix.MMap (unsafeMMapFile)
+import Data.Binary.Get (Decoder(..), runGetIncremental, pushChunk, runGet)
+import qualified Data.Binary as Binary
+import Data.Binary (Binary)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
+import Control.Applicative (many)
+import Data.Binary.Put (runPut)
 
 newtype Program = Program (Vector Definition)
   deriving newtype (Show, Eq, Semigroup, Monoid)
@@ -89,13 +102,13 @@ data Constant
   | CNatural !Natural
   | CMap !(Map Constant Constant)
   | CList !(Vector Constant)
-  deriving (Show, Eq, Ord, Generic, Serialise)
+  deriving (Show, Eq, Ord, Generic, Serialise, Binary)
 
 newtype Database = Database (Map Text (Set Row))
   deriving newtype (Show, Eq, Serialise)
 
 newtype Row = Row (Vector Constant)
-  deriving newtype (Show, Eq, Ord, Serialise)
+  deriving newtype (Show, Eq, Ord, Serialise, Binary)
 
 -- | When both 'Database's contain the same relation, the relation is merged using set union.
 instance Semigroup Database where
@@ -249,6 +262,80 @@ formatConstant (CMap xs) =
   Lazy.intercalate (fromString ", ") ((\(k, v) -> formatConstant k <> fromString " = " <> formatConstant v) <$> Map.toList xs) <>
   fromString "]"
 
+newtype DiskDatabase = DiskDatabase (Map Text ByteString)
+
+instance Binary a => Binary (Vector a) where
+  get = do
+    len <- Binary.get @Int
+    Vector.replicateM len Binary.get
+
+  put xs = do
+    Binary.put (Vector.length xs)
+    traverse_ Binary.put xs
+
+storeDiskDatabase :: FilePath -> DiskDatabase -> IO ()
+storeDiskDatabase path (DiskDatabase relations) = do
+  let relations' = Map.toList relations
+  let offsets = scanl (\acc (_name, bytes) -> acc + ByteString.length bytes) 0 relations'
+  let index = Vector.fromList $ zipWith (\(name, _bytes) offset -> (name, offset)) relations' offsets
+  Binary.encodeFile path index
+  for_ relations' $ \(_name, bytes) -> do
+    ByteString.appendFile path bytes
+
+loadDiskDatabase :: FilePath -> IO DiskDatabase
+loadDiskDatabase path = do
+  bytes <- unsafeMMapFile path
+  case runGetIncremental (Binary.get @(Vector (Text, Int))) `pushChunk` bytes of
+    Done rest _consumed index -> do
+      let relations = fmap (`ByteString.drop` rest) . Map.fromList $ Vector.toList index
+      pure $ DiskDatabase relations
+    Partial _ ->
+      error "partial binary decode"
+    Fail _rest _consumed err ->
+      error $ "binary decode failure: " ++ err
+
+diskDatabaseEmpty :: DiskDatabase
+diskDatabaseEmpty = DiskDatabase Map.empty
+
+diskDatabaseInsertRow ::
+  -- | Relation name
+  Text ->
+  -- | New row
+  Row ->
+  DiskDatabase ->
+  DiskDatabase
+diskDatabaseInsertRow name row (DiskDatabase db) =
+  DiskDatabase $
+  Map.insertWith
+    (\new old -> old <> new)
+    name
+    (LazyByteString.toStrict $ Binary.encode row)
+    db
+
+diskDatabaseInsertRows ::
+  Foldable f =>
+  -- | Relation name
+  Text ->
+  -- | New rows
+  f Row ->
+  DiskDatabase ->
+  DiskDatabase
+diskDatabaseInsertRows name rows (DiskDatabase db) =
+  DiskDatabase $
+  Map.insertWith
+    (\new old -> old <> new)
+    name
+    (LazyByteString.toStrict . runPut $ traverse_ Binary.put rows)
+    db
+
+diskDatabaseDeleteRelation :: Text -> DiskDatabase -> DiskDatabase
+diskDatabaseDeleteRelation name (DiskDatabase db) = DiskDatabase (Map.delete name db)
+
+diskDatabaseLookupRelation :: Text -> DiskDatabase -> Maybe (Set Row)
+diskDatabaseLookupRelation name (DiskDatabase db) =
+  Set.fromList . runGet (many (Binary.get @Row)) . LazyByteString.fromStrict <$>
+  Map.lookup name db
+
 {-# ANN eval_naive "HLINT: ignore Use camelCase" #-}
 eval_naive :: Database -> Program -> ([Change], Change)
 eval_naive db (Program defs) = swap . runWriter $ go mempty
@@ -263,7 +350,19 @@ eval_naive db (Program defs) = swap . runWriter $ go mempty
           go change'
         else pure change'
 
-consequence :: Database -> Change -> Definition -> Change
+class IsDatabase db where
+  deleteRelation :: Text -> db -> db
+  lookupRelation :: Text -> db -> Maybe (Set Row)
+
+instance IsDatabase Database where
+  deleteRelation = databaseDeleteRelation
+  lookupRelation = databaseLookupRelation
+
+instance IsDatabase DiskDatabase where
+  deleteRelation = diskDatabaseDeleteRelation
+  lookupRelation = diskDatabaseLookupRelation
+
+consequence :: IsDatabase db => db -> Change -> Definition -> Change
 consequence db change (Rule name args body bindings) =
   let
     matches =
@@ -309,7 +408,8 @@ genBinding subst (BItems expr) =
     _ -> error "argument to items not a map"
 
 matchBody ::
-  Database ->
+  IsDatabase db =>
+  db ->
   Change ->
   Vector Binding ->
   Map Text Constant ->
@@ -321,8 +421,8 @@ matchBody db change@(Change db') bindings subst (Relation name args :| rels) =
       case Vector.find (\(Binding bname _) -> name == bname) bindings of
         Nothing ->
           Set.toList $
-          fromMaybe Set.empty (databaseLookupRelation name db) <>
-          fromMaybe Set.empty (databaseLookupRelation name db')
+          fromMaybe Set.empty (lookupRelation name db) <>
+          fromMaybe Set.empty (lookupRelation name db')
         Just (Binding _bname bexpr) ->
           genBinding subst bexpr
   , subst' <- maybeToList $ matchRow subst args row
@@ -424,45 +524,48 @@ Delta_{path}{i+1}(X, Y) :- edge(X, Y), Delta_{path}{i}(Y, Z).
 ```
 -}
 {-# ANN eval_seminaive "HLINT: ignore Use camelCase" #-}
-eval_seminaive :: Database -> Program -> ([Change], Change)
-eval_seminaive db (Program defs) = swap . runWriter $ go True mempty (Change db)
+eval_seminaive :: forall db. IsDatabase db => db -> Program -> ([Change], Change)
+eval_seminaive db (Program defs) = swap . runWriter $ go True mempty Nothing
   where
     go ::
       MonadWriter [Change] m =>
       -- | Is this the first iteration?
       Bool ->
       Change ->
-      Change ->
+      Maybe Change ->
       m Change
     go first !acc !delta = do
       let delta' = foldMap (consequence_seminaive first db acc delta) defs
       if delta' /= mempty
       then do
         tell $ pure delta'
-        go False (acc <> delta') delta'
+        go False (acc <> delta') (Just delta')
       else
         pure acc
 
 {-# ANN consequence_seminaive "HLINT: ignore Use camelCase" #-}
 consequence_seminaive ::
+  IsDatabase db =>
   -- | Is this the first iteration?
   Bool ->
-  Database ->
+  db ->
   -- | Accumulated changes
   Change ->
   -- | Changes from previous iteration
-  Change ->
+  Maybe Change ->
   Definition ->
   Change
 consequence_seminaive True _db _acc _delta (Fact name args) =
   Change $ databaseFact name args
 consequence_seminaive False _db _acc _delta (Fact _name _args) =
   mempty
-consequence_seminaive _ db acc delta rule@(Rule _name _args body _bindings) =
+consequence_seminaive _ db _acc Nothing rule =
+  consequence db (Change mempty) rule
+consequence_seminaive _ db acc (Just delta) rule@(Rule _name _args body _bindings) =
   foldMap
     (\(Relation focusName _) ->
       consequence
-        (databaseDeleteRelation focusName db)
+        (deleteRelation focusName db)
         (Change $
           databaseReplaceRelation
             focusName

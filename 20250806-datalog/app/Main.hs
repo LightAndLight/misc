@@ -1,12 +1,13 @@
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE BangPatterns #-}
 module Main where
 
 import System.Directory (listDirectory)
 import System.FilePath (takeExtension, (</>))
 import Control.Concurrent.Async (replicateConcurrently, concurrently_, race_)
-import Data.Foldable (traverse_, foldl')
+import Data.Foldable (traverse_)
 import Control.Concurrent.STM.TQueue (newTQueueIO, writeTQueue, readTQueue)
 import Control.Concurrent.STM.TVar (newTVarIO, writeTVar, readTVar, readTVarIO, modifyTVar')
 import Control.Concurrent.STM (atomically, retry)
@@ -24,10 +25,9 @@ import qualified Options.Applicative as Options
 import qualified Codec.CBOR.Write as CBOR
 import Codec.CBOR.JSON (encodeValue, decodeValue)
 import Codec.CBOR.Read (deserialiseFromBytes)
-import Lib (Row(..), Constant(..), databaseEmpty, databaseInsertRow, loadCborDatabase, eval_seminaive, formatChange)
+import Lib (Row(..), Constant(..), eval_seminaive, formatChange, diskDatabaseEmpty, storeDiskDatabase, loadDiskDatabase, diskDatabaseInsertRows)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Map as Map
-import Codec.Serialise (writeFileSerialise)
 import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import Text.Sage (parse)
@@ -84,7 +84,7 @@ cliParser =
         Options.strOption
           (Options.short 'o' <>
             Options.long "output" <>
-            Options.value "database.cbor" <>
+            Options.value "database.bin" <>
             Options.showDefault <>
             Options.metavar "FILE" <>
             Options.help "Destination file"
@@ -94,7 +94,7 @@ cliParser =
       Query <$>
       Options.strOption
         (Options.long "db" <>
-          Options.value "database.cbor" <>
+          Options.value "database.bin" <>
           Options.showDefault <>
           Options.metavar "FILE" <>
           Options.help "Database file"
@@ -215,15 +215,17 @@ db input output = do
           putStrLn "error: expected object, got:"
           print value
           exitFailure
+
+  putStrLn "Constructing database..."
   let
-    database =
-      foldl'
-        (\acc row -> snd $ databaseInsertRow (fromString "derivation") row acc)
-        databaseEmpty
+    !database =
+      diskDatabaseInsertRows
+        (fromString "derivation")
         (objectToRows drvs)
+        diskDatabaseEmpty
 
   putStrLn $ "Writing " ++ output ++ "..."
-  writeFileSerialise output database
+  storeDiskDatabase output database
   putStrLn "done"
 
 objectToRows :: Json.Object -> [Row]
@@ -257,7 +259,7 @@ query databasePath input = do
         exitFailure
       Right a -> pure a
   putStrLn $ "Loading " ++ databasePath ++ "..."
-  database <- loadCborDatabase databasePath
+  database <- loadDiskDatabase databasePath
   putStrLn "Done"
   let (_changes, output) = eval_seminaive database program
   putStrLn . LazyText.unpack $ formatChange output
