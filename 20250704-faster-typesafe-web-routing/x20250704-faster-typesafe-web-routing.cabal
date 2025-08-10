@@ -15,6 +15,7 @@ common warnings
 library
     import:           warnings
     exposed-modules:  Lib
+                      Wai.Request
     build-depends:    base ^>=4.19.2.0,
                       bytestring,
                       containers,
@@ -31,6 +32,7 @@ executable x20250704-faster-typesafe-web-routing
     build-depends:
         base ^>=4.19.2.0,
         x20250704-faster-typesafe-web-routing,
+        text,
         warp
 
     hs-source-dirs:   app
