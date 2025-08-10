@@ -1,0 +1,29 @@
+packages: .
+
+source-repository-package
+  type: git
+  location: https://github.com/LightAndLight/sage.git
+  tag: de00dfe82a1de9b606f8812a8fbd8e702bf9cd12
+  subdir: sage
+
+source-repository-package
+  type: git
+  location: https://github.com/LightAndLight/sage.git
+  tag: de00dfe82a1de9b606f8812a8fbd8e702bf9cd12
+  subdir: parsers-sage
+
+source-repository-package
+  type: git
+  location: https://github.com/LightAndLight/parsers.git
+  tag: ee9c5ec5ef769a49cb76d0fb3b0c949fdf3fdd34
+  subdir: parsers
+
+source-repository-package
+  type: git
+  location: https://github.com/LightAndLight/diagnostica.git
+  tag: eed4a3ebf6cce76664c3f8884904e22f116e3fe2
+
+source-repository-package
+  type: git
+  location: https://github.com/LightAndLight/diagnostica-sage.git
+  tag: af7dbe55f7431f7598eccabc2e59420f12e7c4af
