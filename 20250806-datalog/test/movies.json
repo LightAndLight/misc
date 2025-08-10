@@ -1,0 +1,345 @@
+[
+  {
+    "title": "The Shawshank Redemption",
+    "director": "Frank Darabont",
+    "actor": "Tim Robbins",
+    "theatre": "AMC Theatres",
+    "city": "New York"
+  },
+  {
+    "title": "The Godfather",
+    "director": "Francis Ford Coppola",
+    "actor": "Marlon Brando",
+    "theatre": "Regal Cinemas",
+    "city": "Los Angeles"
+  },
+  {
+    "title": "The Dark Knight",
+    "director": "Christopher Nolan",
+    "actor": "Christian Bale",
+    "theatre": "Cinemark",
+    "city": "Chicago"
+  },
+  {
+    "title": "Pulp Fiction",
+    "director": "Quentin Tarantino",
+    "actor": "John Travolta",
+    "theatre": "Alamo Drafthouse",
+    "city": "Austin"
+  },
+  {
+    "title": "Schindler's List",
+    "director": "Steven Spielberg",
+    "actor": "Liam Neeson",
+    "theatre": "Landmark Theatres",
+    "city": "San Francisco"
+  },
+  {
+    "title": "Forrest Gump",
+    "director": "Robert Zemeckis",
+    "actor": "Tom Hanks",
+    "theatre": "AMC Theatres",
+    "city": "Atlanta"
+  },
+  {
+    "title": "The Matrix",
+    "director": "Lana and Lilly Wachowski",
+    "actor": "Keanu Reeves",
+    "theatre": "IMAX",
+    "city": "Seattle"
+  },
+  {
+    "title": "Goodfellas",
+    "director": "Martin Scorsese",
+    "actor": "Ray Liotta",
+    "theatre": "Regal Cinemas",
+    "city": "Boston"
+  },
+  {
+    "title": "Inception",
+    "director": "Christopher Nolan",
+    "actor": "Leonardo DiCaprio",
+    "theatre": "Cinemark",
+    "city": "Denver"
+  },
+  {
+    "title": "The Silence of the Lambs",
+    "director": "Jonathan Demme",
+    "actor": "Anthony Hopkins",
+    "theatre": "AMC Theatres",
+    "city": "Washington DC"
+  },
+  {
+    "title": "Titanic",
+    "director": "James Cameron",
+    "actor": "Kate Winslet",
+    "theatre": "IMAX",
+    "city": "Miami"
+  },
+  {
+    "title": "The Lord of the Rings: The Return of the King",
+    "director": "Peter Jackson",
+    "actor": "Elijah Wood",
+    "theatre": "Regal Cinemas",
+    "city": "Portland"
+  },
+  {
+    "title": "Fight Club",
+    "director": "David Fincher",
+    "actor": "Brad Pitt",
+    "theatre": "Alamo Drafthouse",
+    "city": "Dallas"
+  },
+  {
+    "title": "Star Wars: Episode V - The Empire Strikes Back",
+    "director": "Irvin Kershner",
+    "actor": "Mark Hamill",
+    "theatre": "AMC Theatres",
+    "city": "Philadelphia"
+  },
+  {
+    "title": "The Avengers",
+    "director": "Joss Whedon",
+    "actor": "Robert Downey Jr.",
+    "theatre": "Cinemark",
+    "city": "Phoenix"
+  },
+  {
+    "title": "Jurassic Park",
+    "director": "Steven Spielberg",
+    "actor": "Sam Neill",
+    "theatre": "IMAX",
+    "city": "San Diego"
+  },
+  {
+    "title": "The Departed",
+    "director": "Martin Scorsese",
+    "actor": "Leonardo DiCaprio",
+    "theatre": "Landmark Theatres",
+    "city": "Detroit"
+  },
+  {
+    "title": "Gladiator",
+    "director": "Ridley Scott",
+    "actor": "Russell Crowe",
+    "theatre": "AMC Theatres",
+    "city": "Las Vegas"
+  },
+  {
+    "title": "The Green Mile",
+    "director": "Frank Darabont",
+    "actor": "Tom Hanks",
+    "theatre": "Regal Cinemas",
+    "city": "New Orleans"
+  },
+  {
+    "title": "Saving Private Ryan",
+    "director": "Steven Spielberg",
+    "actor": "Tom Hanks",
+    "theatre": "Cinemark",
+    "city": "Houston"
+  },
+  {
+    "title": "Interstellar",
+    "director": "Christopher Nolan",
+    "actor": "Matthew McConaughey",
+    "theatre": "IMAX",
+    "city": "Toronto"
+  },
+  {
+    "title": "The Prestige",
+    "director": "Christopher Nolan",
+    "actor": "Hugh Jackman",
+    "theatre": "Alamo Drafthouse",
+    "city": "Nashville"
+  },
+  {
+    "title": "Inglourious Basterds",
+    "director": "Quentin Tarantino",
+    "actor": "Brad Pitt",
+    "theatre": "AMC Theatres",
+    "city": "Minneapolis"
+  },
+  {
+    "title": "The Lion King",
+    "director": "Roger Allers and Rob Minkoff",
+    "actor": "James Earl Jones",
+    "theatre": "Regal Cinemas",
+    "city": "Orlando"
+  },
+  {
+    "title": "The Shining",
+    "director": "Stanley Kubrick",
+    "actor": "Jack Nicholson",
+    "theatre": "Landmark Theatres",
+    "city": "Pittsburgh"
+  },
+  {
+    "title": "Back to the Future",
+    "director": "Robert Zemeckis",
+    "actor": "Michael J. Fox",
+    "theatre": "AMC Theatres",
+    "city": "Cleveland"
+  },
+  {
+    "title": "The Social Network",
+    "director": "David Fincher",
+    "actor": "Jesse Eisenberg",
+    "theatre": "Cinemark",
+    "city": "San Jose"
+  },
+  {
+    "title": "La La Land",
+    "director": "Damien Chazelle",
+    "actor": "Emma Stone",
+    "theatre": "ArcLight Cinemas",
+    "city": "Los Angeles"
+  },
+  {
+    "title": "The Grand Budapest Hotel",
+    "director": "Wes Anderson",
+    "actor": "Ralph Fiennes",
+    "theatre": "Alamo Drafthouse",
+    "city": "Austin"
+  },
+  {
+    "title": "Casablanca",
+    "director": "Michael Curtiz",
+    "actor": "Humphrey Bogart",
+    "theatre": "TCL Chinese Theatre",
+    "city": "Hollywood"
+  },
+  {
+    "title": "Avatar",
+    "director": "James Cameron",
+    "actor": "Sam Worthington",
+    "theatre": "IMAX",
+    "city": "Vancouver"
+  },
+  {
+    "title": "Django Unchained",
+    "director": "Quentin Tarantino",
+    "actor": "Jamie Foxx",
+    "theatre": "AMC Theatres",
+    "city": "Charlotte"
+  },
+  {
+    "title": "Blade Runner 2049",
+    "director": "Denis Villeneuve",
+    "actor": "Ryan Gosling",
+    "theatre": "Regal Cinemas",
+    "city": "Seattle"
+  },
+  {
+    "title": "Eternal Sunshine of the Spotless Mind",
+    "director": "Michel Gondry",
+    "actor": "Jim Carrey",
+    "theatre": "Landmark Theatres",
+    "city": "Portland"
+  },
+  {
+    "title": "The Truman Show",
+    "director": "Peter Weir",
+    "actor": "Jim Carrey",
+    "theatre": "AMC Theatres",
+    "city": "Tampa"
+  },
+  {
+    "title": "Parasite",
+    "director": "Bong Joon-ho",
+    "actor": "Song Kang-ho",
+    "theatre": "Cinemark",
+    "city": "San Francisco"
+  },
+  {
+    "title": "The Sixth Sense",
+    "director": "M. Night Shyamalan",
+    "actor": "Bruce Willis",
+    "theatre": "AMC Theatres",
+    "city": "Philadelphia"
+  },
+  {
+    "title": "Whiplash",
+    "director": "Damien Chazelle",
+    "actor": "Miles Teller",
+    "theatre": "Alamo Drafthouse",
+    "city": "Denver"
+  },
+  {
+    "title": "The Dark Knight Rises",
+    "director": "Christopher Nolan",
+    "actor": "Christian Bale",
+    "theatre": "IMAX",
+    "city": "Chicago"
+  },
+  {
+    "title": "A Beautiful Mind",
+    "director": "Ron Howard",
+    "actor": "Russell Crowe",
+    "theatre": "Regal Cinemas",
+    "city": "Sacramento"
+  },
+  {
+    "title": "The Revenant",
+    "director": "Alejandro González Iñárritu",
+    "actor": "Leonardo DiCaprio",
+    "theatre": "Cinemark",
+    "city": "Anchorage"
+  },
+  {
+    "title": "No Country for Old Men",
+    "director": "Joel and Ethan Coen",
+    "actor": "Javier Bardem",
+    "theatre": "Landmark Theatres",
+    "city": "Albuquerque"
+  },
+  {
+    "title": "Toy Story",
+    "director": "John Lasseter",
+    "actor": "Tom Hanks",
+    "theatre": "AMC Theatres",
+    "city": "Orlando"
+  },
+  {
+    "title": "The Wolf of Wall Street",
+    "director": "Martin Scorsese",
+    "actor": "Leonardo DiCaprio",
+    "theatre": "Regal Cinemas",
+    "city": "New York"
+  },
+  {
+    "title": "The Martian",
+    "director": "Ridley Scott",
+    "actor": "Matt Damon",
+    "theatre": "IMAX",
+    "city": "Houston"
+  },
+  {
+    "title": "Her",
+    "director": "Spike Jonze",
+    "actor": "Joaquin Phoenix",
+    "theatre": "Alamo Drafthouse",
+    "city": "Brooklyn"
+  },
+  {
+    "title": "Gone Girl",
+    "director": "David Fincher",
+    "actor": "Ben Affleck",
+    "theatre": "AMC Theatres",
+    "city": "St. Louis"
+  },
+  {
+    "title": "Black Panther",
+    "director": "Ryan Coogler",
+    "actor": "Chadwick Boseman",
+    "theatre": "Cinemark",
+    "city": "Atlanta"
+  },
+  {
+    "title": "The Shape of Water",
+    "director": "Guillermo del Toro",
+    "actor": "Sally Hawkins",
+    "theatre": "Landmark Theatres",
+    "city": "Toronto"
+  }
+]

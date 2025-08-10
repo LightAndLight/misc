@@ -1,0 +1,10 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:x20250806-datalog"
+
+    - path: "app/Main.hs"
+      component: "x20250806-datalog:exe:x20250806-datalog"
+
+    - path: "test"
+      component: "x20250806-datalog:test:x20250806-datalog-test"
