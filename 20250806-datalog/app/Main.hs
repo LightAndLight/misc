@@ -24,15 +24,24 @@ import qualified Options.Applicative as Options
 import qualified Codec.CBOR.Write as CBOR
 import Codec.CBOR.JSON (encodeValue, decodeValue)
 import Codec.CBOR.Read (deserialiseFromBytes)
-import Lib (Row(..), Constant(..), databaseEmpty, databaseInsertRow)
+import Lib (Row(..), Constant(..), databaseEmpty, databaseInsertRow, loadCborDatabase, eval_seminaive, formatChange)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Map as Map
 import Codec.Serialise (writeFileSerialise)
 import Data.Maybe (maybeToList)
+import Data.Text (Text)
+import Text.Sage (parse)
+import Text.Parser.Sage (getParsersSage)
+import qualified Parse
+import qualified Data.Text.Lazy as LazyText
+import Streaming.Chars.Text (StreamText(..))
+import Text.Diagnostic.Sage (parseError)
+import qualified Text.Diagnostic as Diagnostic
 
 data Cli
-  = Scrape
-  | Db FilePath
+  = Scrape FilePath
+  | Db FilePath FilePath
+  | Query FilePath Text
 
 cliParser :: Options.Parser Cli
 cliParser =
@@ -48,21 +57,63 @@ cliParser =
       (Options.info
         (dbParser <**> Options.helper)
         (Options.progDesc "Convert the Nix store derivations file into a proper database" <> Options.fullDesc)
+      ) <>
+     Options.command
+      "query"
+      (Options.info
+        (queryParser <**> Options.helper)
+        (Options.progDesc "Query a database" <> Options.fullDesc)
       )
     )
   where
-    scrapeParser = pure Scrape
-    dbParser = Db <$> Options.strArgument (Options.metavar "INPUT" <> Options.help "The Nix store derivations file to convert")
+    scrapeParser =
+      Scrape <$>
+      Options.strOption
+        (Options.short 'o' <>
+          Options.long "output" <>
+          Options.value "nix-store.cbor" <>
+          Options.showDefault <>
+          Options.metavar "FILE" <>
+          Options.help "Destination file"
+        )
+
+    dbParser =
+      Db <$>
+        Options.strArgument
+          (Options.metavar "INPUT" <> Options.help "Source file") <*>
+        Options.strOption
+          (Options.short 'o' <>
+            Options.long "output" <>
+            Options.value "database.cbor" <>
+            Options.showDefault <>
+            Options.metavar "FILE" <>
+            Options.help "Destination file"
+          )
+
+    queryParser =
+      Query <$>
+      Options.strOption
+        (Options.long "db" <>
+          Options.value "database.cbor" <>
+          Options.showDefault <>
+          Options.metavar "FILE" <>
+          Options.help "Database file"
+        ) <*>
+      Options.strArgument
+        (Options.metavar "QUERY" <>
+          Options.help "Query to run"
+        )
 
 main :: IO ()
 main = do
   cli <- Options.execParser (Options.info (cliParser <**> Options.helper) Options.fullDesc)
   case cli of
-    Scrape -> scrape
-    Db input -> db input
+    Scrape output -> scrape output
+    Db input output -> db input output
+    Query database input -> query database input
 
-scrape :: IO ()
-scrape = do
+scrape :: FilePath -> IO ()
+scrape output = do
   items <- listDirectory "/nix/store"
   let drvs = filter ((".drv" ==) . takeExtension) items
   let count = length drvs
@@ -133,16 +184,21 @@ scrape = do
   putStrLn "Serialising data..."
   start' <- getCurrentTime
   results <- readTVarIO resultsVar
-  Data.ByteString.Lazy.writeFile "nix-store.cbor"
+  Data.ByteString.Lazy.writeFile output
     . CBOR.toLazyByteString
     . encodeValue
     $ Json.Object results
-  putStrLn "done"
+  putStrLn $ "Wrote " ++ output
   end' <- getCurrentTime
-  putStrLn $ "took " ++ show (end' `diffUTCTime` start')
+  putStrLn $ "Took " ++ show (end' `diffUTCTime` start')
 
-db :: FilePath -> IO ()
-db input = do
+db ::
+  -- | Input
+  FilePath ->
+  -- | Output
+  FilePath ->
+  IO ()
+db input output = do
   bytes <- Data.ByteString.Lazy.readFile input
 
   putStrLn $ "Reading " ++ input ++ "..."
@@ -166,8 +222,8 @@ db input = do
         databaseEmpty
         (objectToRows drvs)
 
-  putStrLn "Writing database.cbor..."
-  writeFileSerialise "database.cbor" database
+  putStrLn $ "Writing " ++ output ++ "..."
+  writeFileSerialise output database
   putStrLn "done"
 
 objectToRows :: Json.Object -> [Row]
@@ -190,3 +246,18 @@ valueToConstant (Json.Bool b) =
   CBool b
 valueToConstant (Json.Number n) = error $ "TODO: number " ++ show n
 valueToConstant Json.Null = error "TODO: null"
+
+query :: FilePath -> Text -> IO ()
+query databasePath input = do
+  program <-
+    case parse (getParsersSage Parse.program) (StreamText input) of
+      Left err -> do
+        putStrLn . LazyText.unpack $
+          Diagnostic.render Diagnostic.defaultConfig (fromString "(interactive)") input $ parseError err
+        exitFailure
+      Right a -> pure a
+  putStrLn $ "Loading " ++ databasePath ++ "..."
+  database <- loadCborDatabase databasePath
+  putStrLn "Done"
+  let (_changes, output) = eval_seminaive database program
+  putStrLn . LazyText.unpack $ formatChange output

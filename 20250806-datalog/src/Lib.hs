@@ -27,7 +27,7 @@ import Data.Tuple (swap)
 import qualified Data.Text.Lazy as Lazy
 import Data.String (fromString)
 import GHC.Generics (Generic)
-import Codec.Serialise (Serialise)
+import Codec.Serialise (Serialise, readFileDeserialise)
 import qualified Data.Text as Text
 
 newtype Program = Program (Vector Definition)
@@ -62,7 +62,10 @@ data Expr
   = Wild
   | Var !Text
   | Constant !Constant
-  | Map (Map Constant Expr)
+  | Map
+      -- | Keys must match exactly
+      Bool
+      (Map Constant Expr)
   | List (Vector Expr)
   deriving (Show, Eq)
 
@@ -101,6 +104,9 @@ instance Semigroup Database where
 
 instance Monoid Database where
   mempty = Database Map.empty
+
+loadCborDatabase :: FilePath -> IO Database
+loadCborDatabase = readFileDeserialise
 
 databaseEmpty :: Database
 databaseEmpty = Database mempty
@@ -287,7 +293,7 @@ genBinding subst (BKeys expr) =
           case c of
             CMap m -> Row . pure <$> Map.keys m
             _ -> error "argument to keys not a map"
-    Map m -> Row . pure <$> Map.keys m
+    Map _exact m -> Row . pure <$> Map.keys m
     _ -> error "argument to keys not a map"
 genBinding subst (BItems expr) =
   case expr of
@@ -299,7 +305,7 @@ genBinding subst (BItems expr) =
           case c of
             CMap m -> (\(a, b) -> Row $ Vector.fromList [a, b]) <$> Map.toList m
             _ -> error "argument to items not a map"
-    Map _m -> error "TODO: items from map expr"
+    Map _exact _m -> error "TODO: items from map expr"
     _ -> error "argument to items not a map"
 
 matchBody ::
@@ -351,15 +357,27 @@ unify subst e c' =
           pure subst
     (Constant c, _) ->
       subst <$ guard (c == c')
-    (Map m, CMap m') -> do
-      foldlM
-        (\subst' (key, e') -> do
-          c'' <- Map.lookup key m'
-          unify subst' e' c''
-        )
-        subst
-        (Map.toList m)
-    (Map _m, _) ->
+    (Map exact m, CMap m') ->
+      if exact
+      then do
+        -- Unify every key value pair in the constant map
+        foldlM
+          (\subst' (key, c'') -> do
+            e' <- Map.lookup key m
+            unify subst' e' c''
+          )
+          subst
+          (Map.toList m')
+      else do
+        -- Unify only the key value pairs in the variable map
+        foldlM
+          (\subst' (key, e') -> do
+            c'' <- Map.lookup key m'
+            unify subst' e' c''
+          )
+          subst
+          (Map.toList m)
+    (Map _exact _m, _) ->
       error "can't unify map with non-map"
     (List l, CList l') | Vector.length l == Vector.length l' ->
       foldlM

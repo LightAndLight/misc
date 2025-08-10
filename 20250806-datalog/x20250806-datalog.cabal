@@ -2,7 +2,6 @@ cabal-version:      3.0
 name:               x20250806-datalog
 version:            0.1.0.0
 license:            BSD-3-Clause
-license-file:       LICENSE
 author:             Isaac Elliott
 maintainer:         isaace71295@gmail.com
 category:           Database
@@ -17,10 +16,14 @@ library
     exposed-modules:
         Lib
         LibOld
+        Parse
     build-depends:
         base ^>=4.19.2.0,
         containers,
         mtl,
+        parsers >=0.13,
+        parsers-sage,
+        sage,
         serialise,
         text >=2.0,
         vector
@@ -39,10 +42,14 @@ executable x20250806-datalog
         cborg,
         cborg-json,
         containers,
+        diagnostica,
+        diagnostica-sage,
         directory,
         filepath,
         optparse-applicative,
+        parsers-sage,
         process,
+        sage,
         serialise,
         stm,
         text,
