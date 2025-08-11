@@ -1,31 +1,32 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeApplications #-}
+
 module Database where
 
-import Data.Text (Text)
-import Data.Vector (Vector)
-import Syntax (Constant, formatConstant)
 import Codec.Serialise (Serialise, readFileDeserialise)
+import Control.Applicative (many)
+import Control.Monad.Writer (runWriter, tell)
 import Data.Binary (Binary)
-import qualified Data.Text.Lazy as Lazy
-import Data.Set (Set)
+import qualified Data.Binary as Binary
+import Data.Binary.Get (Decoder (..), pushChunk, runGet, runGetIncremental)
+import Data.Binary.Put (runPut)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
+import Data.Foldable (foldlM, for_, traverse_)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.String (fromString)
-import qualified Data.Vector as Vector
-import Data.Monoid (Any(..))
-import Control.Monad.Writer (runWriter, tell)
-import Data.Foldable (foldlM, for_, traverse_)
+import Data.Monoid (Any (..))
+import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.ByteString (ByteString)
-import Data.Binary.Get (Decoder(..), runGetIncremental, pushChunk, runGet)
-import qualified Data.ByteString as ByteString
-import qualified Data.Binary as Binary
+import Data.String (fromString)
+import Data.Text (Text)
+import qualified Data.Text.Lazy as Lazy
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
+import Syntax (Constant, formatConstant)
 import System.IO.Posix.MMap (unsafeMMapFile)
-import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Binary.Put (runPut)
-import Control.Applicative (many)
 
 class IsDatabase db where
   deleteRelation :: Text -> db -> db
@@ -36,9 +37,9 @@ newtype Row = Row (Vector Constant)
 
 formatRow :: Row -> Lazy.Text
 formatRow (Row items) =
-  fromString "(" <>
-  Lazy.intercalate (fromString ", ") (formatConstant <$> Vector.toList items) <>
-  fromString ")"
+  fromString "("
+    <> Lazy.intercalate (fromString ", ") (formatConstant <$> Vector.toList items)
+    <> fromString ")"
 
 newtype Database = Database (Map Text (Set Row))
   deriving (Show, Eq, Serialise)
@@ -66,7 +67,6 @@ databaseFact ::
   Text ->
   -- | Arguments
   Vector Constant ->
-
   Database
 databaseFact name args = Database $ Map.singleton name (Set.singleton $ Row args)
 
@@ -98,19 +98,19 @@ databaseUpdate db (Database change) =
   let
     (db', Any changed) =
       runWriter $
-      foldlM
-        (\acc (name, rows) ->
-          foldlM
-            (\acc' row -> do
-              let (changed', acc'') = databaseInsertRow name row acc'
-              tell $ Any changed'
-              pure acc''
-            )
-            acc
-            (Set.toList rows)
-        )
-        db
-        (Map.toList change)
+        foldlM
+          ( \acc (name, rows) ->
+              foldlM
+                ( \acc' row -> do
+                    let (changed', acc'') = databaseInsertRow name row acc'
+                    tell $ Any changed'
+                    pure acc''
+                )
+                acc
+                (Set.toList rows)
+          )
+          db
+          (Map.toList change)
   in
     (changed, db')
 
@@ -182,11 +182,11 @@ diskDatabaseInsertRow ::
   DiskDatabase
 diskDatabaseInsertRow name row (DiskDatabase db) =
   DiskDatabase $
-  Map.insertWith
-    (\new old -> old <> new)
-    name
-    (LazyByteString.toStrict $ Binary.encode row)
-    db
+    Map.insertWith
+      (\new old -> old <> new)
+      name
+      (LazyByteString.toStrict $ Binary.encode row)
+      db
 
 diskDatabaseInsertRows ::
   Foldable f =>
@@ -198,16 +198,16 @@ diskDatabaseInsertRows ::
   DiskDatabase
 diskDatabaseInsertRows name rows (DiskDatabase db) =
   DiskDatabase $
-  Map.insertWith
-    (\new old -> old <> new)
-    name
-    (LazyByteString.toStrict . runPut $ traverse_ Binary.put rows)
-    db
+    Map.insertWith
+      (\new old -> old <> new)
+      name
+      (LazyByteString.toStrict . runPut $ traverse_ Binary.put rows)
+      db
 
 diskDatabaseDeleteRelation :: Text -> DiskDatabase -> DiskDatabase
 diskDatabaseDeleteRelation name (DiskDatabase db) = DiskDatabase (Map.delete name db)
 
 diskDatabaseLookupRelation :: Text -> DiskDatabase -> Maybe (Set Row)
 diskDatabaseLookupRelation name (DiskDatabase db) =
-  Set.fromList . runGet (many (Binary.get @Row)) . LazyByteString.fromStrict <$>
-  Map.lookup name db
+  Set.fromList . runGet (many (Binary.get @Row)) . LazyByteString.fromStrict
+    <$> Map.lookup name db

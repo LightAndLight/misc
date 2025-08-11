@@ -1,48 +1,68 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE FlexibleContexts #-}
+
 module Eval where
 
-import Data.Vector (Vector)
-import Data.Text (Text)
-import Data.Map (Map)
-import qualified Data.Map.Strict as Map
-import Control.Monad.Writer (runWriter, MonadWriter (tell))
-import Data.Foldable (foldlM, foldl')
-import qualified Data.Set as Set
-import qualified Data.Vector as Vector
-import Data.Maybe (maybeToList, fromMaybe)
+import Control.Monad (guard)
+import Control.Monad.Writer (MonadWriter (tell), runWriter)
+import Data.Foldable (foldl', foldlM)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NonEmpty
-import Control.Monad (guard)
-import Data.Tuple (swap)
-import qualified Data.Text.Lazy as Lazy
+import Data.Map (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, maybeToList)
+import qualified Data.Set as Set
 import Data.String (fromString)
+import Data.Text (Text)
 import qualified Data.Text as Text
-import Database (Database (..), IsDatabase, Row (..), formatRow, databaseUpdate, databaseFact, lookupRelation, deleteRelation, databaseReplaceRelation, databaseLookupRelation)
-import Syntax (Program(..), Definition (..), Constant (..), BExpr (..), Expr (..), Binding (..), Relation (..))
+import qualified Data.Text.Lazy as Lazy
+import Data.Tuple (swap)
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
+import Database
+  ( Database (..)
+  , IsDatabase
+  , Row (..)
+  , databaseFact
+  , databaseLookupRelation
+  , databaseReplaceRelation
+  , databaseUpdate
+  , deleteRelation
+  , formatRow
+  , lookupRelation
+  )
+import Syntax
+  ( BExpr (..)
+  , Binding (..)
+  , Constant (..)
+  , Definition (..)
+  , Expr (..)
+  , Program (..)
+  , Relation (..)
+  )
 
-newtype Change = Change{ unChange :: Database }
+newtype Change = Change {unChange :: Database}
   deriving (Show, Eq, Semigroup, Monoid)
 
 subtractChange :: Change -> Change -> Change
 subtractChange (Change (Database db)) (Change (Database db')) =
   Change . Database $
-  foldl'
-    (\acc (k', v') ->
-      Map.update
-        (\v -> do
-          let v'' = Set.difference v v'
-          guard . not $ Set.null v''
-          pure v''
-        )
-        k'
-        acc
-    )
-    db
-    (Map.toList db')
+    foldl'
+      ( \acc (k', v') ->
+          Map.update
+            ( \v -> do
+                let v'' = Set.difference v v'
+                guard . not $ Set.null v''
+                pure v''
+            )
+            k'
+            acc
+      )
+      db
+      (Map.toList db')
 
 formatChanges :: [Change] -> Lazy.Text
 formatChanges = Lazy.intercalate (fromString "---\n") . fmap formatChange
@@ -50,13 +70,14 @@ formatChanges = Lazy.intercalate (fromString "---\n") . fmap formatChange
 formatChange :: Change -> Lazy.Text
 formatChange (Change (Database db)) =
   Map.foldMapWithKey
-    (\name rows ->
-      Lazy.fromStrict name <> fromString " = {" <>
-      if Set.null rows
-      then fromString "}\n"
-      else
-        Lazy.intercalate (fromString ",") ((fromString "\n  " <>) . formatRow <$> Set.toList rows) <>
-        fromString "\n}\n"
+    ( \name rows ->
+        Lazy.fromStrict name
+          <> fromString " = {"
+          <> if Set.null rows
+            then fromString "}\n"
+            else
+              Lazy.intercalate (fromString ",") ((fromString "\n  " <>) . formatRow <$> Set.toList rows)
+                <> fromString "\n}\n"
     )
     db
 
@@ -84,11 +105,11 @@ consequence db change (Rule name args body bindings) =
         (NonEmpty.nonEmpty $ Vector.toList body)
   in
     foldMap
-      (\match ->
-        Change $
-        databaseFact
-          name
-          (fmap (\arg -> fromMaybe (error $ "no value for " ++ Text.unpack arg) $ match Map.!? arg) args)
+      ( \match ->
+          Change $
+            databaseFact
+              name
+              (fmap (\arg -> fromMaybe (error $ "no value for " ++ Text.unpack arg) $ match Map.!? arg) args)
       )
       matches
 consequence _db _change (Fact name args) = Change $ databaseFact name args
@@ -134,24 +155,24 @@ matchBody db change@(Change db') bindings subst (Relation name args :| rels) =
       case Vector.find (\(Binding bname _) -> name == bname) bindings of
         Nothing ->
           Set.toList $
-          fromMaybe Set.empty (lookupRelation name db) <>
-          fromMaybe Set.empty (lookupRelation name db')
+            fromMaybe Set.empty (lookupRelation name db)
+              <> fromMaybe Set.empty (lookupRelation name db')
         Just (Binding _bname bexpr) ->
           genBinding subst bexpr
   , subst' <- maybeToList $ matchRow subst args row
   , match <-
       case NonEmpty.nonEmpty rels of
         Nothing -> [subst']
-        Just rels' -> matchBody db change bindings subst' rels' 
+        Just rels' -> matchBody db change bindings subst' rels'
   ]
 
 matchRow :: Map Text Constant -> Vector Expr -> Row -> Maybe (Map Text Constant)
 matchRow subst expected (Row actual)
   | Vector.length expected == Vector.length actual =
       Vector.foldl'
-        (\acc (e, c) -> do
-          subst' <- acc
-          unify subst' e c
+        ( \acc (e, c) -> do
+            subst' <- acc
+            unify subst' e c
         )
         (Just subst)
         (Vector.zip expected actual)
@@ -172,31 +193,32 @@ unify subst e c' =
       subst <$ guard (c == c')
     (Map exact m, CMap m') ->
       if exact
-      then do
-        -- Unify every key value pair in the constant map
-        foldlM
-          (\subst' (key, c'') -> do
-            e' <- Map.lookup key m
-            unify subst' e' c''
-          )
-          subst
-          (Map.toList m')
-      else do
-        -- Unify only the key value pairs in the variable map
-        foldlM
-          (\subst' (key, e') -> do
-            c'' <- Map.lookup key m'
-            unify subst' e' c''
-          )
-          subst
-          (Map.toList m)
+        then do
+          -- Unify every key value pair in the constant map
+          foldlM
+            ( \subst' (key, c'') -> do
+                e' <- Map.lookup key m
+                unify subst' e' c''
+            )
+            subst
+            (Map.toList m')
+        else do
+          -- Unify only the key value pairs in the variable map
+          foldlM
+            ( \subst' (key, e') -> do
+                c'' <- Map.lookup key m'
+                unify subst' e' c''
+            )
+            subst
+            (Map.toList m)
     (Map _exact _m, _) ->
       error "can't unify map with non-map"
-    (List l, CList l') | Vector.length l == Vector.length l' ->
-      foldlM
-        (\subst' (x, x') -> unify subst' x x')
-        subst
-        (Vector.zip l l')
+    (List l, CList l')
+      | Vector.length l == Vector.length l' ->
+          foldlM
+            (\subst' (x, x') -> unify subst' x x')
+            subst
+            (Vector.zip l l')
     (List _l, _) ->
       error "can't unify list with non-list"
 
@@ -242,7 +264,7 @@ eval_seminaive db (Program defs) = swap . runWriter $ go True mempty Nothing
   where
     go ::
       MonadWriter [Change] m =>
-      -- | Is this the first iteration?
+      -- \| Is this the first iteration?
       Bool ->
       Change ->
       Maybe Change ->
@@ -250,11 +272,11 @@ eval_seminaive db (Program defs) = swap . runWriter $ go True mempty Nothing
     go first !acc !delta = do
       let delta' = foldMap (consequence_seminaive first db acc delta) defs
       if delta' /= mempty
-      then do
-        tell $ pure delta'
-        go False (acc <> delta') (Just delta')
-      else
-        pure acc
+        then do
+          tell $ pure delta'
+          go False (acc <> delta') (Just delta')
+        else
+          pure acc
 
 {-# ANN consequence_seminaive "HLINT: ignore Use camelCase" #-}
 consequence_seminaive ::
@@ -276,20 +298,20 @@ consequence_seminaive _ db _acc Nothing rule =
   consequence db (Change mempty) rule
 consequence_seminaive _ db acc (Just delta) rule@(Rule _name _args body _bindings) =
   foldMap
-    (\(Relation focusName _) ->
-      consequence
-        (deleteRelation focusName db)
-        (Change $
-          databaseReplaceRelation
-            focusName
-            (fromMaybe Set.empty $ databaseLookupRelation focusName (unChange delta))
-            (unChange acc)
-        )
-        rule
+    ( \(Relation focusName _) ->
+        consequence
+          (deleteRelation focusName db)
+          ( Change $
+              databaseReplaceRelation
+                focusName
+                (fromMaybe Set.empty $ databaseLookupRelation focusName (unChange delta))
+                (unChange acc)
+          )
+          rule
     )
     (Vector.toList body)
-  {- Rules like `R(x) :- R(x)` will always produce a "new" tuple if the previous iteration
-  did. So our definition of new must exclude tuples that were produced in the previous
-  iteration.
-  -}
-  `subtractChange` delta
+    {- Rules like `R(x) :- R(x)` will always produce a "new" tuple if the previous iteration
+    did. So our definition of new must exclude tuples that were produced in the previous
+    iteration.
+    -}
+    `subtractChange` delta

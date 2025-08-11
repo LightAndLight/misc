@@ -1,24 +1,25 @@
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE TypeApplications #-}
-{-# OPTIONS_GHC -Wno-orphans #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
 module Syntax where
 
-import Data.Vector (Vector)
-import Data.Text (Text)
-import Data.Map.Strict (Map)
-import Numeric.Natural (Natural)
-import GHC.Generics (Generic)
 import Codec.Serialise (Serialise)
 import Data.Binary (Binary (..))
 import qualified Data.Binary as Binary
-import qualified Data.Vector as Vector
 import Data.Foldable (traverse_)
-import qualified Data.Text.Lazy as Lazy
-import Data.String (fromString)
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.String (fromString)
+import Data.Text (Text)
+import qualified Data.Text.Lazy as Lazy
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
+import GHC.Generics (Generic)
+import Numeric.Natural (Natural)
 
 instance Binary a => Binary (Vector a) where
   get = do
@@ -34,11 +35,11 @@ newtype Program = Program (Vector Definition)
   deriving newtype (Semigroup, Monoid)
 
 data Definition
-  -- |
-  -- @
-  -- {name}({args}) :- {body} where {bindings}.
-  -- @
-  = Rule
+  = -- |
+    -- @
+    -- {name}({args}) :- {body} where {bindings}.
+    -- @
+    Rule
       -- | Name
       !Text
       -- | Arguments
@@ -70,8 +71,8 @@ data Expr
   deriving (Show, Eq)
 
 data Binding
-  -- | @{name} is {bexpr}
-  = Binding
+  = -- | @{name} is {bexpr}
+    Binding
       -- | Name
       !Text
       -- | Value
@@ -99,10 +100,12 @@ formatConstant (CNatural n) =
 formatConstant (CBool b) =
   if b then fromString "true" else fromString "false"
 formatConstant (CList xs) =
-  fromString "[" <>
-  Lazy.intercalate (fromString ", ") (formatConstant <$> Vector.toList xs) <>
-  fromString "]"
+  fromString "["
+    <> Lazy.intercalate (fromString ", ") (formatConstant <$> Vector.toList xs)
+    <> fromString "]"
 formatConstant (CMap xs) =
-  fromString "[" <>
-  Lazy.intercalate (fromString ", ") ((\(k, v) -> formatConstant k <> fromString " = " <> formatConstant v) <$> Map.toList xs) <>
-  fromString "]"
+  fromString "["
+    <> Lazy.intercalate
+      (fromString ", ")
+      ((\(k, v) -> formatConstant k <> fromString " = " <> formatConstant v) <$> Map.toList xs)
+    <> fromString "]"

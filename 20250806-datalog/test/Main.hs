@@ -1,22 +1,23 @@
-{-# language OverloadedLists #-}
-{-# language OverloadedStrings #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
 {-# HLINT ignore "Use camelCase" #-}
 module Main where
 
-import Test.Hspec (hspec, describe, it, shouldBe)
-import Data.Text (Text)
-import GHC.Generics (Generic)
 import Data.Aeson (FromJSON)
 import qualified Data.Aeson as Json
 import qualified Data.Set as Set
 import Data.String (fromString)
-import Syntax
+import Data.Text (Text)
 import Database (Database (..), Row (..), databaseEmpty)
-import Eval (Change(..), eval_naive, eval_seminaive)
+import Eval (Change (..), eval_naive, eval_seminaive)
+import GHC.Generics (Generic)
+import Syntax
+import Test.Hspec (describe, hspec, it, shouldBe)
 
 data Movie
   = Movie
@@ -25,7 +26,8 @@ data Movie
   , actor :: Text
   , theatre :: Text
   , city :: Text
-  } deriving (Show, Eq, Generic, FromJSON)
+  }
+  deriving (Show, Eq, Generic, FromJSON)
 
 loadMovies :: IO [Movie]
 loadMovies = do
@@ -85,8 +87,10 @@ path_program =
 path_db :: Database
 path_db =
   Database
-    [ ( "edge"
-      , [ Row [CString "a", CString "b"]
+    [
+      ( "edge"
+      ,
+        [ Row [CString "a", CString "b"]
         , Row [CString "b", CString "c"]
         ]
       )
@@ -101,11 +105,12 @@ path_query =
 magic_path_db :: Database
 magic_path_db =
   Database
-    [ ( "edge"
+    [
+      ( "edge"
       , [ Row [CString "a", CString "b"]
         , Row [CString "b", CString "c"]
-        ] <>
-        Set.fromList [ Row [CString "x", CString . fromString $ "x" ++ show n ]| n <- [0::Int ..9]]
+        ]
+          <> Set.fromList [Row [CString "x", CString . fromString $ "x" ++ show n] | n <- [0 :: Int .. 9]]
       )
     ]
 
@@ -115,7 +120,14 @@ magic_path_bf_program =
     [ Fact "m_path_bf" [CString "a"]
     , Rule "m_path_bf" ["y"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"]] []
     , Rule "path_bf" ["x", "y"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"]] []
-    , Rule "path_bf" ["x", "z"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"], Relation "path_bf" [Var "y", Var "z"]] []
+    , Rule
+        "path_bf"
+        ["x", "z"]
+        [ Relation "m_path_bf" [Var "x"]
+        , Relation "edge" [Var "x", Var "y"]
+        , Relation "path_bf" [Var "y", Var "z"]
+        ]
+        []
     ]
 
 magic_path_bf_query :: Program
@@ -130,7 +142,14 @@ magic_path_fb_program =
     [ Fact "m_path_fb" [CString "c"]
     , Rule "m_path_fb" ["z"] [Relation "m_path_fb" [Var "z"]] []
     , Rule "path_fb" ["x", "y"] [Relation "m_path_fb" [Var "y"], Relation "edge" [Var "x", Var "y"]] []
-    , Rule "path_fb" ["x", "z"] [Relation "m_path_fb" [Var "z"], Relation "edge" [Var "x", Var "y"], Relation "path_fb" [Var "y", Var "z"]] []
+    , Rule
+        "path_fb"
+        ["x", "z"]
+        [ Relation "m_path_fb" [Var "z"]
+        , Relation "edge" [Var "x", Var "y"]
+        , Relation "path_fb" [Var "y", Var "z"]
+        ]
+        []
     ]
 
 main :: IO ()
@@ -161,15 +180,19 @@ main = do
         let
           expected =
             Database
-              [ ( "e"
-                , [ Row [CNatural 0, CNatural 1]
+              [
+                ( "e"
+                ,
+                  [ Row [CNatural 0, CNatural 1]
                   , Row [CNatural 1, CNatural 2]
                   , Row [CNatural 0, CNatural 3]
                   , Row [CNatural 2, CNatural 4]
                   ]
                 )
-              , ( "t"
-                , [ Row [CNatural 0, CNatural 2]
+              ,
+                ( "t"
+                ,
+                  [ Row [CNatural 0, CNatural 2]
                   , Row [CNatural 1, CNatural 4]
                   ]
                 )
@@ -184,15 +207,19 @@ main = do
         let
           expected =
             Database
-              [ ( "e"
-                , [ Row [CNatural 0, CNatural 1]
+              [
+                ( "e"
+                ,
+                  [ Row [CNatural 0, CNatural 1]
                   , Row [CNatural 1, CNatural 2]
                   , Row [CNatural 0, CNatural 3]
                   , Row [CNatural 2, CNatural 4]
                   ]
                 )
-              , ( "t"
-                , [ Row [CNatural 0, CNatural 1]
+              ,
+                ( "t"
+                ,
+                  [ Row [CNatural 0, CNatural 1]
                   , Row [CNatural 1, CNatural 2]
                   , Row [CNatural 0, CNatural 3]
                   , Row [CNatural 2, CNatural 4]
@@ -218,8 +245,10 @@ main = do
           let
             expected =
               Database
-                [ ( "path"
-                  , [ Row [CString "a", CString "b"]
+                [
+                  ( "path"
+                  ,
+                    [ Row [CString "a", CString "b"]
                     , Row [CString "b", CString "c"]
                     , Row [CString "a", CString "c"]
                     ]
@@ -234,16 +263,18 @@ main = do
           let
             query =
               Program
-              [ Rule "query" ["x"] [Relation "path" [Var "x", Constant $ CString "a"]] []
-              ]
+                [ Rule "query" ["x"] [Relation "path" [Var "x", Constant $ CString "a"]] []
+                ]
           let (_trace, Change actual_naive) = eval_naive db $ program <> query
           let (_trace, Change actual_seminaive) = eval_seminaive db $ program <> query
 
           let
             expected =
               Database
-                [ ( "path"
-                  , [ Row [CString "a", CString "b"]
+                [
+                  ( "path"
+                  ,
+                    [ Row [CString "a", CString "b"]
                     , Row [CString "b", CString "c"]
                     , Row [CString "a", CString "c"]
                     ]
@@ -271,8 +302,8 @@ main = do
       addition to the query's answers. When those answers are a small fraction of the
       total `path` relation, much work is wasted.
       -}
-      describe "path_bf(X, Y) :- m_path_bf(X), edge(X, Y). path_bf(X, Z) :- m_path_bf(X), edge(X, Y), path_bf(Y, Z)" $ do
-
+      describe
+        "path_bf(X, Y) :- m_path_bf(X), edge(X, Y). path_bf(X, Z) :- m_path_bf(X), edge(X, Y), path_bf(Y, Z)" $ do
         {-
         The `edge` relation:
 
@@ -326,14 +357,18 @@ main = do
             let
               expected =
                 Database
-                  [ ( "m_path_bf"
-                    , [ Row [CString "a"]
+                  [
+                    ( "m_path_bf"
+                    ,
+                      [ Row [CString "a"]
                       , Row [CString "b"]
                       , Row [CString "c"]
                       ]
                     )
-                  , ( "path_bf"
-                    , [ Row [CString "a", CString "b"]
+                  ,
+                    ( "path_bf"
+                    ,
+                      [ Row [CString "a", CString "b"]
                       , Row [CString "b", CString "c"]
                       , Row [CString "a", CString "c"]
                       ]
@@ -344,7 +379,8 @@ main = do
             actual_naive `shouldBe` expected
             actual_seminaive `shouldBe` expected
 
-      describe "path_fb(X, Y) :- m_path_fb(Y), edge(X, Y). path_fb(X, Z) :- m_path_fb(Z), edge(X, Y), path_fb(Y, Z)" $ do
+      describe
+        "path_fb(X, Y) :- m_path_fb(Y), edge(X, Y). path_fb(X, Z) :- m_path_fb(Z), edge(X, Y), path_fb(Y, Z)" $ do
         describe "edge(\"a\", \"b\"). edge(\"b\", \"c\"). edge(\"x\", ...)" $ do
           let program = magic_path_fb_program
 
@@ -352,20 +388,24 @@ main = do
             let
               query =
                 Program
-                [ Rule "query" ["x"] [Relation "path_fb" [Var "x", Constant $ CString "c"]] []
-                ]
+                  [ Rule "query" ["x"] [Relation "path_fb" [Var "x", Constant $ CString "c"]] []
+                  ]
             let (_trace, Change actual_naive) = eval_naive db $ program <> query
             let (_trace, Change actual_seminaive) = eval_seminaive db $ program <> query
 
             let
               expected =
                 Database
-                  [ ( "m_path_fb"
-                    , [ Row [CString "c"]
+                  [
+                    ( "m_path_fb"
+                    ,
+                      [ Row [CString "c"]
                       ]
                     )
-                  , ( "path_fb"
-                    , [ Row [CString "b", CString "c"]
+                  ,
+                    ( "path_fb"
+                    ,
+                      [ Row [CString "b", CString "c"]
                       , Row [CString "a", CString "c"]
                       ]
                     )

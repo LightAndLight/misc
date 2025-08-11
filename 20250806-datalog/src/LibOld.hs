@@ -1,58 +1,52 @@
 {-# LANGUAGE LambdaCase #-}
+
 module LibOld where
 
-import Data.Text (Text)
-import Data.Vector (Vector)
-import Data.Map (Map)
-import qualified Data.Text as Text
-import qualified Data.Map as Map
-import qualified Data.Vector as Vector
-import Control.Monad (guard)
-import Data.Maybe (maybeToList)
 import Control.Applicative ((<|>))
+import Control.Monad (guard)
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.Maybe (maybeToList)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Vector (Vector)
+import qualified Data.Vector as Vector
 
 data Expr
-  -- | Wildcard
-  --
-  -- @_@
-  = Wild
-
-  -- | Name
-  --
-  -- @x@
-  | Name !Text
-
-  -- | String
-  --
-  -- @"string"@
-  | String !Text
-
-  -- | Conjunction
-  --
-  -- @expr, expr@
-  | Conj Expr Expr
-
-  -- | Disjunction
-  --
-  -- @expr | expr@
-  | Disj Expr Expr
-
-  -- | Unification
-  --
-  -- @expr = expr@
-  | Eq Expr Expr
-
-  -- | Inequality
-  --
-  -- @expr != expr@
-  | Neq Expr Expr
-
-  -- | Relation
-  --
-  -- @rel(a, b)@
-  | Relation !Text (Vector Expr)
+  = -- | Wildcard
+    --
+    -- @_@
+    Wild
+  | -- | Name
+    --
+    -- @x@
+    Name !Text
+  | -- | String
+    --
+    -- @"string"@
+    String !Text
+  | -- | Conjunction
+    --
+    -- @expr, expr@
+    Conj Expr Expr
+  | -- | Disjunction
+    --
+    -- @expr | expr@
+    Disj Expr Expr
+  | -- | Unification
+    --
+    -- @expr = expr@
+    Eq Expr Expr
+  | -- | Inequality
+    --
+    -- @expr != expr@
+    Neq Expr Expr
+  | -- | Relation
+    --
+    -- @rel(a, b)@
+    Relation !Text (Vector Expr)
   deriving (Show, Eq)
 
 data Value
@@ -78,24 +72,25 @@ match ::
 match tables bindings args row
   | Vector.length args == Vector.length row =
       Vector.foldl'
-        (\acc x ->
-          case x of
-            (Wild, _) ->
-              acc
-            (Name name, value) | not $ Map.member name tables -> do
-              case Map.lookup name =<< acc of
-                Just (CEq value') -> do
-                  guard $ value == value'
-                  acc
-                Just (CNeq values _names) -> do
-                  guard . not $ Set.member value values
-                  Map.insert name (CEq value) <$> acc
-                Nothing ->
-                  Map.insert name (CEq value) <$> acc
-            (String str, VString str') | str == str' ->
-              acc
-            _ ->
-              Nothing
+        ( \acc x ->
+            case x of
+              (Wild, _) ->
+                acc
+              (Name name, value) | not $ Map.member name tables -> do
+                case Map.lookup name =<< acc of
+                  Just (CEq value') -> do
+                    guard $ value == value'
+                    acc
+                  Just (CNeq values _names) -> do
+                    guard . not $ Set.member value values
+                    Map.insert name (CEq value) <$> acc
+                  Nothing ->
+                    Map.insert name (CEq value) <$> acc
+              (String str, VString str')
+                | str == str' ->
+                    acc
+              _ ->
+                Nothing
         )
         (Just bindings)
         (Vector.zip args row)
@@ -113,58 +108,58 @@ antimatch tables bindings a b =
       Just bindings
     (Name name, Name name')
       | not $ Map.member name tables
-      , not $ Map.member name' tables
-      ->
-        case (Map.lookup name bindings, Map.lookup name' bindings) of
-          (Nothing, Nothing) ->
-            Just .
-            Map.insert name (CNeq mempty (Set.singleton name')) .
-            Map.insert name' (CNeq mempty (Set.singleton name)) $
-            bindings
-          (Nothing, Just{}) ->
-            Just $ Map.insert name (CNeq mempty (Set.singleton name')) bindings
-          (Just{}, Nothing) ->
-            Just $ Map.insert name' (CNeq mempty (Set.singleton name)) bindings
-          (Just (CEq value), Just (CEq value')) -> do
-            guard $ value /= value'
-            pure bindings
-          (Just (CNeq values names), Just (CNeq values' names')) ->
-            Just .
-            Map.insert name  (CNeq values (Set.insert name names)) .
-            Map.insert name' (CNeq values' (Set.insert name' names')) $
-            bindings
-          (_, Just (CNeq values' names')) ->
-            Just .
-            Map.insert name' (CNeq values' (Set.insert name' names')) $
-            bindings
-          (Just (CNeq values names), _) ->
-            Just .
-            Map.insert name (CNeq values (Set.insert name names)) $
-            bindings
+      , not $ Map.member name' tables ->
+          case (Map.lookup name bindings, Map.lookup name' bindings) of
+            (Nothing, Nothing) ->
+              Just
+                . Map.insert name (CNeq mempty (Set.singleton name'))
+                . Map.insert name' (CNeq mempty (Set.singleton name))
+                $ bindings
+            (Nothing, Just{}) ->
+              Just $ Map.insert name (CNeq mempty (Set.singleton name')) bindings
+            (Just{}, Nothing) ->
+              Just $ Map.insert name' (CNeq mempty (Set.singleton name)) bindings
+            (Just (CEq value), Just (CEq value')) -> do
+              guard $ value /= value'
+              pure bindings
+            (Just (CNeq values names), Just (CNeq values' names')) ->
+              Just
+                . Map.insert name (CNeq values (Set.insert name names))
+                . Map.insert name' (CNeq values' (Set.insert name' names'))
+                $ bindings
+            (_, Just (CNeq values' names')) ->
+              Just
+                . Map.insert name' (CNeq values' (Set.insert name' names'))
+                $ bindings
+            (Just (CNeq values names), _) ->
+              Just
+                . Map.insert name (CNeq values (Set.insert name names))
+                $ bindings
     (Name name, _)
       | not $ Map.member name tables
       , Just value <- toValue b -> do
-      case Map.lookup name bindings of
-        Just (CEq value') -> do
-          guard $ value /= value'
-          pure bindings
-        Just (CNeq values names) ->
-          Just $ Map.insert name (CNeq (Set.insert value values) names) bindings
-        Nothing ->
-          Just $ Map.insert name (CNeq (Set.singleton value) mempty) bindings
+          case Map.lookup name bindings of
+            Just (CEq value') -> do
+              guard $ value /= value'
+              pure bindings
+            Just (CNeq values names) ->
+              Just $ Map.insert name (CNeq (Set.insert value values) names) bindings
+            Nothing ->
+              Just $ Map.insert name (CNeq (Set.singleton value) mempty) bindings
     (_, Name name)
       | not $ Map.member name tables
       , Just value <- toValue a -> do
-      case Map.lookup name bindings of
-        Just (CEq value') -> do
-          guard $ value /= value'
-          pure bindings
-        Just (CNeq values names) ->
-          Just $ Map.insert name (CNeq (Set.insert value values) names) bindings
-        Nothing ->
-          Just $ Map.insert name (CNeq (Set.singleton value) mempty) bindings
-    (String str, String str') | str /= str' ->
-      Just bindings
+          case Map.lookup name bindings of
+            Just (CEq value') -> do
+              guard $ value /= value'
+              pure bindings
+            Just (CNeq values names) ->
+              Just $ Map.insert name (CNeq (Set.insert value values) names) bindings
+            Nothing ->
+              Just $ Map.insert name (CNeq (Set.singleton value) mempty) bindings
+    (String str, String str')
+      | str /= str' ->
+          Just bindings
     _ ->
       Nothing
 
