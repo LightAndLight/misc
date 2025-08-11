@@ -25,7 +25,6 @@ import qualified Options.Applicative as Options
 import qualified Codec.CBOR.Write as CBOR
 import Codec.CBOR.JSON (encodeValue, decodeValue)
 import Codec.CBOR.Read (deserialiseFromBytes)
-import Lib (Row(..), Constant(..), eval_seminaive, formatChange, diskDatabaseEmpty, storeDiskDatabase, loadDiskDatabase, diskDatabaseInsertRows)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Map as Map
 import Data.Maybe (maybeToList)
@@ -37,6 +36,9 @@ import qualified Data.Text.Lazy as LazyText
 import Streaming.Chars.Text (StreamText(..))
 import Text.Diagnostic.Sage (parseError)
 import qualified Text.Diagnostic as Diagnostic
+import Database (Row (..), diskDatabaseInsertRows, diskDatabaseEmpty, storeDiskDatabase, loadDiskDatabase)
+import Syntax (Constant (..))
+import Eval (eval_seminaive, formatChange)
 
 data Cli
   = Scrape FilePath

@@ -14,9 +14,10 @@ common warnings
 library
     import:           warnings
     exposed-modules:
-        Lib
-        LibOld
+        Database
+        Eval
         Parse
+        Syntax
     build-depends:
         base ^>=4.19.2.0,
         binary,
@@ -72,7 +73,6 @@ test-suite x20250806-datalog-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Main.hs
-    other-modules:    MainOld
     build-depends:
         aeson,
         base ^>=4.19.2.0,

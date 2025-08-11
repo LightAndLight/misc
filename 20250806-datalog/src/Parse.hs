@@ -1,6 +1,6 @@
 module Parse where
 
-import Lib (Program (..), Definition(..), Expr (..), Binding (..), BExpr (..), Relation (..), Constant (..))
+import Syntax (Program (..), Definition(..), Expr (..), Binding (..), BExpr (..), Relation (..), Constant (..))
 import Control.Applicative (many, optional, (<|>), empty)
 import qualified Data.Vector as Vector
 import Data.Text (Text)

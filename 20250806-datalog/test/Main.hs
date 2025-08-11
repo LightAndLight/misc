@@ -3,16 +3,20 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use camelCase" #-}
 module Main where
 
 import Test.Hspec (hspec, describe, it, shouldBe)
-import Lib
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Data.Aeson (FromJSON)
 import qualified Data.Aeson as Json
 import qualified Data.Set as Set
 import Data.String (fromString)
+import Syntax
+import Database (Database (..), Row (..), databaseEmpty)
+import Eval (Change(..), eval_naive, eval_seminaive)
 
 data Movie
   = Movie
@@ -29,13 +33,13 @@ loadMovies = do
   pure movies
 
 evaluation_1_input :: Program
-evaluation_1_input = Program [Rule "r" ["x"] [Relation "r" [Var "x"]]]
+evaluation_1_input = Program [Rule "r" ["x"] [Relation "r" [Var "x"]] []]
 
 evaluation_2_input :: Program
 evaluation_2_input =
   Program
-    [ Rule "r" ["x"] [Relation "s" [Var "x"], Relation "r" [Var "x"]]
-    , Fact "s" [Natural 0]
+    [ Rule "r" ["x"] [Relation "s" [Var "x"], Relation "r" [Var "x"]] []
+    , Fact "s" [CNatural 0]
     ]
 
 evaluation_3_input :: Program
@@ -47,41 +51,43 @@ evaluation_3_input =
         [ Relation "e" [Var "x", Var "y"]
         , Relation "e" [Var "y", Var "z"]
         ]
-    , Fact "e" [Natural 0, Natural 1]
-    , Fact "e" [Natural 1, Natural 2]
-    , Fact "e" [Natural 0, Natural 3]
-    , Fact "e" [Natural 2, Natural 4]
+        []
+    , Fact "e" [CNatural 0, CNatural 1]
+    , Fact "e" [CNatural 1, CNatural 2]
+    , Fact "e" [CNatural 0, CNatural 3]
+    , Fact "e" [CNatural 2, CNatural 4]
     ]
 
 evaluation_4_input :: Program
 evaluation_4_input =
   Program
-    [ Rule "t" ["x", "y"] [Relation "e" [Var "x", Var "y"]]
+    [ Rule "t" ["x", "y"] [Relation "e" [Var "x", Var "y"]] []
     , Rule
         "t"
         ["x", "z"]
         [ Relation "e" [Var "x", Var "y"]
         , Relation "t" [Var "y", Var "z"]
         ]
-    , Fact "e" [Natural 0, Natural 1]
-    , Fact "e" [Natural 1, Natural 2]
-    , Fact "e" [Natural 0, Natural 3]
-    , Fact "e" [Natural 2, Natural 4]
+        []
+    , Fact "e" [CNatural 0, CNatural 1]
+    , Fact "e" [CNatural 1, CNatural 2]
+    , Fact "e" [CNatural 0, CNatural 3]
+    , Fact "e" [CNatural 2, CNatural 4]
     ]
 
 path_program :: Program
 path_program =
   Program
-    [ Rule "path" ["x", "y"] [Relation "edge" [Var "x", Var "y"]]
-    , Rule "path" ["x", "z"] [Relation "edge" [Var "x", Var "y"], Relation "path" [Var "y", Var "z"]]
+    [ Rule "path" ["x", "y"] [Relation "edge" [Var "x", Var "y"]] []
+    , Rule "path" ["x", "z"] [Relation "edge" [Var "x", Var "y"], Relation "path" [Var "y", Var "z"]] []
     ]
 
 path_db :: Database
 path_db =
   Database
     [ ( "edge"
-      , [ Row [String "a", String "b"]
-        , Row [String "b", String "c"]
+      , [ Row [CString "a", CString "b"]
+        , Row [CString "b", CString "c"]
         ]
       )
     ]
@@ -89,42 +95,42 @@ path_db =
 path_query :: Program
 path_query =
   Program
-    [ Rule "query" ["x"] [Relation "path" [Constant $ String "a", Var "x"]]
+    [ Rule "query" ["x"] [Relation "path" [Constant $ CString "a", Var "x"]] []
     ]
 
 magic_path_db :: Database
 magic_path_db =
   Database
     [ ( "edge"
-      , [ Row [String "a", String "b"]
-        , Row [String "b", String "c"]
+      , [ Row [CString "a", CString "b"]
+        , Row [CString "b", CString "c"]
         ] <>
-        Set.fromList [ Row [String "x", String . fromString $ "x" ++ show n ]| n <- [0::Int ..9]]
+        Set.fromList [ Row [CString "x", CString . fromString $ "x" ++ show n ]| n <- [0::Int ..9]]
       )
     ]
 
 magic_path_bf_program :: Program
 magic_path_bf_program =
   Program
-    [ Fact "m_path_bf" [String "a"]
-    , Rule "m_path_bf" ["y"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"]]
-    , Rule "path_bf" ["x", "y"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"]]
-    , Rule "path_bf" ["x", "z"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"], Relation "path_bf" [Var "y", Var "z"]]
+    [ Fact "m_path_bf" [CString "a"]
+    , Rule "m_path_bf" ["y"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"]] []
+    , Rule "path_bf" ["x", "y"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"]] []
+    , Rule "path_bf" ["x", "z"] [Relation "m_path_bf" [Var "x"], Relation "edge" [Var "x", Var "y"], Relation "path_bf" [Var "y", Var "z"]] []
     ]
 
 magic_path_bf_query :: Program
 magic_path_bf_query =
   Program
-    [ Rule "query" ["x"] [Relation "path_bf" [Constant $ String "a", Var "x"]]
+    [ Rule "query" ["x"] [Relation "path_bf" [Constant $ CString "a", Var "x"]] []
     ]
 
 magic_path_fb_program :: Program
 magic_path_fb_program =
   Program
-    [ Fact "m_path_fb" [String "c"]
-    , Rule "m_path_fb" ["z"] [Relation "m_path_fb" [Var "z"]]
-    , Rule "path_fb" ["x", "y"] [Relation "m_path_fb" [Var "y"], Relation "edge" [Var "x", Var "y"]]
-    , Rule "path_fb" ["x", "z"] [Relation "m_path_fb" [Var "z"], Relation "edge" [Var "x", Var "y"], Relation "path_fb" [Var "y", Var "z"]]
+    [ Fact "m_path_fb" [CString "c"]
+    , Rule "m_path_fb" ["z"] [Relation "m_path_fb" [Var "z"]] []
+    , Rule "path_fb" ["x", "y"] [Relation "m_path_fb" [Var "y"], Relation "edge" [Var "x", Var "y"]] []
+    , Rule "path_fb" ["x", "z"] [Relation "m_path_fb" [Var "z"], Relation "edge" [Var "x", Var "y"], Relation "path_fb" [Var "y", Var "z"]] []
     ]
 
 main :: IO ()
@@ -144,7 +150,7 @@ main = do
         let input = evaluation_2_input
         let (_trace, Change actual_naive) = eval_naive databaseEmpty input
         let (_trace, Change actual_seminaive) = eval_seminaive databaseEmpty input
-        let expected = Database [("s", [Row [Natural 0]])]
+        let expected = Database [("s", [Row [CNatural 0]])]
         actual_naive `shouldBe` expected
         actual_seminaive `shouldBe` expected
 
@@ -156,15 +162,15 @@ main = do
           expected =
             Database
               [ ( "e"
-                , [ Row [Natural 0, Natural 1]
-                  , Row [Natural 1, Natural 2]
-                  , Row [Natural 0, Natural 3]
-                  , Row [Natural 2, Natural 4]
+                , [ Row [CNatural 0, CNatural 1]
+                  , Row [CNatural 1, CNatural 2]
+                  , Row [CNatural 0, CNatural 3]
+                  , Row [CNatural 2, CNatural 4]
                   ]
                 )
               , ( "t"
-                , [ Row [Natural 0, Natural 2]
-                  , Row [Natural 1, Natural 4]
+                , [ Row [CNatural 0, CNatural 2]
+                  , Row [CNatural 1, CNatural 4]
                   ]
                 )
               ]
@@ -179,20 +185,20 @@ main = do
           expected =
             Database
               [ ( "e"
-                , [ Row [Natural 0, Natural 1]
-                  , Row [Natural 1, Natural 2]
-                  , Row [Natural 0, Natural 3]
-                  , Row [Natural 2, Natural 4]
+                , [ Row [CNatural 0, CNatural 1]
+                  , Row [CNatural 1, CNatural 2]
+                  , Row [CNatural 0, CNatural 3]
+                  , Row [CNatural 2, CNatural 4]
                   ]
                 )
               , ( "t"
-                , [ Row [Natural 0, Natural 1]
-                  , Row [Natural 1, Natural 2]
-                  , Row [Natural 0, Natural 3]
-                  , Row [Natural 2, Natural 4]
-                  , Row [Natural 0, Natural 2]
-                  , Row [Natural 0, Natural 4]
-                  , Row [Natural 1, Natural 4]
+                , [ Row [CNatural 0, CNatural 1]
+                  , Row [CNatural 1, CNatural 2]
+                  , Row [CNatural 0, CNatural 3]
+                  , Row [CNatural 2, CNatural 4]
+                  , Row [CNatural 0, CNatural 2]
+                  , Row [CNatural 0, CNatural 4]
+                  , Row [CNatural 1, CNatural 4]
                   ]
                 )
               ]
@@ -213,12 +219,12 @@ main = do
             expected =
               Database
                 [ ( "path"
-                  , [ Row [String "a", String "b"]
-                    , Row [String "b", String "c"]
-                    , Row [String "a", String "c"]
+                  , [ Row [CString "a", CString "b"]
+                    , Row [CString "b", CString "c"]
+                    , Row [CString "a", CString "c"]
                     ]
                   )
-                , ("query", [Row [String "b"], Row [String "c"]])
+                , ("query", [Row [CString "b"], Row [CString "c"]])
                 ]
 
           it "naive" $ actual_naive `shouldBe` expected
@@ -228,7 +234,7 @@ main = do
           let
             query =
               Program
-              [ Rule "query" ["x"] [Relation "path" [Var "x", Constant $ String "a"]]
+              [ Rule "query" ["x"] [Relation "path" [Var "x", Constant $ CString "a"]] []
               ]
           let (_trace, Change actual_naive) = eval_naive db $ program <> query
           let (_trace, Change actual_seminaive) = eval_seminaive db $ program <> query
@@ -237,9 +243,9 @@ main = do
             expected =
               Database
                 [ ( "path"
-                  , [ Row [String "a", String "b"]
-                    , Row [String "b", String "c"]
-                    , Row [String "a", String "c"]
+                  , [ Row [CString "a", CString "b"]
+                    , Row [CString "b", CString "c"]
+                    , Row [CString "a", CString "c"]
                     ]
                   )
                 ]
@@ -321,18 +327,18 @@ main = do
               expected =
                 Database
                   [ ( "m_path_bf"
-                    , [ Row [String "a"]
-                      , Row [String "b"]
-                      , Row [String "c"]
+                    , [ Row [CString "a"]
+                      , Row [CString "b"]
+                      , Row [CString "c"]
                       ]
                     )
                   , ( "path_bf"
-                    , [ Row [String "a", String "b"]
-                      , Row [String "b", String "c"]
-                      , Row [String "a", String "c"]
+                    , [ Row [CString "a", CString "b"]
+                      , Row [CString "b", CString "c"]
+                      , Row [CString "a", CString "c"]
                       ]
                     )
-                  , ("query", [Row [String "b"], Row [String "c"]])
+                  , ("query", [Row [CString "b"], Row [CString "c"]])
                   ]
 
             actual_naive `shouldBe` expected
@@ -346,7 +352,7 @@ main = do
             let
               query =
                 Program
-                [ Rule "query" ["x"] [Relation "path_fb" [Var "x", Constant $ String "c"]]
+                [ Rule "query" ["x"] [Relation "path_fb" [Var "x", Constant $ CString "c"]] []
                 ]
             let (_trace, Change actual_naive) = eval_naive db $ program <> query
             let (_trace, Change actual_seminaive) = eval_seminaive db $ program <> query
@@ -355,15 +361,15 @@ main = do
               expected =
                 Database
                   [ ( "m_path_fb"
-                    , [ Row [String "c"]
+                    , [ Row [CString "c"]
                       ]
                     )
                   , ( "path_fb"
-                    , [ Row [String "b", String "c"]
-                      , Row [String "a", String "c"]
+                    , [ Row [CString "b", CString "c"]
+                      , Row [CString "a", CString "c"]
                       ]
                     )
-                  , ("query", [Row [String "a"], Row [String "b"]])
+                  , ("query", [Row [CString "a"], Row [CString "b"]])
                   ]
 
             actual_naive `shouldBe` expected
