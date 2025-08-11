@@ -8,7 +8,7 @@ module Eval where
 
 import Control.Monad (guard)
 import Control.Monad.Writer (MonadWriter (tell), runWriter)
-import Data.Foldable (foldl', foldlM)
+import Data.Foldable (fold, foldl', foldlM)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map (Map)
@@ -33,6 +33,9 @@ import Database
   , deleteRelation
   , formatRow
   , lookupRelation
+  , orderedSetDifference
+  , orderedSetNull
+  , orderedSetToList
   )
 import Syntax
   ( BExpr (..)
@@ -54,8 +57,8 @@ subtractChange (Change (Database db)) (Change (Database db')) =
       ( \acc (k', v') ->
           Map.update
             ( \v -> do
-                let v'' = Set.difference v v'
-                guard . not $ Set.null v''
+                let v'' = orderedSetDifference v v'
+                guard . not $ orderedSetNull v''
                 pure v''
             )
             k'
@@ -73,10 +76,10 @@ formatChange (Change (Database db)) =
     ( \name rows ->
         Lazy.fromStrict name
           <> fromString " = {"
-          <> if Set.null rows
+          <> if orderedSetNull rows
             then fromString "}\n"
             else
-              Lazy.intercalate (fromString ",") ((fromString "\n  " <>) . formatRow <$> Set.toList rows)
+              Lazy.intercalate (fromString ",") ((fromString "\n  " <>) . formatRow <$> orderedSetToList rows)
                 <> fromString "\n}\n"
     )
     db
@@ -150,21 +153,28 @@ matchBody ::
   NonEmpty Relation ->
   [Map Text Constant]
 matchBody db change@(Change db') bindings subst (Relation name args :| rels) =
-  [ match
-  | row <-
-      case Vector.find (\(Binding bname _) -> name == bname) bindings of
-        Nothing ->
-          Set.toList $
-            fromMaybe Set.empty (lookupRelation name db)
-              <> fromMaybe Set.empty (lookupRelation name db')
-        Just (Binding _bname bexpr) ->
-          genBinding subst bexpr
-  , subst' <- maybeToList $ matchRow subst args row
-  , match <-
-      case NonEmpty.nonEmpty rels of
-        Nothing -> [subst']
-        Just rels' -> matchBody db change bindings subst' rels'
-  ]
+  case Vector.find (\(Binding bname _) -> name == bname) bindings of
+    Just (Binding _bname bexpr) ->
+      [ match
+      | row <- genBinding subst bexpr
+      , subst' <- maybeToList $ matchRow subst args row
+      , match <-
+          case NonEmpty.nonEmpty rels of
+            Nothing -> [subst']
+            Just rels' -> matchBody db change bindings subst' rels'
+      ]
+    Nothing ->
+      [ match
+      | row <-
+          orderedSetToList $
+            fold (lookupRelation name db)
+              <> fold (lookupRelation name db')
+      , subst' <- maybeToList $ matchRow subst args row
+      , match <-
+          case NonEmpty.nonEmpty rels of
+            Nothing -> [subst']
+            Just rels' -> matchBody db change bindings subst' rels'
+      ]
 
 matchRow :: Map Text Constant -> Vector Expr -> Row -> Maybe (Map Text Constant)
 matchRow subst expected (Row actual)
@@ -304,7 +314,7 @@ consequence_seminaive _ db acc (Just delta) rule@(Rule _name _args body _binding
           ( Change $
               databaseReplaceRelation
                 focusName
-                (fromMaybe Set.empty $ databaseLookupRelation focusName (unChange delta))
+                (fold Set.empty $ databaseLookupRelation focusName (unChange delta))
                 (unChange acc)
           )
           rule

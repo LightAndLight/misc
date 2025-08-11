@@ -303,114 +303,116 @@ main = do
       total `path` relation, much work is wasted.
       -}
       describe
-        "path_bf(X, Y) :- m_path_bf(X), edge(X, Y). path_bf(X, Z) :- m_path_bf(X), edge(X, Y), path_bf(Y, Z)" $ do
-        {-
-        The `edge` relation:
+        "path_bf(X, Y) :- m_path_bf(X), edge(X, Y). path_bf(X, Z) :- m_path_bf(X), edge(X, Y), path_bf(Y, Z)"
+        $ do
+          {-
+          The `edge` relation:
 
-        ```prolog
-        edge(a, b).
-        edge(b, c).
-        edge(x, x0).
-        edge(x, x1).
-        ...
-        edge(x, x9)
-        ```
+          ```prolog
+          edge(a, b).
+          edge(b, c).
+          edge(x, x0).
+          edge(x, x1).
+          ...
+          edge(x, x9)
+          ```
 
-        While answering `query(X) :- path(a, X).`, all the `edge(x, _)` tuples will be
-        included in the `path` relation, which is then scanned for `path(a, _)` elements.
+          While answering `query(X) :- path(a, X).`, all the `edge(x, _)` tuples will be
+          included in the `path` relation, which is then scanned for `path(a, _)` elements.
 
-        The magic sets transformation of this query is:
+          The magic sets transformation of this query is:
 
-        ```prolog
-        m_path_bf(a).
-        m_path_bf(Y) :- m_path_bf(X), edge(X, Y).
+          ```prolog
+          m_path_bf(a).
+          m_path_bf(Y) :- m_path_bf(X), edge(X, Y).
 
-        path_bf(X, Y) :- m_path_bf(X), edge(X, Y).
-        path_bf(X, Z) :- m_path_bf(X), edge(X, Y), path_bf(Y, Z).
+          path_bf(X, Y) :- m_path_bf(X), edge(X, Y).
+          path_bf(X, Z) :- m_path_bf(X), edge(X, Y), path_bf(Y, Z).
 
-        query(X) :- path_bf(a, X).
-        ```
+          query(X) :- path_bf(a, X).
+          ```
 
-        An extra relation `m_path_bf` keeps track of relevant arguments to `path_bf`.
-        `m_path_bf` then forces `path_bf` to produce only tuples that are relevant to
-        answering the `query`.
+          An extra relation `m_path_bf` keeps track of relevant arguments to `path_bf`.
+          `m_path_bf` then forces `path_bf` to produce only tuples that are relevant to
+          answering the `query`.
 
-        The resulting database is:
+          The resulting database is:
 
-        ```
-        m_path_bf = {a, b, c}
-        path_bf = {(a, b), (b, c), (a, c)}
-        query = {b, c}
-        ```
+          ```
+          m_path_bf = {a, b, c}
+          path_bf = {(a, b), (b, c), (a, c)}
+          query = {b, c}
+          ```
 
-        `path_bf` lacks the `(x, _)` tuples stored in `edge`.
-        -}
+          `path_bf` lacks the `(x, _)` tuples stored in `edge`.
+          -}
 
-        describe "edge(\"a\", \"b\"). edge(\"b\", \"c\"). edge(\"x\", ...)" $ do
-          let program = magic_path_bf_program
+          describe "edge(\"a\", \"b\"). edge(\"b\", \"c\"). edge(\"x\", ...)" $ do
+            let program = magic_path_bf_program
 
-          it "query(X) :- path_bf(\"a\", X)" $ do
-            let query = magic_path_bf_query
-            let (_trace, Change actual_naive) = eval_naive db $ program <> query
-            let (_trace, Change actual_seminaive) = eval_seminaive db $ program <> query
+            it "query(X) :- path_bf(\"a\", X)" $ do
+              let query = magic_path_bf_query
+              let (_trace, Change actual_naive) = eval_naive db $ program <> query
+              let (_trace, Change actual_seminaive) = eval_seminaive db $ program <> query
 
-            let
-              expected =
-                Database
-                  [
-                    ( "m_path_bf"
+              let
+                expected =
+                  Database
+                    [
+                      ( "m_path_bf"
+                      ,
+                        [ Row [CString "a"]
+                        , Row [CString "b"]
+                        , Row [CString "c"]
+                        ]
+                      )
                     ,
-                      [ Row [CString "a"]
-                      , Row [CString "b"]
-                      , Row [CString "c"]
-                      ]
-                    )
-                  ,
-                    ( "path_bf"
-                    ,
-                      [ Row [CString "a", CString "b"]
-                      , Row [CString "b", CString "c"]
-                      , Row [CString "a", CString "c"]
-                      ]
-                    )
-                  , ("query", [Row [CString "b"], Row [CString "c"]])
-                  ]
+                      ( "path_bf"
+                      ,
+                        [ Row [CString "a", CString "b"]
+                        , Row [CString "b", CString "c"]
+                        , Row [CString "a", CString "c"]
+                        ]
+                      )
+                    , ("query", [Row [CString "b"], Row [CString "c"]])
+                    ]
 
-            actual_naive `shouldBe` expected
-            actual_seminaive `shouldBe` expected
+              actual_naive `shouldBe` expected
+              actual_seminaive `shouldBe` expected
 
       describe
-        "path_fb(X, Y) :- m_path_fb(Y), edge(X, Y). path_fb(X, Z) :- m_path_fb(Z), edge(X, Y), path_fb(Y, Z)" $ do
-        describe "edge(\"a\", \"b\"). edge(\"b\", \"c\"). edge(\"x\", ...)" $ do
-          let program = magic_path_fb_program
+        "path_fb(X, Y) :- m_path_fb(Y), edge(X, Y). path_fb(X, Z) :- m_path_fb(Z), edge(X, Y), path_fb(Y, Z)"
+        $ do
+          describe "edge(\"a\", \"b\"). edge(\"b\", \"c\"). edge(\"x\", ...)" $ do
+            let program = magic_path_fb_program
 
-          it "query(X) :- path_fb(X, \"c\")" $ do
-            let
-              query =
-                Program
-                  [ Rule "query" ["x"] [Relation "path_fb" [Var "x", Constant $ CString "c"]] []
-                  ]
-            let (_trace, Change actual_naive) = eval_naive db $ program <> query
-            let (_trace, Change actual_seminaive) = eval_seminaive db $ program <> query
+            it "query(X) :- path_fb(X, \"c\")" $ do
+              let
+                query =
+                  Program
+                    [ Rule "query" ["x"] [Relation "path_fb" [Var "x", Constant $ CString "c"]] []
+                    ]
+              let (_trace, Change actual_naive) = eval_naive db $ program <> query
+              let (_trace, Change actual_seminaive) = eval_seminaive db $ program <> query
 
-            let
-              expected =
-                Database
-                  [
-                    ( "m_path_fb"
+              let
+                expected =
+                  Database
+                    [
+                      ( "m_path_fb"
+                      ,
+                        [ Row [CString "c"]
+                        ]
+                      )
                     ,
-                      [ Row [CString "c"]
-                      ]
-                    )
-                  ,
-                    ( "path_fb"
-                    ,
-                      [ Row [CString "b", CString "c"]
-                      , Row [CString "a", CString "c"]
-                      ]
-                    )
-                  , ("query", [Row [CString "a"], Row [CString "b"]])
-                  ]
+                      ( "path_fb"
+                      ,
+                        [ Row [CString "b", CString "c"]
+                        , Row [CString "a", CString "c"]
+                        ]
+                      )
+                    , ("query", [Row [CString "a"], Row [CString "b"]])
+                    ]
 
-            actual_naive `shouldBe` expected
-            actual_seminaive `shouldBe` expected
+              actual_naive `shouldBe` expected
+              actual_seminaive `shouldBe` expected

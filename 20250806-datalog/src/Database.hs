@@ -4,7 +4,7 @@
 
 module Database where
 
-import Codec.Serialise (Serialise, readFileDeserialise)
+import Codec.Serialise (Serialise (..), readFileDeserialise)
 import Control.Applicative (many)
 import Control.Monad.Writer (runWriter, tell)
 import Data.Binary (Binary)
@@ -28,9 +28,52 @@ import qualified Data.Vector as Vector
 import Syntax (Constant, formatConstant)
 import System.IO.Posix.MMap (unsafeMMapFile)
 
+data OrderedSet a = OrderedSet (Set a) [a]
+  deriving (Show, Eq)
+
+instance (Ord a, Serialise a) => Serialise (OrderedSet a) where
+  encode (OrderedSet _seen xs) = encode xs
+  decode = foldr @[] orderedSetCons orderedSetEmpty <$> decode
+
+instance Ord a => Semigroup (OrderedSet a) where
+  a <> b = foldr orderedSetCons b (orderedSetToList a)
+
+instance Ord a => Monoid (OrderedSet a) where
+  mempty = orderedSetEmpty
+
+orderedSetToList :: OrderedSet a -> [a]
+orderedSetToList (OrderedSet _ xs) = xs
+
+orderedSetFromList :: Ord a => [a] -> OrderedSet a
+orderedSetFromList = foldr orderedSetCons orderedSetEmpty
+
+orderedSetEmpty :: OrderedSet a
+orderedSetEmpty = OrderedSet Set.empty []
+
+orderedSetSingleton :: a -> OrderedSet a
+orderedSetSingleton x = OrderedSet (Set.singleton x) [x]
+
+orderedSetCons :: Ord a => a -> OrderedSet a -> OrderedSet a
+orderedSetCons x set@(OrderedSet seen xs) =
+  if x `Set.member` seen
+    then set
+    else OrderedSet (Set.insert x seen) (x : xs)
+
+orderedSetMember :: Ord a => a -> OrderedSet a -> Bool
+orderedSetMember x (OrderedSet seen _xs) = Set.member x seen
+
+orderedSetNull :: OrderedSet a -> Bool
+orderedSetNull (OrderedSet _ xs) = null xs
+
+orderedSetDifference :: Ord a => OrderedSet a -> OrderedSet a -> OrderedSet a
+orderedSetDifference (OrderedSet seenA xsA) (OrderedSet seenB _xsB) =
+  OrderedSet
+    (seenA `Set.difference` seenB)
+    (filter (\x -> not $ Set.member x seenB) xsA)
+
 class IsDatabase db where
   deleteRelation :: Text -> db -> db
-  lookupRelation :: Text -> db -> Maybe (Set Row)
+  lookupRelation :: Text -> db -> Maybe (OrderedSet Row)
 
 newtype Row = Row (Vector Constant)
   deriving (Show, Eq, Ord, Serialise, Binary)
@@ -41,7 +84,7 @@ formatRow (Row items) =
     <> Lazy.intercalate (fromString ", ") (formatConstant <$> Vector.toList items)
     <> fromString ")"
 
-newtype Database = Database (Map Text (Set Row))
+newtype Database = Database (Map Text (OrderedSet Row))
   deriving (Show, Eq, Serialise)
 
 -- | When both 'Database's contain the same relation, the relation is merged using set union.
@@ -68,7 +111,7 @@ databaseFact ::
   -- | Arguments
   Vector Constant ->
   Database
-databaseFact name args = Database $ Map.singleton name (Set.singleton $ Row args)
+databaseFact name args = Database $ Map.singleton name (orderedSetSingleton $ Row args)
 
 databaseInsertRow ::
   -- | Relation name
@@ -80,10 +123,10 @@ databaseInsertRow ::
   (Bool, Database)
 databaseInsertRow relation row (Database db) =
   case Map.lookup relation db of
-    Just rows | Set.member row rows -> (False, Database db)
+    Just rows | orderedSetMember row rows -> (False, Database db)
     _ ->
       let
-        !db' = Database $ Map.insertWith (<>) relation (Set.singleton row) db
+        !db' = Database $ Map.insertWith (<>) relation (orderedSetSingleton row) db
       in
         (True, db')
 
@@ -107,7 +150,7 @@ databaseUpdate db (Database change) =
                     pure acc''
                 )
                 acc
-                (Set.toList rows)
+                (orderedSetToList rows)
           )
           db
           (Map.toList change)
@@ -118,7 +161,7 @@ databaseLookupRelation ::
   -- | Relation name
   Text ->
   Database ->
-  Maybe (Set Row)
+  Maybe (OrderedSet Row)
 databaseLookupRelation name (Database db) = Map.lookup name db
 
 databaseDeleteRelation ::
@@ -138,7 +181,7 @@ databaseRestrictRelation names (Database db) = Database (Map.restrictKeys db nam
 databaseReplaceRelation ::
   -- | Relation name
   Text ->
-  Set Row ->
+  OrderedSet Row ->
   Database ->
   Database
 databaseReplaceRelation name rows (Database db) = Database (Map.insert name rows db)
@@ -207,7 +250,7 @@ diskDatabaseInsertRows name rows (DiskDatabase db) =
 diskDatabaseDeleteRelation :: Text -> DiskDatabase -> DiskDatabase
 diskDatabaseDeleteRelation name (DiskDatabase db) = DiskDatabase (Map.delete name db)
 
-diskDatabaseLookupRelation :: Text -> DiskDatabase -> Maybe (Set Row)
+diskDatabaseLookupRelation :: Text -> DiskDatabase -> Maybe (OrderedSet Row)
 diskDatabaseLookupRelation name (DiskDatabase db) =
-  Set.fromList . runGet (many (Binary.get @Row)) . LazyByteString.fromStrict
+  orderedSetFromList . runGet (many (Binary.get @Row)) . LazyByteString.fromStrict
     <$> Map.lookup name db

@@ -65,9 +65,9 @@ data Expr
   | Constant !Constant
   | Map
       -- | Keys must match exactly
-      Bool
+      !Bool
       (Map Constant Expr)
-  | List (Vector Expr)
+  | List !(Vector Expr)
   deriving (Show, Eq)
 
 data Binding
