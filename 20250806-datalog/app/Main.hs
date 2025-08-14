@@ -29,7 +29,7 @@ import qualified Data.Text.Lazy as LazyText
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Database (
   Row (..), databaseInsertRows, databaseEmpty, storeDatabase, loadDatabase, databaseCreateUniqueIndex, Database(..), databaseLookupRelation, Table(..))
-import Eval (eval_seminaive, formatChange, Change(..))
+import Eval (eval_seminaive, formatChange, Change(..), evalBinding)
 import qualified Options.Applicative as Options
 import qualified Parse
 import Streaming.Chars.Text (StreamText (..))
@@ -43,11 +43,21 @@ import Text.Diagnostic.Sage (parseError)
 import Text.Parser.Sage (getParsersSage)
 import Text.Sage (parse)
 import qualified Data.Text as Text
+import qualified Data.ByteString.Lazy.Char8 as LazyByteString
+import Data.Aeson.Encode.Pretty (encodePretty)
 
 data Cli
   = Scrape FilePath
   | Db FilePath FilePath
-  | Query FilePath Text (Maybe Text)
+  | Query
+      -- | Database to query
+      FilePath
+      -- | Datalog program
+      Text
+      -- | Relation to select
+      (Maybe Text)
+      -- | Use JSON output
+      Bool
 
 cliParser :: Options.Parser Cli
 cliParser =
@@ -115,6 +125,7 @@ cliParser =
               <> Options.metavar "RELATION"
               <> Options.help "Print only the specified relation"
           ))
+        <*> Options.switch (Options.long "json" <> Options.help "Output JSON")
 
 main :: IO ()
 main = do
@@ -122,7 +133,7 @@ main = do
   case cli of
     Scrape output -> scrape output
     Db input output -> db input output
-    Query database input mOnly -> query database input mOnly
+    Query database input mOnly json -> query database input mOnly json
 
 scrape :: FilePath -> IO ()
 scrape output = do
@@ -266,8 +277,17 @@ valueToConstant (Json.Bool b) =
 valueToConstant (Json.Number n) = error $ "TODO: number " ++ show n
 valueToConstant Json.Null = error "TODO: null"
 
-query :: FilePath -> Text -> Maybe Text -> IO ()
-query databasePath input mOnly = do
+query ::
+  -- | Database to query
+  FilePath ->
+  -- | Datalog program
+  Text ->
+  -- | Relation to select
+  Maybe Text ->
+  -- | Output JSON
+  Bool ->
+  IO ()
+query databasePath input mOnly json = do
   program <-
     case parse (getParsersSage Parse.program) (StreamText input) of
       Left err -> do
@@ -279,7 +299,13 @@ query databasePath input mOnly = do
 
   for_ mOnly $ \only -> do
     let Program defs = program
-    case find (\case Fact name _ -> only == name; Rule name _ _ _ -> only == name) defs of
+    let
+      isOnlyDef =
+        \case
+          Fact name _ -> only == name
+          Rule name _ _ _ -> only == name
+          Binding name _ -> only == name
+    case find isOnlyDef defs of
       Just{} -> pure ()
       Nothing -> do
         putStrLn $ "error: relation " ++ Text.unpack only ++ " not found"
@@ -296,7 +322,15 @@ query databasePath input mOnly = do
       Just only | Change output' <- output ->
         case databaseLookupRelation only output' of
           Nothing -> do
-            pure . Change $ Database (Map.singleton only $ Table mempty Map.empty)
+            let Program defs = program
+            case find (\case; Binding name _ -> name == only; _ -> False) defs of
+              Just (Binding _name body) -> do
+                let bindingValue = evalBinding defs database output body
+                pure . Change $ Database (Map.singleton only $ Table bindingValue Map.empty)
+              _ ->
+                pure . Change $ Database (Map.singleton only $ Table mempty Map.empty)
           Just relation ->
             pure . Change $ Database (Map.singleton only $ Table relation Map.empty)
-  putStrLn . LazyText.unpack $ formatChange output'
+  if json
+    then LazyByteString.putStrLn $ encodePretty output'
+    else putStrLn . LazyText.unpack $ formatChange output'

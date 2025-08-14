@@ -2,6 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Database where
 
@@ -21,9 +22,16 @@ import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import Syntax (Constant, formatConstant)
 import GHC.Generics (Generic)
+import Data.Aeson (ToJSON)
+import GHC.IsList (IsList(..))
 
 data OrderedSet a = OrderedSet (Set a) [a]
   deriving (Show, Eq)
+
+instance Ord a => IsList (OrderedSet a) where
+  type Item (OrderedSet a) = a
+  toList = orderedSetToList
+  fromList = orderedSetFromList
 
 instance (Ord a, Serialise a) => Serialise (OrderedSet a) where
   encode (OrderedSet _seen xs) = encode xs
@@ -77,7 +85,7 @@ class IsDatabase db where
     Maybe (Map Constant Row)
 
 newtype Row = Row (Vector Constant)
-  deriving (Show, Eq, Ord, Serialise, Binary)
+  deriving (Show, Eq, Ord, Serialise, Binary, ToJSON)
 
 formatRow :: Row -> Lazy.Text
 formatRow (Row items) =

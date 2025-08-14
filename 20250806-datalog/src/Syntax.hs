@@ -20,6 +20,10 @@ import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
+import Data.Aeson (ToJSON (..))
+import qualified Data.Aeson as Json
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Key as Key
 
 instance Binary a => Binary (Vector a) where
   get = do
@@ -37,7 +41,7 @@ newtype Program = Program (Vector Definition)
 data Definition
   = -- |
     -- @
-    -- {name}({args}) :- {body} where {bindings}.
+    -- {name}({args}) :- {body} where {local_bindings}.
     -- @
     Rule
       -- | Name
@@ -46,13 +50,40 @@ data Definition
       !(Vector Text)
       -- | Body
       !(Vector Relation)
-      -- | Bindings
-      !(Vector Binding)
+      -- | Local bindings
+      !(Vector LocalBinding)
+
+    -- |
+    -- @
+    -- {name} = {bexpr}.
+    -- @
+  | Binding
+      -- | Name
+      !Text
+      -- | Value
+      !BExpr
   | Fact
       -- | Name
       !Text
       -- | Arguments
       !(Vector Constant)
+  deriving (Show, Eq)
+
+data BExpr
+  = BAggregate
+      -- | Aggregation function
+      !Text
+      -- | Collection to aggregate
+      !Stream
+  deriving (Show, Eq)
+
+data Stream
+  -- | @[ {item} | {source} ]@
+  = Stream
+      -- | Item
+      !(Vector Expr)
+      -- | Source
+      !Relation
   deriving (Show, Eq)
 
 data Relation
@@ -70,18 +101,18 @@ data Expr
   | List !(Vector Expr)
   deriving (Show, Eq)
 
-data Binding
-  = -- | @{name} is {bexpr}
-    Binding
+data LocalBinding
+  = -- | @{name} is {l_bexpr}
+    LocalBinding
       -- | Name
       !Text
       -- | Value
-      !BExpr
+      !LBExpr
   deriving (Show, Eq)
 
-data BExpr
-  = BKeys Expr
-  | BItems Expr
+data LBExpr
+  = LBKeys Expr
+  | LBItems Expr
   deriving (Show, Eq)
 
 data Constant
@@ -91,6 +122,20 @@ data Constant
   | CMap !(Map Constant Constant)
   | CList !(Vector Constant)
   deriving (Show, Eq, Ord, Generic, Serialise, Binary)
+
+instance ToJSON Constant where
+  toJSON (CBool b) = toJSON b
+  toJSON (CString s) = toJSON s
+  toJSON (CNatural n) = toJSON n
+  toJSON (CMap m) =
+    maybe
+      (toJSON $ Map.toList m)
+      (Json.Object . KeyMap.fromList)
+      (traverse
+        (\(k, v) -> case k of CString k' -> Just (Key.fromText k', toJSON v); _ -> Nothing)
+        (Map.toList m)
+      )
+  toJSON (CList xs) = toJSON xs
 
 toConstant :: Map Text Constant -> Expr -> Maybe Constant
 toConstant _ Wild = Nothing

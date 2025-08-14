@@ -8,16 +8,16 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Vector as Vector
 import Syntax
-  ( BExpr (..)
-  , Binding (..)
+  ( LBExpr (..)
+  , LocalBinding (..)
   , Constant (..)
   , Definition (..)
   , Expr (..)
   , Program (..)
-  , Relation (..)
+  , Relation (..), BExpr (..), Stream (..)
   )
 import Text.Parser.Char (satisfy, string)
-import Text.Parser.Combinators (sepBy, try, (<?>))
+import Text.Parser.Combinators (sepBy, try, (<?>), eof)
 import Text.Parser.Token
   ( TokenParsing
   , braces
@@ -32,22 +32,43 @@ import Text.Parser.Token
 
 program :: (TokenParsing m, Monad m) => m Program
 program =
-  Program . Vector.fromList <$> many definition
+  Program . Vector.fromList <$> many definition <* eof
 
 definition :: (TokenParsing m, Monad m) => m Definition
 definition =
-  ( \name params' mBody ->
-      case mBody of
-        Nothing ->
-          error "TODO: parse facts"
-        Just (body', bindings') ->
-          Rule name params' body' bindings'
+  ( \name rest ->
+    case rest of
+      Left (params', mBody) ->
+        case mBody of
+          Nothing ->
+            error "TODO: parse facts"
+          Just (body', bindings') ->
+            Rule name params' body' bindings'
+      Right body' ->
+        Binding name body'
   )
     <$> ident
-    <*> parens params
-    <*> optional ((,) <$ symbol ":-" <*> body <*> bindings)
+    <*> (Left <$> rulePart <|> Right <$> bindingPart)
     <* symbolic '.'
   where
+    rulePart =
+      (,)
+      <$> parens params
+      <*> optional ((,) <$ symbol ":-" <*> body <*> bindings)
+
+    bindingPart =
+      symbolic '=' *> bexpr
+
+    bexpr =
+      uncurry BAggregate <$ string "aggregate" <*>
+        parens ((,) <$> ident <* symbolic ',' <*> stream)
+
+    stream =
+      brackets $
+      Stream <$>
+        parens (Vector.fromList <$> sepBy expr (symbolic ',')) <* symbol "of" <*>
+        relation
+
     params = Vector.fromList <$> sepBy ident (symbolic ',')
 
     body =
@@ -63,12 +84,12 @@ definition =
     bindings =
       Vector.fromList
         <$ symbol "where"
-        <*> sepBy (Binding <$> ident <* symbolic '=' <*> bexpr) (symbolic ',')
+        <*> sepBy (LocalBinding <$> ident <* symbolic '=' <*> lbexpr) (symbolic ',')
         <|> pure Vector.empty
 
-    bexpr =
-      BKeys <$ string "keys" <*> parens expr
-        <|> BItems <$ string "items" <*> parens expr
+    lbexpr =
+      LBKeys <$ string "keys" <*> parens expr
+        <|> LBItems <$ string "items" <*> parens expr
 
 ident :: (TokenParsing m, Monad m) => m Text
 ident =
@@ -82,7 +103,12 @@ ident =
   where
     start = satisfy Char.isAlpha
     continue = satisfy Char.isAlphaNum
-    keywords = [fromString "where", fromString "true", fromString "false"]
+    keywords =
+      [ fromString "where"
+      , fromString "true"
+      , fromString "false"
+      , fromString "of"
+      ]
 
 expr :: (TokenParsing m, Monad m) => m Expr
 expr =

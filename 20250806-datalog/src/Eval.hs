@@ -35,21 +35,26 @@ import Database
   , lookupRelation
   , orderedSetDifference
   , orderedSetNull
-  , orderedSetToList, getIndex, orderedSetSingleton, Table (..)
+  , orderedSetToList, getIndex, orderedSetSingleton, Table (..), OrderedSet, orderedSetFromList
   )
 import Syntax
-  ( BExpr (..)
-  , Binding (..)
+  ( LBExpr (..)
+  , LocalBinding (..)
   , Constant (..)
   , Definition (..)
   , Expr (..)
   , Program (..)
-  , Relation (..), toConstant
+  , Relation (..), toConstant, BExpr (..), Stream (..)
   )
 import Data.List (sortBy)
+import Data.Aeson (ToJSON (..))
 
 newtype Change = Change {unChange :: Database}
   deriving (Show, Eq, Semigroup, Monoid)
+
+instance ToJSON Change where
+  toJSON (Change (Database db)) =
+    toJSON $ fmap (\(Table rows _indexes) -> orderedSetToList rows) db
 
 subtractChange :: Change -> Change -> Change
 subtractChange (Change (Database db)) (Change (Database db')) =
@@ -116,10 +121,11 @@ consequence db change (Rule name args body bindings) =
               (fmap (\arg -> fromMaybe (error $ "no value for " ++ Text.unpack arg) $ match Map.!? arg) args)
       )
       matches
+consequence _db _change Binding{} = mempty
 consequence _db _change (Fact name args) = Change $ databaseFact name args
 
-genBinding :: Map Text Constant -> BExpr -> [Row]
-genBinding subst (BKeys expr) =
+genBinding :: Map Text Constant -> LBExpr -> [Row]
+genBinding subst (LBKeys expr) =
   case expr of
     Wild -> error "argument to keys not bound"
     Var v ->
@@ -131,7 +137,7 @@ genBinding subst (BKeys expr) =
             _ -> error "argument to keys not a map"
     Map _exact m -> Row . pure <$> Map.keys m
     _ -> error "argument to keys not a map"
-genBinding subst (BItems expr) =
+genBinding subst (LBItems expr) =
   case expr of
     Wild -> error "argument to items not bound"
     Var v ->
@@ -149,13 +155,13 @@ matchBody ::
   db ->
   -- | Accumulated changes
   Change ->
-  Vector Binding ->
+  Vector LocalBinding ->
   Map Text Constant ->
   NonEmpty Relation ->
   [Map Text Constant]
 matchBody db change@(Change db') bindings subst (Relation name args :| rels) =
-  case Vector.find (\(Binding bname _) -> name == bname) bindings of
-    Just (Binding _bname bexpr) ->
+  case Vector.find (\(LocalBinding bname _) -> name == bname) bindings of
+    Just (LocalBinding _bname bexpr) ->
       [ match
       | row <- genBinding subst bexpr
       , subst' <- maybeToList $ matchRow subst args row
@@ -318,9 +324,42 @@ eval_seminaive db (Program (fmap (sipSorted db) -> defs)) = swap . runWriter $ g
         else
           pure acc
 
+evalBinding :: IsDatabase db => Vector Definition -> db -> Change -> BExpr -> OrderedSet Row
+evalBinding _defs db result (BAggregate fn (Stream item source)) =
+  if Vector.length item /= 2
+  then error $ "aggregate requires stream that yields 2-tuples, got " ++ show (Vector.length item)
+  else
+    let
+      key = item Vector.! 0
+      value = item Vector.! 1
+    in
+      orderedSetFromList . fmap (\(k, v) -> Row $ Vector.fromList [k, v]) . Map.toList $
+      foldl'
+        (\acc subst ->
+          Map.insertWith
+            combine
+            (fromMaybe (error "key in aggreate couldn't be instantiated") $ toConstant subst key)
+            (one $ fromMaybe (error "value in aggregate couldn't be instantiated") $ toConstant subst value)
+            acc
+        )
+        Map.empty
+        (matchBody db result mempty mempty (NonEmpty.singleton source))
+  where
+    (combine, one) =
+      case Text.unpack fn of
+        "count" ->
+          ( \a b ->
+              case (a, b) of
+                (CNatural m, CNatural n) -> CNatural (m + n)
+                _ -> error $ "aggregate count can't add " ++ show a ++ " and " ++ show b
+          , const $ CNatural 1
+          )
+        fn' -> error $ "unknown aggregation function: " ++ fn'
+
 -- | Sort the rules in each definition according to a "sideways information passing strategy".
 sipSorted :: IsDatabase db => db -> Definition -> Definition
 sipSorted _db def@Fact{} = def
+sipSorted _db def@Binding{} = def
 sipSorted db (Rule name params body bindings) =
   Rule name params body' bindings
   where
@@ -373,6 +412,8 @@ consequence_seminaive ::
   Maybe Change ->
   Definition ->
   Change
+consequence_seminaive _first _db _acc _delta Binding{} =
+  mempty
 consequence_seminaive True _db _acc _delta (Fact name args) =
   Change $ databaseFact name args
 consequence_seminaive False _db _acc _delta (Fact _name _args) =

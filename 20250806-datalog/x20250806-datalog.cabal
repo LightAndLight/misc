@@ -19,6 +19,7 @@ library
         Parse
         Syntax
     build-depends:
+        aeson,
         base ^>=4.19.2.0,
         binary,
         bytestring,
@@ -42,6 +43,7 @@ executable x20250806-datalog
     main-is:          Main.hs
     build-depends:
         aeson,
+        aeson-pretty,
         async,
         base ^>=4.19.2.0,
         binary,
