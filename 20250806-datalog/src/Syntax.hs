@@ -92,6 +92,14 @@ data Constant
   | CList !(Vector Constant)
   deriving (Show, Eq, Ord, Generic, Serialise, Binary)
 
+toConstant :: Map Text Constant -> Expr -> Maybe Constant
+toConstant _ Wild = Nothing
+toConstant subst (Var v) = Map.lookup v subst
+toConstant _subst (Constant c) = Just c
+toConstant subst (Map True m) = CMap <$> traverse (toConstant subst) m
+toConstant _ (Map False _) = Nothing
+toConstant subst (List xs) = CList <$> traverse (toConstant subst) xs
+
 formatConstant :: Constant -> Lazy.Text
 formatConstant (CString s) =
   fromString (show s)

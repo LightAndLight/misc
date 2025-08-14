@@ -1,0 +1,6 @@
+direct(from, to) :- derivation(from, {"inputDrvs" = inputDrvs, ..}), inputDrv(to)
+  where inputDrv = keys(inputDrvs).
+
+transitive(from, to) :- direct(from, x), transitive(x, to).
+
+cyclic(name) :- transitive(name, name).

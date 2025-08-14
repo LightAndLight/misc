@@ -1,0 +1,2 @@
+query(key) :- derivation(_, {"env" = env, ..}), envKey(key)
+  where envKey = keys(env).

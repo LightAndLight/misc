@@ -1,0 +1,4 @@
+direct(from, to) :- derivation(name, {"inputDrvs" = inputDrvs, ..}), inputDrv(to)
+  where inputDrv = keys(inputDrvs).
+
+reverseDepsCount = aggregate(count, [(to, from) | direct(from, to)]).

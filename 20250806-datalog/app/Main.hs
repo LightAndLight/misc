@@ -2,13 +2,14 @@
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Main where
 
 import Codec.CBOR.JSON (decodeValue, encodeValue)
 import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Write as CBOR
-import Control.Applicative ((<**>), (<|>))
+import Control.Applicative ((<**>), (<|>), optional)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently_, race_, replicateConcurrently)
 import Control.Concurrent.STM (atomically, retry)
@@ -19,25 +20,20 @@ import qualified Data.Aeson as Json
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy
-import Data.Foldable (traverse_)
+import Data.Foldable (traverse_, for_, find)
 import qualified Data.Map as Map
 import Data.Maybe (maybeToList)
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text.Lazy as LazyText
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
-import Database
-  ( Row (..)
-  , diskDatabaseEmpty
-  , diskDatabaseInsertRows
-  , loadDiskDatabase
-  , storeDiskDatabase
-  )
-import Eval (eval_seminaive, formatChange)
+import Database (
+  Row (..), databaseInsertRows, databaseEmpty, storeDatabase, loadDatabase, databaseCreateUniqueIndex, Database(..), databaseLookupRelation, Table(..))
+import Eval (eval_seminaive, formatChange, Change(..))
 import qualified Options.Applicative as Options
 import qualified Parse
 import Streaming.Chars.Text (StreamText (..))
-import Syntax (Constant (..))
+import Syntax (Constant (..), Program(..), Definition(..))
 import System.Directory (listDirectory)
 import System.Exit (ExitCode (..), exitFailure)
 import System.FilePath (takeExtension, (</>))
@@ -46,11 +42,12 @@ import qualified Text.Diagnostic as Diagnostic
 import Text.Diagnostic.Sage (parseError)
 import Text.Parser.Sage (getParsersSage)
 import Text.Sage (parse)
+import qualified Data.Text as Text
 
 data Cli
   = Scrape FilePath
   | Db FilePath FilePath
-  | Query FilePath Text
+  | Query FilePath Text (Maybe Text)
 
 cliParser :: Options.Parser Cli
 cliParser =
@@ -113,6 +110,11 @@ cliParser =
           ( Options.metavar "QUERY"
               <> Options.help "Query to run"
           )
+        <*> optional (Options.strOption
+          ( Options.long "only"
+              <> Options.metavar "RELATION"
+              <> Options.help "Print only the specified relation"
+          ))
 
 main :: IO ()
 main = do
@@ -120,7 +122,7 @@ main = do
   case cli of
     Scrape output -> scrape output
     Db input output -> db input output
-    Query database input -> query database input
+    Query database input mOnly -> query database input mOnly
 
 scrape :: FilePath -> IO ()
 scrape output = do
@@ -233,13 +235,14 @@ db input output = do
   putStrLn "Constructing database..."
   let
     !database =
-      diskDatabaseInsertRows
+      databaseCreateUniqueIndex (fromString "derivation") 0 $
+      databaseInsertRows
         (fromString "derivation")
         (objectToRows drvs)
-        diskDatabaseEmpty
+        databaseEmpty
 
   putStrLn $ "Writing " ++ output ++ "..."
-  storeDiskDatabase output database
+  storeDatabase output database
   putStrLn "done"
 
 objectToRows :: Json.Object -> [Row]
@@ -263,8 +266,8 @@ valueToConstant (Json.Bool b) =
 valueToConstant (Json.Number n) = error $ "TODO: number " ++ show n
 valueToConstant Json.Null = error "TODO: null"
 
-query :: FilePath -> Text -> IO ()
-query databasePath input = do
+query :: FilePath -> Text -> Maybe Text -> IO ()
+query databasePath input mOnly = do
   program <-
     case parse (getParsersSage Parse.program) (StreamText input) of
       Left err -> do
@@ -273,8 +276,27 @@ query databasePath input = do
             parseError err
         exitFailure
       Right a -> pure a
+
+  for_ mOnly $ \only -> do
+    let Program defs = program
+    case find (\case Fact name _ -> only == name; Rule name _ _ _ -> only == name) defs of
+      Just{} -> pure ()
+      Nothing -> do
+        putStrLn $ "error: relation " ++ Text.unpack only ++ " not found"
+        exitFailure
+
   putStrLn $ "Loading " ++ databasePath ++ "..."
-  database <- loadDiskDatabase databasePath
+  database <- loadDatabase databasePath
   putStrLn "Done"
   let (_changes, output) = eval_seminaive database program
-  putStrLn . LazyText.unpack $ formatChange output
+  output' <-
+    case mOnly of
+      Nothing ->
+        pure output
+      Just only | Change output' <- output ->
+        case databaseLookupRelation only output' of
+          Nothing -> do
+            pure . Change $ Database (Map.singleton only $ Table mempty Map.empty)
+          Just relation ->
+            pure . Change $ Database (Map.singleton only $ Table relation Map.empty)
+  putStrLn . LazyText.unpack $ formatChange output'

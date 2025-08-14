@@ -39,6 +39,66 @@ A toy Datalog-inspired language.
   whereas top-down evaluation only requires efficient lookup of individual facts.
   I want to use this toy language to ask questions about derivations in my Nix store.
 
+* Functions in rule heads
+
+  When you allow functions in rule heads, you can create rules that don't have a (finite) fixed point.
+  The following program generates the set of natural numbers, so naive/seminaive bottom-up evaluation won't terminate:
+
+  ```prolog
+  natural(0).
+  natural(n + 1) :- natural(n).
+  ```
+
+  Even so, some programs with functions-in-heads *do* have finite fixed points.
+  Consider `why_depends`, which computes transitive paths between nodes:
+
+  ```prolog
+  why_depends(X, Y, [X, Y]) :- edge(X, Y)
+  why_depends(X, Z, [X | Path]) :- edge(X, Y), why_depends(Y, Z, Path)
+  ```
+
+  It obviously has a fixed point, because the version with the paths removed also does:
+
+  ```prolog
+  why_depends(X, Y) :- edge(X, Y)
+  why_depends(X, Z) :- edge(X, Y), why_depends(Y, Z)
+  ```
+
+  I don't have a precise description of good and bad uses of functions.
+  I think it has something to do with the way that the production of new facts is constrained by known finite facts.
+
+  `r(0). r(X) :- r(X).` has a fixed point (`r = {0}`) even though it's trivially recursive,
+  because `r(X) :- r(X).` never produces new tuples.
+  But `r(0). r(X + 1) :- r(X).` has no fixed point,
+  because each application of `r(X + 1) :- r(X)` produces a new tuple.
+  If `X` is constrained to a set of finite values by another predicate, e.g.
+  `r(0). r(X + 1) :- e(X), r(X).` then eventually tuples will be generated that fall outside that finite set,
+  for which the rule will not fire, breaking the chain of infinite recursion.
+  `r(_, []). r(X, [X | Y]) :- r(X, Y)`
+
+  Maybe a good enough rule is that a self-recursive rule must be "guarded" by a finite predicate.
+  At least one variable supplied by the recursive call must be matched against a finite set.
+
+  That's not quite right. If we have cycles (`edge(x, x)`) then `why_depends` won't terminate.
+  It'll make increasingly large lists of `[x, x, ..., x]`.
+  Maybe this hints at a way of detecting runaway recursive rules.
+  Find an assignment of variables that equates the non-function-valued arguments of the rule head and its recursive call.
+  In the case of `why_depends` it's `Y = X`, giving `why_depends(X, Z, [X | Path]) :- edge(X, X), why_depends(X, Z, Path)`.
+  This shows that divergence will be achieved when there exists facts `edge(X, X)` (self-loops).
+  This could be ruled out by adding a `X != Y` constraint, but this doesn't account for longer paths that loop.
+  `why_depends(X, Z, [X | Path]) :- edge(X, Y), X != Y, why_depends(X, Z, Path)` passes test I just named,
+  but we can easy find a loop of length 2 by inlining and following the same process:
+
+  ```prolog
+  why_depends(X, Z, [X, Y | Path]) :- edge(X, Y), X != Y, edge(Y, Y1), Y != Y1, why_depends(Y1, Z, Path)
+  ```
+
+  `Y1 = X` gives
+
+  ```prolog
+  why_depends(X, Z, [X, Y | Path]) :- edge(X, Y), X != Y, edge(Y, X), Y != X, why_depends(X, Z, Path)
+  ```
+
 ## References
 
 * Abiteboul, S., Hull, R., & Vianu, V. (1995). Foundations of Databases. Retrieved from http://webdam.inria.fr/Alice/

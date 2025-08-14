@@ -13,7 +13,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, maybeToList)
+import Data.Maybe (fromMaybe, maybeToList, mapMaybe, listToMaybe)
 import qualified Data.Set as Set
 import Data.String (fromString)
 import Data.Text (Text)
@@ -35,7 +35,7 @@ import Database
   , lookupRelation
   , orderedSetDifference
   , orderedSetNull
-  , orderedSetToList
+  , orderedSetToList, getIndex, orderedSetSingleton, Table (..)
   )
 import Syntax
   ( BExpr (..)
@@ -44,8 +44,9 @@ import Syntax
   , Definition (..)
   , Expr (..)
   , Program (..)
-  , Relation (..)
+  , Relation (..), toConstant
   )
+import Data.List (sortBy)
 
 newtype Change = Change {unChange :: Database}
   deriving (Show, Eq, Semigroup, Monoid)
@@ -54,12 +55,12 @@ subtractChange :: Change -> Change -> Change
 subtractChange (Change (Database db)) (Change (Database db')) =
   Change . Database $
     foldl'
-      ( \acc (k', v') ->
+      ( \acc (k', Table v' _indexes) ->
           Map.update
-            ( \v -> do
+            ( \(Table v _indexes) -> do
                 let v'' = orderedSetDifference v v'
                 guard . not $ orderedSetNull v''
-                pure v''
+                pure $ Table v'' Map.empty
             )
             k'
             acc
@@ -73,7 +74,7 @@ formatChanges = Lazy.intercalate (fromString "---\n") . fmap formatChange
 formatChange :: Change -> Lazy.Text
 formatChange (Change (Database db)) =
   Map.foldMapWithKey
-    ( \name rows ->
+    ( \name (Table rows _indexes) ->
         Lazy.fromStrict name
           <> fromString " = {"
           <> if orderedSetNull rows
@@ -165,11 +166,7 @@ matchBody db change@(Change db') bindings subst (Relation name args :| rels) =
       ]
     Nothing ->
       [ match
-      | row <-
-          orderedSetToList $
-            fold (lookupRelation name db)
-              <> fold (lookupRelation name db')
-      , subst' <- maybeToList $ matchRow subst args row
+      | subst' <- matchRows db db' subst name args
       , match <-
           case NonEmpty.nonEmpty rels of
             Nothing -> [subst']
@@ -187,6 +184,39 @@ matchRow subst expected (Row actual)
         (Just subst)
         (Vector.zip expected actual)
   | otherwise = error $ "arity mismatch between " ++ show expected ++ " and " ++ show actual
+
+matchRows ::
+  IsDatabase db =>
+  db ->
+  -- | Accumulated changes
+  Database ->
+  Map Text Constant ->
+  -- | Relation name
+  Text ->
+  Vector Expr ->
+  [Map Text Constant]
+matchRows db db' subst name expected =
+  [ subst'
+  | row <-
+      orderedSetToList $
+        maybe
+          (fold $ lookupRelation name db)
+          (\(c, index) ->
+            maybe mempty orderedSetSingleton $ Map.lookup c index
+          )
+          mIndex <>
+        fold (lookupRelation name db')
+  , subst' <- maybeToList $ matchRow subst expected row
+  ]
+  where
+    constants =
+      [ (ix, c)
+      | (ix, e) <- zip [0::Int ..] (Vector.toList expected)
+      , c <- maybeToList $ toConstant subst e
+      ]
+
+    mIndex =
+      listToMaybe $ mapMaybe (\(ix, c) -> (,) c <$> getIndex name ix db) constants
 
 unify :: Map Text Constant -> Expr -> Constant -> Maybe (Map Text Constant)
 unify subst e c' =
@@ -270,7 +300,7 @@ Delta_{path}{i+1}(X, Y) :- edge(X, Y), Delta_{path}{i}(Y, Z).
 -}
 {-# ANN eval_seminaive "HLINT: ignore Use camelCase" #-}
 eval_seminaive :: forall db. IsDatabase db => db -> Program -> ([Change], Change)
-eval_seminaive db (Program defs) = swap . runWriter $ go True mempty Nothing
+eval_seminaive db (Program (fmap (sipSorted db) -> defs)) = swap . runWriter $ go True mempty Nothing
   where
     go ::
       MonadWriter [Change] m =>
@@ -287,6 +317,49 @@ eval_seminaive db (Program defs) = swap . runWriter $ go True mempty Nothing
           go False (acc <> delta') (Just delta')
         else
           pure acc
+
+-- | Sort the rules in each definition according to a "sideways information passing strategy".
+sipSorted :: IsDatabase db => db -> Definition -> Definition
+sipSorted _db def@Fact{} = def
+sipSorted db (Rule name params body bindings) =
+  Rule name params body' bindings
+  where
+    body' = Vector.fromList . sortBy sipOrdering $ Vector.toList body
+
+    sipOrdering :: Relation -> Relation -> Ordering
+    sipOrdering (Relation name1 args1) (Relation name2 args2) =
+      let
+        vars1 =
+          Map.fromList
+            [ (v, ix)
+            | (ix, e) <- zip [0::Int ..] (Vector.toList args1)
+            , Var v <- pure e
+            ]
+
+        vars2 =
+          Map.fromList
+            [ (v, ix)
+            | (ix, e) <- zip [0::Int ..] (Vector.toList args2)
+            , Var v <- pure e
+            ]
+
+        varsBoth :: [(Text, (Int, Int))]
+        varsBoth = Map.toList $ Map.intersectionWith (,) vars1 vars2
+
+        count1indexes =
+          length
+            [ ()
+            | (_v, (ix1, _ix2)) <- varsBoth
+            , _ <- maybeToList $ getIndex name1 ix1 db
+            ]
+        count2indexes =
+          length
+            [ ()
+            | (_v, (_ix1, ix2)) <- varsBoth
+            , _ <- maybeToList $ getIndex name2 ix2 db
+            ]
+      in
+        count1indexes `compare` count2indexes
 
 {-# ANN consequence_seminaive "HLINT: ignore Use camelCase" #-}
 consequence_seminaive ::
