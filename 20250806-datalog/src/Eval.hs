@@ -33,9 +33,7 @@ import Database
   , deleteRelation
   , formatRow
   , lookupRelation
-  , orderedSetDifference
-  , orderedSetNull
-  , orderedSetToList, getIndex, orderedSetSingleton, Table (..), OrderedSet, orderedSetFromList
+  , getIndex, Table (..)
   )
 import Syntax
   ( LBExpr (..)
@@ -48,13 +46,14 @@ import Syntax
   )
 import Data.List (sortBy)
 import Data.Aeson (ToJSON (..))
+import Data.Set (Set)
 
 newtype Change = Change {unChange :: Database}
   deriving (Show, Eq, Semigroup, Monoid)
 
 instance ToJSON Change where
   toJSON (Change (Database db)) =
-    toJSON $ fmap (\(Table rows _indexes) -> orderedSetToList rows) db
+    toJSON $ fmap (\(Table rows _indexes) -> Set.toList rows) db
 
 subtractChange :: Change -> Change -> Change
 subtractChange (Change (Database db)) (Change (Database db')) =
@@ -63,8 +62,8 @@ subtractChange (Change (Database db)) (Change (Database db')) =
       ( \acc (k', Table v' _indexes) ->
           Map.update
             ( \(Table v _indexes) -> do
-                let v'' = orderedSetDifference v v'
-                guard . not $ orderedSetNull v''
+                let v'' = Set.difference v v'
+                guard . not $ Set.null v''
                 pure $ Table v'' Map.empty
             )
             k'
@@ -82,10 +81,10 @@ formatChange (Change (Database db)) =
     ( \name (Table rows _indexes) ->
         Lazy.fromStrict name
           <> fromString " = {"
-          <> if orderedSetNull rows
+          <> if Set.null rows
             then fromString "}\n"
             else
-              Lazy.intercalate (fromString ",") ((fromString "\n  " <>) . formatRow <$> orderedSetToList rows)
+              Lazy.intercalate (fromString ",") ((fromString "\n  " <>) . formatRow <$> Set.toList rows)
                 <> fromString "\n}\n"
     )
     db
@@ -204,11 +203,11 @@ matchRows ::
 matchRows db db' subst name expected =
   [ subst'
   | row <-
-      orderedSetToList $
+      Set.toList $
         maybe
           (fold $ lookupRelation name db)
           (\(c, index) ->
-            maybe mempty orderedSetSingleton $ Map.lookup c index
+            maybe mempty Set.singleton $ Map.lookup c index
           )
           mIndex <>
         fold (lookupRelation name db')
@@ -324,7 +323,7 @@ eval_seminaive db (Program (fmap (sipSorted db) -> defs)) = swap . runWriter $ g
         else
           pure acc
 
-evalBinding :: IsDatabase db => Vector Definition -> db -> Change -> BExpr -> OrderedSet Row
+evalBinding :: IsDatabase db => Vector Definition -> db -> Change -> BExpr -> Set Row
 evalBinding _defs db result (BAggregate fn (Stream item source)) =
   if Vector.length item /= 2
   then error $ "aggregate requires stream that yields 2-tuples, got " ++ show (Vector.length item)
@@ -333,7 +332,7 @@ evalBinding _defs db result (BAggregate fn (Stream item source)) =
       key = item Vector.! 0
       value = item Vector.! 1
     in
-      orderedSetFromList . fmap (\(k, v) -> Row $ Vector.fromList [k, v]) . Map.toList $
+      Set.fromList . fmap (\(k, v) -> Row $ Vector.fromList [k, v]) . Map.toList $
       foldl'
         (\acc subst ->
           Map.insertWith

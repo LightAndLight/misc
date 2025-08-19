@@ -10,14 +10,14 @@ module Main where
 
 import Data.Aeson (FromJSON)
 import qualified Data.Aeson as Json
-import qualified Data.Set as Set
 import Data.String (fromString)
 import Data.Text (Text)
-import Database (Database (..), Row (..), databaseEmpty)
+import Database (Database (..), Row (..), databaseEmpty, Table (..))
 import Eval (Change (..), eval_naive, eval_seminaive)
 import GHC.Generics (Generic)
 import Syntax
 import Test.Hspec (describe, hspec, it, shouldBe)
+import qualified Data.Set as Set
 
 data Movie
   = Movie
@@ -90,9 +90,11 @@ path_db =
     [
       ( "edge"
       ,
-        [ Row [CString "a", CString "b"]
-        , Row [CString "b", CString "c"]
-        ]
+        Table
+          [ Row [CString "a", CString "b"]
+          , Row [CString "b", CString "c"]
+          ]
+          []
       )
     ]
 
@@ -107,10 +109,12 @@ magic_path_db =
   Database
     [
       ( "edge"
-      , [ Row [CString "a", CString "b"]
-        , Row [CString "b", CString "c"]
-        ]
-          <> Set.fromList [Row [CString "x", CString . fromString $ "x" ++ show n] | n <- [0 :: Int .. 9]]
+      , Table
+          ([ Row [CString "a", CString "b"]
+          , Row [CString "b", CString "c"]
+          ]
+          <> Set.fromList [Row [CString "x", CString . fromString $ "x" ++ show n] | n <- [0 :: Int .. 9]])
+          []
       )
     ]
 
@@ -169,7 +173,7 @@ main = do
         let input = evaluation_2_input
         let (_trace, Change actual_naive) = eval_naive databaseEmpty input
         let (_trace, Change actual_seminaive) = eval_seminaive databaseEmpty input
-        let expected = Database [("s", [Row [CNatural 0]])]
+        let expected = Database [("s", Table [Row [CNatural 0]] [])]
         actual_naive `shouldBe` expected
         actual_seminaive `shouldBe` expected
 
@@ -183,18 +187,22 @@ main = do
               [
                 ( "e"
                 ,
-                  [ Row [CNatural 0, CNatural 1]
-                  , Row [CNatural 1, CNatural 2]
-                  , Row [CNatural 0, CNatural 3]
-                  , Row [CNatural 2, CNatural 4]
-                  ]
+                  Table
+                    [ Row [CNatural 0, CNatural 1]
+                    , Row [CNatural 1, CNatural 2]
+                    , Row [CNatural 0, CNatural 3]
+                    , Row [CNatural 2, CNatural 4]
+                    ]
+                    []
                 )
               ,
                 ( "t"
                 ,
-                  [ Row [CNatural 0, CNatural 2]
-                  , Row [CNatural 1, CNatural 4]
-                  ]
+                  Table
+                    [ Row [CNatural 0, CNatural 2]
+                    , Row [CNatural 1, CNatural 4]
+                    ]
+                    []
                 )
               ]
         actual_naive `shouldBe` expected
@@ -210,23 +218,27 @@ main = do
               [
                 ( "e"
                 ,
-                  [ Row [CNatural 0, CNatural 1]
-                  , Row [CNatural 1, CNatural 2]
-                  , Row [CNatural 0, CNatural 3]
-                  , Row [CNatural 2, CNatural 4]
-                  ]
+                  Table
+                    [ Row [CNatural 0, CNatural 1]
+                    , Row [CNatural 1, CNatural 2]
+                    , Row [CNatural 0, CNatural 3]
+                    , Row [CNatural 2, CNatural 4]
+                    ]
+                    []
                 )
               ,
                 ( "t"
                 ,
-                  [ Row [CNatural 0, CNatural 1]
-                  , Row [CNatural 1, CNatural 2]
-                  , Row [CNatural 0, CNatural 3]
-                  , Row [CNatural 2, CNatural 4]
-                  , Row [CNatural 0, CNatural 2]
-                  , Row [CNatural 0, CNatural 4]
-                  , Row [CNatural 1, CNatural 4]
-                  ]
+                  Table
+                    [ Row [CNatural 0, CNatural 1]
+                    , Row [CNatural 1, CNatural 2]
+                    , Row [CNatural 0, CNatural 3]
+                    , Row [CNatural 2, CNatural 4]
+                    , Row [CNatural 0, CNatural 2]
+                    , Row [CNatural 0, CNatural 4]
+                    , Row [CNatural 1, CNatural 4]
+                    ]
+                    []
                 )
               ]
         actual_naive `shouldBe` expected
@@ -248,12 +260,14 @@ main = do
                 [
                   ( "path"
                   ,
-                    [ Row [CString "a", CString "b"]
-                    , Row [CString "b", CString "c"]
-                    , Row [CString "a", CString "c"]
-                    ]
+                    Table
+                      [ Row [CString "a", CString "b"]
+                      , Row [CString "b", CString "c"]
+                      , Row [CString "a", CString "c"]
+                      ]
+                      []
                   )
-                , ("query", [Row [CString "b"], Row [CString "c"]])
+                , ("query", Table [Row [CString "b"], Row [CString "c"]] [])
                 ]
 
           it "naive" $ actual_naive `shouldBe` expected
@@ -274,10 +288,12 @@ main = do
                 [
                   ( "path"
                   ,
-                    [ Row [CString "a", CString "b"]
-                    , Row [CString "b", CString "c"]
-                    , Row [CString "a", CString "c"]
-                    ]
+                    Table
+                      [ Row [CString "a", CString "b"]
+                      , Row [CString "b", CString "c"]
+                      , Row [CString "a", CString "c"]
+                      ]
+                      []
                   )
                 ]
 
@@ -361,20 +377,24 @@ main = do
                     [
                       ( "m_path_bf"
                       ,
-                        [ Row [CString "a"]
-                        , Row [CString "b"]
-                        , Row [CString "c"]
-                        ]
+                        Table
+                          [ Row [CString "a"]
+                          , Row [CString "b"]
+                          , Row [CString "c"]
+                          ]
+                          []
                       )
                     ,
                       ( "path_bf"
                       ,
-                        [ Row [CString "a", CString "b"]
-                        , Row [CString "b", CString "c"]
-                        , Row [CString "a", CString "c"]
-                        ]
+                        Table
+                          [ Row [CString "a", CString "b"]
+                          , Row [CString "b", CString "c"]
+                          , Row [CString "a", CString "c"]
+                          ]
+                          []
                       )
-                    , ("query", [Row [CString "b"], Row [CString "c"]])
+                    , ("query", Table [Row [CString "b"], Row [CString "c"]] [])
                     ]
 
               actual_naive `shouldBe` expected
@@ -401,17 +421,21 @@ main = do
                     [
                       ( "m_path_fb"
                       ,
-                        [ Row [CString "c"]
-                        ]
+                        Table
+                          [ Row [CString "c"]
+                          ]
+                          []
                       )
                     ,
                       ( "path_fb"
                       ,
-                        [ Row [CString "b", CString "c"]
-                        , Row [CString "a", CString "c"]
-                        ]
+                        Table
+                          [ Row [CString "b", CString "c"]
+                          , Row [CString "a", CString "c"]
+                          ]
+                          []
                       )
-                    , ("query", [Row [CString "a"], Row [CString "b"]])
+                    , ("query", Table [Row [CString "a"], Row [CString "b"]] [])
                     ]
 
               actual_naive `shouldBe` expected

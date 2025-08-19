@@ -1,6 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeFamilies #-}
 
@@ -23,59 +22,10 @@ import qualified Data.Vector as Vector
 import Syntax (Constant, formatConstant)
 import GHC.Generics (Generic)
 import Data.Aeson (ToJSON)
-import GHC.IsList (IsList(..))
-
-data OrderedSet a = OrderedSet (Set a) [a]
-  deriving (Show, Eq)
-
-instance Ord a => IsList (OrderedSet a) where
-  type Item (OrderedSet a) = a
-  toList = orderedSetToList
-  fromList = orderedSetFromList
-
-instance (Ord a, Serialise a) => Serialise (OrderedSet a) where
-  encode (OrderedSet _seen xs) = encode xs
-  decode = foldr @[] orderedSetCons orderedSetEmpty <$> decode
-
-instance Ord a => Semigroup (OrderedSet a) where
-  a <> b = foldr orderedSetCons b (orderedSetToList a)
-
-instance Ord a => Monoid (OrderedSet a) where
-  mempty = orderedSetEmpty
-
-orderedSetToList :: OrderedSet a -> [a]
-orderedSetToList (OrderedSet _ xs) = xs
-
-orderedSetFromList :: Ord a => [a] -> OrderedSet a
-orderedSetFromList = foldr orderedSetCons orderedSetEmpty
-
-orderedSetEmpty :: OrderedSet a
-orderedSetEmpty = OrderedSet Set.empty []
-
-orderedSetSingleton :: a -> OrderedSet a
-orderedSetSingleton x = OrderedSet (Set.singleton x) [x]
-
-orderedSetCons :: Ord a => a -> OrderedSet a -> OrderedSet a
-orderedSetCons x set@(OrderedSet seen xs) =
-  if x `Set.member` seen
-    then set
-    else OrderedSet (Set.insert x seen) (x : xs)
-
-orderedSetMember :: Ord a => a -> OrderedSet a -> Bool
-orderedSetMember x (OrderedSet seen _xs) = Set.member x seen
-
-orderedSetNull :: OrderedSet a -> Bool
-orderedSetNull (OrderedSet _ xs) = null xs
-
-orderedSetDifference :: Ord a => OrderedSet a -> OrderedSet a -> OrderedSet a
-orderedSetDifference (OrderedSet seenA xsA) (OrderedSet seenB _xsB) =
-  OrderedSet
-    (seenA `Set.difference` seenB)
-    (filter (\x -> not $ Set.member x seenB) xsA)
 
 class IsDatabase db where
   deleteRelation :: Text -> db -> db
-  lookupRelation :: Text -> db -> Maybe (OrderedSet Row)
+  lookupRelation :: Text -> db -> Maybe (Set Row)
   getIndex ::
     -- | Relation name
     Text ->
@@ -99,7 +49,7 @@ newtype Database = Database (Map Text Table)
 data Table
   = Table
       -- | Data
-      !(OrderedSet Row)
+      !(Set Row)
       -- | Indexes
       !(Map Int (Map Constant Row))
   deriving (Show, Eq, Generic)
@@ -140,7 +90,7 @@ databaseFact ::
   Database
 databaseFact name args =
   Database . Map.singleton name $
-  Table (orderedSetSingleton $ Row args) Map.empty
+  Table (Set.singleton $ Row args) Map.empty
 
 databaseInsertRow ::
   -- | Relation name
@@ -152,10 +102,10 @@ databaseInsertRow ::
   (Bool, Database)
 databaseInsertRow relation row (Database db) =
   case Map.lookup relation db of
-    Just (Table rows _indexes) | orderedSetMember row rows -> (False, Database db)
+    Just (Table rows _indexes) | Set.member row rows -> (False, Database db)
     _ ->
       let
-        !db' = Database $ Map.insertWith (<>) relation (Table (orderedSetSingleton row) Map.empty) db
+        !db' = Database $ Map.insertWith (<>) relation (Table (Set.singleton row) Map.empty) db
       in
         (True, db')
 
@@ -184,7 +134,7 @@ databaseCreateUniqueIndex ::
 databaseCreateUniqueIndex name col (Database db)
   | Just (Table rows indexes) <- Map.lookup name db =
       let
-        !index = Map.fromList [(row Vector.! col, Row row) | Row row <- orderedSetToList rows]
+        !index = Map.fromList [(row Vector.! col, Row row) | Row row <- Set.toList rows]
         !indexes' = Map.insert col index indexes
       in
         Database $ Map.insert name (Table rows indexes') db
@@ -210,7 +160,7 @@ databaseUpdate db (Database change) =
                     pure acc''
                 )
                 acc
-                (orderedSetToList rows)
+                (Set.toList rows)
           )
           db
           (Map.toList change)
@@ -221,7 +171,7 @@ databaseLookupRelation ::
   -- | Relation name
   Text ->
   Database ->
-  Maybe (OrderedSet Row)
+  Maybe (Set Row)
 databaseLookupRelation name (Database db) = do
   Table rows _indexes <- Map.lookup name db
   pure rows
@@ -243,7 +193,7 @@ databaseRestrictRelation names (Database db) = Database (Map.restrictKeys db nam
 databaseReplaceRelation ::
   -- | Relation name
   Text ->
-  OrderedSet Row ->
+  Set Row ->
   Database ->
   Database
 databaseReplaceRelation name rows (Database db) =
