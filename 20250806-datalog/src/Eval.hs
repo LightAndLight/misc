@@ -305,21 +305,19 @@ Delta_{path}{i+1}(X, Y) :- edge(X, Y), Delta_{path}{i}(Y, Z).
 -}
 {-# ANN eval_seminaive "HLINT: ignore Use camelCase" #-}
 eval_seminaive :: forall db. IsDatabase db => db -> Program -> ([Change], Change)
-eval_seminaive db (Program (fmap (sipSorted db) -> defs)) = swap . runWriter $ go True mempty Nothing
+eval_seminaive db (Program (fmap (sipSorted db) -> defs)) = swap . runWriter $ go mempty Nothing
   where
     go ::
       MonadWriter [Change] m =>
-      -- \| Is this the first iteration?
-      Bool ->
       Change ->
       Maybe Change ->
       m Change
-    go first !acc !delta = do
-      let delta' = foldMap (consequence_seminaive first db acc delta) defs
+    go !acc !delta = do
+      let delta' = foldMap (consequence_seminaive db acc delta) defs
       if delta' /= mempty
         then do
           tell $ pure delta'
-          go False (acc <> delta') (Just delta')
+          go (acc <> delta') (Just delta')
         else
           pure acc
 
@@ -402,8 +400,6 @@ sipSorted db (Rule name params body bindings) =
 {-# ANN consequence_seminaive "HLINT: ignore Use camelCase" #-}
 consequence_seminaive ::
   IsDatabase db =>
-  -- | Is this the first iteration?
-  Bool ->
   db ->
   -- | Accumulated changes
   Change ->
@@ -411,15 +407,15 @@ consequence_seminaive ::
   Maybe Change ->
   Definition ->
   Change
-consequence_seminaive _first _db _acc _delta Binding{} =
+consequence_seminaive _db _acc _delta Binding{} =
   mempty
-consequence_seminaive True _db _acc _delta (Fact name args) =
+consequence_seminaive _db _acc Nothing (Fact name args) =
   Change $ databaseFact name args
-consequence_seminaive False _db _acc _delta (Fact _name _args) =
+consequence_seminaive _db _acc Just{} (Fact _name _args) =
   mempty
-consequence_seminaive _ db _acc Nothing rule =
+consequence_seminaive db _acc Nothing rule =
   consequence db (Change mempty) rule
-consequence_seminaive _ db acc (Just delta) rule@(Rule _name _args body _bindings) =
+consequence_seminaive db acc (Just delta) rule@(Rule _name _args body _bindings) =
   foldMap
     ( \(Relation focusName _) ->
         consequence
