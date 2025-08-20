@@ -423,7 +423,7 @@ consequence_seminaive db acc (Just delta) rule@(Rule _name _args body _bindings)
           ( Change $
               databaseReplaceRelation
                 focusName
-                (fold Set.empty $ databaseLookupRelation focusName (unChange delta))
+                (fold $ databaseLookupRelation focusName (unChange delta))
                 (unChange acc)
           )
           rule
