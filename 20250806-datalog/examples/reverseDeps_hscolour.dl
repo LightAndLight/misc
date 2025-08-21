@@ -1,4 +1,2 @@
-dependsOn(from, to) :- derivation(from, {"inputDrvs" = inputDrvs, ..}), inputDrv(to)
+query(name) :- derivation(name, {"inputDrvs" = inputDrvs, ..}), inputDrv("/nix/store/5ah5wnabs6qw9mnqvv00ljisz2yiyqkp-hscolour-1.24.4.drv")
   where inputDrv = keys(inputDrvs).
-
-query(name) :- dependsOn(name, "/nix/store/5ah5wnabs6qw9mnqvv00ljisz2yiyqkp-hscolour-1.24.4.drv").
