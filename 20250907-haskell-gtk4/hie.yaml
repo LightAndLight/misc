@@ -1,0 +1,7 @@
+cradle:
+  cabal:
+    - path: "./basics/app/Main.hs"
+      component: "gtk4-basics:exe:gtk4-basics"
+
+    - path: "./hello_world/app/Main.hs"
+      component: "gtk4-hello-world:exe:gtk4-hello-world"
