@@ -1,0 +1,54 @@
+:root {
+  background-color: white;
+}
+
+.main {
+}
+
+.content-wrapper {
+}
+
+.content {
+}
+
+.title {
+  font-weight: 600;
+  font-size: 2rem;
+}
+
+.form-field {
+}
+
+.form-label {
+  font-weight: 600;
+}
+
+dropdown button {
+  border: 1px solid #89888d;
+  box-shadow: inset 0 0 0 1px #89888d;
+  border-radius: 0.25rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+  padding-left: 0.75rem;
+  padding-right: 0.75rem;
+}
+
+dropdown button {
+  background-image: none;
+}
+
+dropdown button:hover {
+  border: 1px solid #626168;
+  box-shadow: inset 0 0 0 1px #626168;
+}
+
+dropdown button label {
+  line-height:1rem;
+}
+
+dropdown arrow {
+  -gtk-icon-source: -gtk-icontheme("down-arrow-symbolic");
+  -gtk-icon-size: 0.44rem;
+  color: #3a383f;
+  min-width: 0.44rem;
+}

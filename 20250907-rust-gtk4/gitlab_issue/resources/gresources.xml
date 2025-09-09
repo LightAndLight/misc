@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+<gresource prefix="/gitlab_issue/icons/scalable/actions">
+<file compressed="true">down-arrow-symbolic.svg</file>
+</gresource>
+</gresources>

@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["basic", "empty", "gitlab_issue", "hello_world"]
+
+[profile.release]
+codegen-units = 1
+lto = true
