@@ -47,10 +47,7 @@ fn main() -> gio::glib::ExitCode {
 
         let dpi = (settings.gtk_xft_dpi() as f32) / (gtk::pango::SCALE as f32);
         println!("dpi: {dpi}");
-        let px_size = before_points_to_pixels /* pt */ * 1.0/72.0 /* in/pt */ * dpi /* px/in */;
-        println!("font size in px: {px_size}");
-
-        let rem = (96.0 / 72.0) * before_points_to_pixels;
+        let rem = before_points_to_pixels /* pt */ * 1.0/72.0 /* in/pt */ * dpi /* px/in */;
         println!("1rem = {rem}px");
 
         let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -59,9 +56,9 @@ fn main() -> gio::glib::ExitCode {
         let content_wrapper = adw::Clamp::new();
         main.append(&content_wrapper);
         content_wrapper.add_css_class("content-wrapper");
+        content_wrapper.set_unit(adw::LengthUnit::Px);
         content_wrapper.set_maximum_size((70.0 * rem) as i32);
         content_wrapper.set_tightening_threshold((70.0 * rem) as i32);
-        content_wrapper.set_unit(adw::LengthUnit::Px);
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content_wrapper.set_child(Some(&content));
@@ -72,17 +69,11 @@ fn main() -> gio::glib::ExitCode {
         title.add_css_class("title");
         title.set_halign(gtk::Align::Start);
 
-        /*
-        let type_field_wrapper = adw::Clamp::new();
-        content.append(&type_field_wrapper);
-        type_field_wrapper.set_maximum_size((13.0 * rem) as i32);
-        type_field_wrapper.set_tightening_threshold((13.0 * rem) as i32);
-        type_field_wrapper.set_unit(adw::LengthUnit::Px);
-        */
-
         let type_field = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&type_field);
         type_field.add_css_class("form-field");
+        type_field.set_halign(gtk::Align::Start);
+        type_field.set_width_request((13.0 * rem) as i32);
 
         let type_label = gtk::Label::new(Some("Type"));
         type_field.append(&type_label);
@@ -96,8 +87,22 @@ fn main() -> gio::glib::ExitCode {
         type_field.append(&type_dropdown);
         type_dropdown.set_selected(1);
 
+        let title_field = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(&title_field);
+        title_field.add_css_class("form-field");
+        title_field.set_halign(gtk::Align::Fill);
+
+        let title_label = gtk::Label::new(Some("Title (required)"));
+        title_field.append(&title_label);
+        title_label.add_css_class("form-label");
+        title_label.set_halign(gtk::Align::Start);
+
+        let title_input = gtk::Text::new();
+        title_field.append(&title_input);
+
         window.set_child(Some(&main));
         window.present();
+        GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
     });
 
     app.run()

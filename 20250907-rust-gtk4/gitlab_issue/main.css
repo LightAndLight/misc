@@ -13,7 +13,10 @@
 
 .title {
   font-weight: 600;
-  font-size: 2rem;
+  font-size: 1.875rem;
+  line-height: 125%;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
 }
 
 .form-field {
@@ -21,12 +24,14 @@
 
 .form-label {
   font-weight: 600;
+  margin-bottom: 0.5rem;
 }
 
-dropdown button {
+dropdown button, text {
   border: 1px solid #89888d;
   box-shadow: inset 0 0 0 1px #89888d;
   border-radius: 0.25rem;
+  line-height: 1rem;
   padding-top: 0.5rem;
   padding-bottom: 0.5rem;
   padding-left: 0.75rem;
@@ -42,8 +47,9 @@ dropdown button:hover {
   box-shadow: inset 0 0 0 1px #626168;
 }
 
-dropdown button label {
-  line-height:1rem;
+dropdown:focus-within button, text:focus {
+  box-shadow: inset 0 0 0 0.055rem #28272d, 0 0 0 0.16rem #1f75cb, 0 0 0 0.055rem #ffffff;
+  outline: none;
 }
 
 dropdown arrow {
@@ -51,4 +57,17 @@ dropdown arrow {
   -gtk-icon-size: 0.44rem;
   color: #3a383f;
   min-width: 0.44rem;
+}
+
+dropdown popover {
+  margin: 0;
+}
+
+dropdown popover row:hover, text selection {
+  background-color: #3584e4;
+  color: #ffffff;
+}
+
+dropdown popover row image {
+  opacity: 0;
 }
