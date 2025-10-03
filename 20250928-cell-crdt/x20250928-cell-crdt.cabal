@@ -21,6 +21,7 @@ library
         binary,
         bytestring,
         containers,
+        entropy,
         hashable,
         text >=2.0,
         time,
@@ -36,8 +37,10 @@ executable tsk
     build-depends:
         attoparsec,
         x20250928-cell-crdt,
+        barbies,
         base ^>=4.19.2.0,
         bytestring,
+        containers,
         directory,
         text,
         time,

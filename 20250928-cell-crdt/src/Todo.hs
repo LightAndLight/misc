@@ -1,3 +1,5 @@
+{-# language BinaryLiterals #-}
+{-# language ScopedTypeVariables #-}
 {-# language DuplicateRecordFields #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE NamedFieldPuns #-}
@@ -12,6 +14,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE BangPatterns #-}
 module Todo where
 
 import Data.Map.Strict (Map)
@@ -20,8 +23,6 @@ import Data.Hashable (Hashable, hash)
 import Data.Set (Set)
 import GHC.Generics (Generic)
 import Data.Text (Text)
-import Data.UUID (UUID)
-import qualified Data.UUID.V4 as UUID
 import qualified Data.Set as Set
 import Data.Functor.Identity (Identity (..))
 import Barbies
@@ -46,6 +47,11 @@ import Data.Char (ord)
 import Data.Binary.Get (runGet)
 import System.IO (IOMode(..), withFile)
 import qualified Data.ByteString as ByteString
+import Data.Word (Word16, Word8)
+import Data.Bits (shiftL, (.|.), FiniteBits, finiteBitSize)
+import System.Entropy (getEntropy)
+import Numeric.Natural (Natural)
+import Data.List (elemIndex)
 
 newtype StateId = StateId Int
   deriving (Show, Eq, Ord)
@@ -64,7 +70,97 @@ deriving instance (forall x. Show x => Show (f x)) => Show (Task f)
 deriving instance (forall x. Eq x => Eq (f x)) => Eq (Task f)
 deriving instance (forall x. Eq x => Eq (f x), forall x. Hashable x => Hashable (f x)) => Hashable (Task f)
 
-newtype TaskId = TaskId UUID
+taskDiff :: Task (Map StateId) -> Task Identity -> Task Update
+taskDiff task1 task2 =
+  Task
+    { title =
+        case Map.toList (title task1) of
+          [(_, title1)]
+            | title1 == runIdentity (title task2) -> None
+            | otherwise -> Set (runIdentity $ title task2)
+          _ -> error "TODO: resolving title conflict"
+    , description =
+        case Map.toList (description task1) of
+          [(_, description1)]
+            | description1 == runIdentity (description task2) -> None
+            | otherwise -> Set (runIdentity $ description task2)
+          _ -> error "TODO: resolving title conflict"
+    }
+
+data GID = GID !Word16 !Word16 !Word16 !Word16 !Word16
+  deriving (Show, Eq, Ord, Generic, Hashable, Binary)
+
+newGID :: IO GID
+newGID = do
+  bytes <- ByteString.unpack <$> getEntropy 10
+  pure $
+    GID
+      (word16FromBytes (bytes !! 0) (bytes !! 1))
+      (word16FromBytes (bytes !! 2) (bytes !! 3))
+      (word16FromBytes (bytes !! 4) (bytes !! 5))
+      (word16FromBytes (bytes !! 6) (bytes !! 7))
+      (word16FromBytes (bytes !! 8) (bytes !! 9))
+
+word16FromBytes :: Word8 -> Word8 -> Word16
+word16FromBytes a b = ((fromIntegral a :: Word16) `shiftL` 8) .|. fromIntegral b
+
+toBits :: forall a. (FiniteBits a, Integral a) => a -> [Bool]
+toBits = go (2^(finiteBitSize (undefined :: a) - 1))
+  where
+    go 0 _ = []
+    go !n !x =
+      let (q, r) = quotRem x n in
+      if q == 1 then True : go (n `div` 2) r else False : go (n `div` 2) r
+
+fromBits :: [Bool] -> Natural
+fromBits = snd . go
+  where
+    go [] = (0::Integer, 0)
+    go (b:bs) =
+      let
+        (n, x) = go bs
+        !x' = x + if b then 2^n else 0
+      in
+      (n + 1, x')
+
+alphabet :: String
+alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+
+gidToBase32 :: GID -> String
+gidToBase32 (GID a b c d e) =
+  go $ toBits a ++ toBits b ++ toBits c ++ toBits d ++ toBits e
+  where
+
+    base32Char :: [Bool] -> Char
+    base32Char bits = alphabet !! fromIntegral (fromBits bits)
+
+    go :: [Bool] -> String
+    go [] = []
+    go xs@(_:_) =
+      let (prefix, suffix) = splitAt 5 xs in
+      let !char = base32Char prefix in
+      char : go suffix
+
+gidFromBase32 :: String -> Maybe GID
+gidFromBase32 s
+  | length s == 16 = do
+      points <- traverse (`elemIndex` alphabet) s
+      let
+        bits =
+          [ bit
+          | point <- points
+          , bit <- drop 3 $ toBits (fromIntegral point :: Word8)
+          ]
+      Just $
+        GID
+          (fromIntegral . fromBits $ take 16 bits)
+          (fromIntegral . fromBits . take 16 $ drop 16 bits)
+          (fromIntegral . fromBits . take 16 $ drop 32 bits)
+          (fromIntegral . fromBits . take 16 $ drop 48 bits)
+          (fromIntegral . fromBits . take 16 $ drop 64 bits)
+  | otherwise = Nothing
+
+newtype TaskId = TaskId{ unTaskId :: GID }
   deriving (Show, Eq, Ord)
   deriving newtype (Hashable, Binary)
 
@@ -109,7 +205,7 @@ stateChange change@NewTask{ task } state = do
   let stateId = mkStateId (current state) change
   now <- getCurrentTime
 
-  taskId <- TaskId <$> UUID.nextRandom
+  taskId <- TaskId <$> newGID
   pure
     state
       { current = Set.singleton stateId
@@ -496,7 +592,7 @@ stateDeserialise path =
       Attoparsec.Fail{} -> throwIO $ InvalidHeaderException path
       Attoparsec.Done rest (version, _comment) ->
         case ByteString.Char8.unpack version of
-          "0" -> pure $ runGet stateBinaryGet rest
+          "0" -> pure $! runGet stateBinaryGet rest
           _ -> throwIO $ UnexpectedVersion path version
   where
     headerParser :: Attoparsec.Parser (ByteString, ByteString)
