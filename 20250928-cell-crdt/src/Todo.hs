@@ -1,170 +1,65 @@
-{-# language BinaryLiterals #-}
-{-# language ScopedTypeVariables #-}
-{-# language DuplicateRecordFields #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE QuantifiedConstraints #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
 module Todo where
 
+import Barbies
+import Barbies.Constraints (Dict (..))
+import Base32 (bitsFromBase32, bitsToBase32, fromBits, toBits)
+import Control.Applicative (Const (..))
+import Control.Exception (Exception, throwIO)
+import Control.Monad (guard, replicateM)
+import qualified Data.Attoparsec.ByteString.Lazy as Attoparsec
+import Data.Binary (Binary, Word64)
+import qualified Data.Binary as Binary
+import Data.Binary.Get (runGet)
+import Data.Binary.Put (runPut)
+import Data.Bits (shiftL, (.|.))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Char8 as ByteString.Char8
+import qualified Data.ByteString.Lazy as LazyByteString
+import Data.Char (ord)
+import Data.Fixed (Milli, Pico)
+import Data.Foldable (foldl', traverse_)
+import Data.Functor.Compose (Compose (..))
+import Data.Functor.Identity (Identity (..))
+import Data.Kind (Type)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Set (Set)
-import GHC.Generics (Generic)
-import Data.Text (Text)
-import qualified Data.Set as Set
-import Data.Functor.Identity (Identity (..))
-import Barbies
 import Data.Maybe (fromMaybe)
-import Control.Monad (guard, replicateM)
-import Data.Kind (Type)
-import Data.Foldable (foldl', traverse_)
-import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds, secondsToNominalDiffTime)
-import qualified Data.Binary as Binary
-import Data.ByteString (ByteString)
-import qualified Data.ByteString.Char8 as ByteString.Char8
-import Data.Binary (Binary, Word64)
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
-import Data.Fixed (Pico, Milli)
-import Data.Binary.Put (runPut)
-import qualified Data.ByteString.Lazy as LazyByteString
-import Barbies.Constraints (Dict(..))
-import qualified Data.Attoparsec.ByteString.Lazy as Attoparsec
-import Control.Exception (Exception, throwIO)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.String (fromString)
-import Data.Char (ord)
-import Data.Binary.Get (runGet)
-import System.IO (IOMode(..), withFile)
-import qualified Data.ByteString as ByteString
+import Data.Text (Text)
+import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds, secondsToNominalDiffTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Data.Word (Word16, Word8)
-import Data.Bits (shiftL, (.|.), FiniteBits, finiteBitSize)
+import GHC.Generics (Generic)
+import MD5 (MD5, hashMD5, md5ToBase32)
 import System.Entropy (getEntropy)
-import Numeric.Natural (Natural)
-import Data.List (elemIndex)
-import qualified Crypto.Hash.MD5 as MD5
-import Data.ByteString.Lazy (LazyByteString)
-import Data.Functor.Compose (Compose(..))
-import Control.Applicative (Const (..))
-
-data MD5 = MD5 !Word64 !Word64
-  deriving (Show, Eq, Ord, Generic, Binary)
-
-word64FromBytes ::
-  Word8 ->
-  Word8 ->
-  Word8 ->
-  Word8 ->
-  Word8 ->
-  Word8 ->
-  Word8 ->
-  Word8 ->
-  Word64
-word64FromBytes a b c d e f g h =
-  fromIntegral a `shiftL` 56 .|.
-  fromIntegral b `shiftL` 48 .|.
-  fromIntegral c `shiftL` 40 .|.
-  fromIntegral d `shiftL` 32 .|.
-  fromIntegral e `shiftL` 24 .|.
-  fromIntegral f `shiftL` 16 .|.
-  fromIntegral g `shiftL` 8 .|.
-  fromIntegral h
-
-hashMd5 :: LazyByteString -> MD5
-hashMd5 input =
-  MD5
-    (word64FromBytes (bytes !! 0) (bytes !! 1) (bytes !! 2) (bytes !! 3) (bytes !! 4) (bytes !! 5) (bytes !! 6) (bytes !! 7))
-    (word64FromBytes (bytes !! 8) (bytes !! 9) (bytes !! 10) (bytes !! 11) (bytes !! 12) (bytes !! 13) (bytes !! 14) (bytes !! 15))
-  where
-    bytes = ByteString.unpack . MD5.finalize $ MD5.startlazy input
-
-toBits :: forall a. (FiniteBits a, Integral a) => a -> [Bool]
-toBits = go (2^(finiteBitSize (undefined :: a) - 1))
-  where
-    go 0 _ = []
-    go !n !x =
-      let (q, r) = quotRem x n in
-      if q == 1 then True : go (n `div` 2) r else False : go (n `div` 2) r
-
-fromBits :: [Bool] -> Natural
-fromBits = snd . go
-  where
-    go [] = (0::Integer, 0)
-    go (b:bs) =
-      let
-        (n, x) = go bs
-        !x' = x + if b then 2^n else 0
-      in
-      (n + 1, x')
-
-bitsToBase32 :: [Bool] -> String
-bitsToBase32 = go
-  where
-    base32Char :: [Bool] -> Char
-    base32Char bits = base32Alphabet !! fromIntegral (fromBits bits)
-
-    go :: [Bool] -> String
-    go [] = []
-    go xs@(_:_) =
-      let (prefix, suffix) = splitAt 5 xs in
-      let !char = base32Char prefix in
-      char : go suffix
-
-bitsFromBase32 :: String -> Maybe [Bool]
-bitsFromBase32 s = do
-  points <- traverse (`elemIndex` base32Alphabet) s
-  pure
-    [ bit
-    | point <- points
-    , bit <- drop 3 $ toBits (fromIntegral point :: Word8)
-    ]
-
-md5ToBase32 :: MD5 -> String
-md5ToBase32 (MD5 a b) = bitsToBase32 $ toBits a ++ toBits b ++ [False, False]
-
-md5FromBase32 :: String -> Maybe MD5
-md5FromBase32 s
-  | length s == 26 = do
-      bits <- bitsFromBase32 s
-      pure $
-        MD5
-          (word64FromBytes
-            (fromIntegral . fromBits $ take 8 bits)
-            (fromIntegral . fromBits . take 8 $ drop 8 bits)
-            (fromIntegral . fromBits . take 8 $ drop 16 bits)
-            (fromIntegral . fromBits . take 8 $ drop 24 bits)
-            (fromIntegral . fromBits . take 8 $ drop 32 bits)
-            (fromIntegral . fromBits . take 8 $ drop 40 bits)
-            (fromIntegral . fromBits . take 8 $ drop 48 bits)
-            (fromIntegral . fromBits . take 8 $ drop 56 bits)
-          )
-          (word64FromBytes
-            (fromIntegral . fromBits . take 8 $ drop 64 bits)
-            (fromIntegral . fromBits . take 8 $ drop 72 bits)
-            (fromIntegral . fromBits . take 8 $ drop 80 bits)
-            (fromIntegral . fromBits . take 8 $ drop 88 bits)
-            (fromIntegral . fromBits . take 8 $ drop 96 bits)
-            (fromIntegral . fromBits . take 8 $ drop 104 bits)
-            (fromIntegral . fromBits . take 8 $ drop 112 bits)
-            (fromIntegral . fromBits . take 8 $ drop 120 bits)
-          )
-  | otherwise = Nothing
+import System.IO (IOMode (..), withFile)
 
 newtype StateId = StateId MD5
   deriving (Show, Eq, Ord)
   deriving newtype (Binary)
 
 mkStateId :: Set StateId -> Change -> StateId
-mkStateId parents change = StateId . hashMd5 . runPut $ putSet parents <> putChange change
+mkStateId parents change = StateId . hashMD5 . runPut $ putSet parents <> putChange change
 
 renderStateId :: StateId -> String
 renderStateId (StateId s) = md5ToBase32 s
@@ -173,7 +68,8 @@ data Task f
   = Task
   { title :: f Text
   , description :: f Text
-  } deriving (Generic, FunctorB, TraversableB, ApplicativeB, ConstraintsB, DistributiveB)
+  }
+  deriving (Generic, FunctorB, TraversableB, ApplicativeB, ConstraintsB, DistributiveB)
 
 deriving instance (forall x. Show x => Show (f x)) => Show (Task f)
 deriving instance (forall x. Eq x => Eq (f x)) => Eq (Task f)
@@ -181,36 +77,27 @@ deriving instance (forall x. Eq x => Eq (f x)) => Eq (Task f)
 taskFieldNames :: Task (Const Text)
 taskFieldNames =
   Task
-  { title = Const $ fromString "title"
-  , description = Const $ fromString "description"
-  }
-
-taskDiff :: Task (Map StateId) -> Task Identity -> Task Update
-taskDiff task1 task2 =
-  Task
-    { title =
-        case Map.toList (title task1) of
-          [(_, title1)] | title1 == runIdentity (title task2) -> None
-          _ -> Set (runIdentity $ title task2)
-    , description =
-        case Map.toList (description task1) of
-          [(_, description1)] | description1 == runIdentity (description task2) -> None
-          _ -> Set (runIdentity $ description task2)
+    { title = Const $ fromString "title"
+    , description = Const $ fromString "description"
     }
 
-data TaskDiffConflictedError
-  -- | A state ID mentioned in the target 'Task' was not present in the source 'Task'.
-  = StateIdNotFound
+newtype Getter (b :: (Type -> Type) -> Type) a = Getter (forall f. b f -> f a)
+
+taskGetters :: b ~ Task => b (Getter b)
+taskGetters = Task{title = Getter title, description = Getter description}
+
+data TaskDiffError
+  = -- | A state ID mentioned in the target 'Task' was not present in the source 'Task'.
+    StateIdNotFound
       -- | Field name
       !Text
       !StateId
-
-  -- | The target 'Task' appears to be 'Pick'ing a value by state ID from the source 'Task', but
-  -- the value in the target 'Task' doesn't match the value in the source 'Task'.
-  --
-  -- It's unclear whether the intention is to 'Pick' an existing value by state ID, or 'Set' the
-  -- field to the new, changed value.
-  | AmbiguousUpdate
+  | -- | The target 'Task' appears to be 'Pick'ing a value by state ID from the source 'Task', but
+    -- the value in the target 'Task' doesn't match the value in the source 'Task'.
+    --
+    -- It's unclear whether the intention is to 'Pick' an existing value by state ID, or 'Set' the
+    -- field to the new, changed value.
+    AmbiguousUpdate
       -- | Field name
       !Text
       !StateId
@@ -218,69 +105,66 @@ data TaskDiffConflictedError
       !Text
       -- | Actual
       !Text
-
-  -- | The target 'Task' still contains conflicts.
-  | UnresolvedConflicts
+  | -- | The target 'Task' still contains conflicts.
+    UnresolvedConflicts
       -- | Field name
       !Text
       -- | Conflicting states
       !(Set StateId)
-
-  -- | A field in the target 'Task' is missing a value.
-  | NoValue
+  | -- | A field in the target 'Task' is missing a value.
+    NoValue
       -- | Field name
       !Text
-
   deriving (Show, Eq)
 
 data Conflicted a
   = Resolved a
   | Conflicted (Map StateId a)
 
-taskDiffConflicted ::
+taskDiff ::
   Task (Map StateId) ->
   Task Conflicted ->
-  Either TaskDiffConflictedError (Task Update)
-taskDiffConflicted task1 task2 =
+  Either TaskDiffError (Task Update)
+taskDiff task1 task2 =
   bsequence $
-  Task
-    { title =
-        case title task2 of
-          Resolved title2 ->
-            case Map.toList (title task1) of
-              [(_, title1)] | title1 == title2 -> Compose $ Right None
-              _ -> Compose . Right $ Set title2
-          Conflicted titles ->
-            case Map.toList titles of
-              [] -> Compose . Left $ NoValue (fromString "title")
-              [(stateId, title2)] ->
-                case Map.lookup stateId (title task1) of
-                  Just title1 ->
-                    if title1 == title2
-                    then Compose . Right $ Pick stateId
-                    else Compose . Left $ AmbiguousUpdate (fromString "title") stateId title1 title2
-                  Nothing -> Compose . Left $ StateIdNotFound (fromString "title") stateId
-              _ ->
-                Compose . Left $ UnresolvedConflicts (fromString "title") (Map.keysSet titles)
-    , description =
-        case description task2 of
-          Resolved description2 ->
-            case Map.toList (description task1) of
-              [(_, description1)] | description1 == description2 -> Compose $ Right None
-              _ -> Compose . Right $ Set description2
-          Conflicted descriptions ->
-            case Map.toList descriptions of
-              [] -> Compose . Left $ NoValue (fromString "description")
-              [(stateId, description2)] ->
-                case Map.lookup stateId (description task1) of
-                  Just description1 ->
-                    if description1 == description2
-                    then Compose . Right $ Pick stateId
-                    else Compose . Left $ AmbiguousUpdate (fromString "description") stateId description1 description2
-                  Nothing -> Compose . Left $ StateIdNotFound (fromString "description") stateId
-              _ ->
-                Compose . Left $ UnresolvedConflicts (fromString "description") (Map.keysSet descriptions)
-    }
+    Task
+      { title =
+          case title task2 of
+            Resolved title2 ->
+              case Map.toList (title task1) of
+                [(_, title1)] | title1 == title2 -> Compose $ Right None
+                _ -> Compose . Right $ Set title2
+            Conflicted titles ->
+              case Map.toList titles of
+                [] -> Compose . Left $ NoValue (fromString "title")
+                [(stateId, title2)] ->
+                  case Map.lookup stateId (title task1) of
+                    Just title1 ->
+                      if title1 == title2
+                        then Compose . Right $ Pick stateId
+                        else Compose . Left $ AmbiguousUpdate (fromString "title") stateId title1 title2
+                    Nothing -> Compose . Left $ StateIdNotFound (fromString "title") stateId
+                _ ->
+                  Compose . Left $ UnresolvedConflicts (fromString "title") (Map.keysSet titles)
+      , description =
+          case description task2 of
+            Resolved description2 ->
+              case Map.toList (description task1) of
+                [(_, description1)] | description1 == description2 -> Compose $ Right None
+                _ -> Compose . Right $ Set description2
+            Conflicted descriptions ->
+              case Map.toList descriptions of
+                [] -> Compose . Left $ NoValue (fromString "description")
+                [(stateId, description2)] ->
+                  case Map.lookup stateId (description task1) of
+                    Just description1 ->
+                      if description1 == description2
+                        then Compose . Right $ Pick stateId
+                        else Compose . Left $ AmbiguousUpdate (fromString "description") stateId description1 description2
+                    Nothing -> Compose . Left $ StateIdNotFound (fromString "description") stateId
+                _ ->
+                  Compose . Left $ UnresolvedConflicts (fromString "description") (Map.keysSet descriptions)
+      }
 
 data GID = GID !Word16 !Word16 !Word16 !Word16 !Word16
   deriving (Show, Eq, Ord, Generic, Binary)
@@ -299,9 +183,6 @@ newGID = do
 word16FromBytes :: Word8 -> Word8 -> Word16
 word16FromBytes a b = ((fromIntegral a :: Word16) `shiftL` 8) .|. fromIntegral b
 
-base32Alphabet :: String
-base32Alphabet = "abcdefghijklmnopqrstuvwxyz234567"
-
 gidToBase32 :: GID -> String
 gidToBase32 (GID a b c d e) =
   bitsToBase32 $ toBits a ++ toBits b ++ toBits c ++ toBits d ++ toBits e
@@ -319,14 +200,15 @@ gidFromBase32 s
           (fromIntegral . fromBits . take 16 $ drop 64 bits)
   | otherwise = Nothing
 
-newtype TaskId = TaskId{ unTaskId :: GID }
+newtype TaskId = TaskId {unTaskId :: GID}
   deriving (Show, Eq, Ord)
   deriving newtype (Binary)
 
 data Metadata
   = Metadata
   { createdAt :: UTCTime
-  } deriving (Show, Eq)
+  }
+  deriving (Show, Eq)
 
 data Update a
   = None
@@ -335,12 +217,12 @@ data Update a
   deriving (Show, Eq, Generic)
 
 data Change
-  = NewTask{ task :: !(Task Identity) }
-  | UpdateTask{ taskId :: TaskId, updateTask :: !(Task Update) }
+  = NewTask {task :: !(Task Identity)}
+  | UpdateTask {taskId :: !TaskId, updateTask :: !(Task Update)}
   deriving (Show, Eq, Generic)
 
-data Commit = Commit{ parents :: Set StateId, change :: Change }
-  deriving Show
+data Commit = Commit {parents :: !(Set StateId), change :: !Change}
+  deriving (Show)
 
 data State
   = State
@@ -348,7 +230,8 @@ data State
   , tasks :: !(Map TaskId (Task (Map StateId)))
   , taskMetadata :: !(Map TaskId Metadata)
   , history :: !(Map StateId Commit)
-  } deriving Show
+  }
+  deriving (Show)
 
 stateNew :: State
 stateNew =
@@ -360,7 +243,7 @@ stateNew =
     }
 
 stateChange :: Change -> State -> IO State
-stateChange change@NewTask{ task } state = do
+stateChange change@NewTask{task} state = do
   let stateId = mkStateId (current state) change
   now <- getCurrentTime
 
@@ -372,7 +255,7 @@ stateChange change@NewTask{ task } state = do
       , taskMetadata = Map.insert taskId Metadata{createdAt = now} (taskMetadata state)
       , history = Map.insert stateId (Commit (current state) change) (history state)
       }
-stateChange change@UpdateTask{ taskId, updateTask } state = do
+stateChange change@UpdateTask{taskId, updateTask} state = do
   let stateId = mkStateId (current state) change
 
   case Map.lookup taskId (tasks state) of
@@ -384,51 +267,51 @@ stateChange change@UpdateTask{ taskId, updateTask } state = do
           , tasks =
               Map.insert
                 taskId
-                (bzipWith
-                  (\current update ->
-                    case update of
-                      None -> current
-                      Set a -> Map.singleton stateId a
-                      Pick stateId' ->
-                        Map.singleton stateId $
-                        fromMaybe
-                          (error $ show stateId' ++ " missing from " ++ show (Map.keys current))
-                          (Map.lookup stateId' current)
-                  )
-                  task
-                  updateTask
+                ( bzipWith
+                    ( \current update ->
+                        case update of
+                          None -> current
+                          Set a -> Map.singleton stateId a
+                          Pick stateId' ->
+                            Map.singleton stateId $
+                              fromMaybe
+                                (error $ show stateId' ++ " missing from " ++ show (Map.keys current))
+                                (Map.lookup stateId' current)
+                    )
+                    task
+                    updateTask
                 )
                 (tasks state)
           , history = Map.insert stateId (Commit (current state) change) (history state)
           }
 
-newtype Getter (b :: (Type -> Type) -> Type) a = Getter (forall f. b f -> f a)
-
-taskGetters :: b ~ Task => b (Getter b)
-taskGetters = Task{title = Getter title, description = Getter description}
-
-fastForwardTask :: Map (Set StateId) (Map StateId Change) -> TaskId -> Task (Map StateId) -> Task (Map StateId)
+fastForwardTask ::
+  Map (Set StateId) (Map StateId Change) -> TaskId -> Task (Map StateId) -> Task (Map StateId)
 fastForwardTask edges taskId =
   bzipWith
-    (\(Getter getter) ->
-      fastForward
-        (\case
-          NewTask{task = task'} ->
-            Just (const $ runIdentity (getter task'))
-          UpdateTask{taskId = taskId', updateTask} -> do
-            guard $ taskId == taskId'
-            case getter updateTask of
-              None ->
-                Nothing
-              Set a ->
-                Just (const a)
-              Pick stateId ->
-                Just (\current -> fromMaybe (error $ show stateId ++ " missing from" ++ show (Map.keys current)) $ Map.lookup stateId current)
-        )
-        edges
+    ( \(Getter getter) ->
+        fastForward
+          ( \case
+              NewTask{task = task'} ->
+                Just (const $ runIdentity (getter task'))
+              UpdateTask{taskId = taskId', updateTask} -> do
+                guard $ taskId == taskId'
+                case getter updateTask of
+                  None ->
+                    Nothing
+                  Set a ->
+                    Just (const a)
+                  Pick stateId ->
+                    Just
+                      ( \current ->
+                          fromMaybe (error $ show stateId ++ " missing from" ++ show (Map.keys current)) $
+                            Map.lookup stateId current
+                      )
+          )
+          edges
     )
     taskGetters
-    
+
 fastForward ::
   (Change -> Maybe (Map StateId a -> a)) ->
   Map (Set StateId) (Map StateId Change) ->
@@ -443,16 +326,16 @@ fastForward fromChange edges input =
   let
     output =
       foldMap
-        (\source ->
-          case Map.lookup source edges of
-            Nothing -> Map.empty
-            Just changes -> ($ input) <$> Map.mapMaybe fromChange changes
+        ( \source ->
+            case Map.lookup source edges of
+              Nothing -> Map.empty
+              Just changes -> ($ input) <$> Map.mapMaybe fromChange changes
         )
         (Set.toList $ Set.powerSet $ Map.keysSet input)
   in
     if Map.null output
-    then input
-    else fastForward fromChange edges output
+      then input
+      else fastForward fromChange edges output
 
 fastForward' ::
   Map (Set StateId) (Map StateId Change) ->
@@ -471,8 +354,8 @@ fastForward' edges input =
         (Set.toList $ Set.powerSet input)
   in
     if Set.null output
-    then input
-    else fastForward' edges output
+      then input
+      else fastForward' edges output
 
 stateMerge :: State -> State -> State
 stateMerge s1 s2 =
@@ -489,20 +372,20 @@ stateMerge s1 s2 =
           , Map.unionWith (bzipWith (<>)) (tasks s1) (tasks s2)
           )
         Just lca ->
-          let edges = edgesToLca newHistory lca currentStateIds in
-          ( fastForward' edges (current s1) <> fastForward' edges (current s2)
-          , Map.unionWith
-              (bzipWith (<>))
-              (Map.mapWithKey (fastForwardTask edges) (tasks s1))
-              (Map.mapWithKey (fastForwardTask edges) (tasks s2))
-          )
+          let edges = edgesToLca newHistory lca currentStateIds
+          in ( fastForward' edges (current s1) <> fastForward' edges (current s2)
+             , Map.unionWith
+                (bzipWith (<>))
+                (Map.mapWithKey (fastForwardTask edges) (tasks s1))
+                (Map.mapWithKey (fastForwardTask edges) (tasks s2))
+             )
   in
-  State
-    { current = newCurrent
-    , tasks = newTasks
-    , taskMetadata = taskMetadata s1 <> taskMetadata s2 
-    , history = newHistory
-    }
+    State
+      { current = newCurrent
+      , tasks = newTasks
+      , taskMetadata = taskMetadata s1 <> taskMetadata s2
+      , history = newHistory
+      }
 
 edgesToLca ::
   Map StateId Commit ->
@@ -521,16 +404,17 @@ edgesToLca history lca = go Map.empty
           let
             (acc', stateIds') =
               foldMap
-                (\stateId ->
-                  case Map.lookup stateId history of
-                    Just (Commit parents change) | stateId /= lca ->
-                      (Map.singleton parents (Map.singleton stateId change), parents)
-                    _ ->
-                      mempty
+                ( \stateId ->
+                    case Map.lookup stateId history of
+                      Just (Commit parents change)
+                        | stateId /= lca ->
+                            (Map.singleton parents (Map.singleton stateId change), parents)
+                      _ ->
+                        mempty
                 )
                 stateIds
           in
-          go (Map.unionWith (<>) acc acc') stateIds'
+            go (Map.unionWith (<>) acc acc') stateIds'
 
 enroute :: Map StateId Commit -> StateId -> Set StateId
 enroute history stateId =
@@ -542,7 +426,10 @@ enroute history stateId =
           Set.empty
         x : xs ->
           Set.insert stateId $
-          foldl' (\acc parentStateId -> Set.intersection acc (enroute history parentStateId)) (enroute history x) xs
+            foldl'
+              (\acc parentStateId -> Set.intersection acc (enroute history parentStateId))
+              (enroute history x)
+              xs
 
 lowestCommonAncestor :: Map StateId Commit -> Set StateId -> Maybe StateId
 lowestCommonAncestor history = loop . Set.toList
@@ -582,7 +469,8 @@ stateHistory versioned = go Nothing (current versioned)
     go mTop stateIds
       | Set.null stateIds = Nil
       | Just top <- mTop, top `Set.member` stateIds = Nil
-      | Set.size stateIds == 1, let stateId = Set.findMax stateIds =
+      | Set.size stateIds == 1
+      , let stateId = Set.findMax stateIds =
           case Map.lookup stateId (history versioned) of
             Nothing ->
               Nil
@@ -592,9 +480,9 @@ stateHistory versioned = go Nothing (current versioned)
           let
             mAncestor = lowestCommonAncestor (history versioned) stateIds
           in
-          Concurrent
-            (go mTop $ maybe Set.empty Set.singleton mAncestor)
-            (go mAncestor . Set.singleton <$> Set.toList stateIds)
+            Concurrent
+              (go mTop $ maybe Set.empty Set.singleton mAncestor)
+              (go mAncestor . Set.singleton <$> Set.toList stateIds)
 
 stateBinaryPut :: State -> Binary.Put
 stateBinaryPut (State current tasks taskMetadata history) = do
@@ -659,11 +547,12 @@ putMetadata (Metadata createdAt) = do
 getMetadata :: Binary.Get Metadata
 getMetadata = do
   createdAt <- getUTCTime
-  pure Metadata{ createdAt }
+  pure Metadata{createdAt}
 
 putUTCTime :: UTCTime -> Binary.Put
 putUTCTime utcTime = do
-  Binary.put @Milli (realToFrac @Pico @Milli . nominalDiffTimeToSeconds $ utcTimeToPOSIXSeconds utcTime)
+  Binary.put @Milli
+    (realToFrac @Pico @Milli . nominalDiffTimeToSeconds $ utcTimeToPOSIXSeconds utcTime)
 
 getUTCTime :: Binary.Get UTCTime
 getUTCTime = do
@@ -685,7 +574,7 @@ getCommit :: Binary.Get Commit
 getCommit = do
   parents <- getSet
   change <- getChange
-  pure Commit{ parents, change }
+  pure Commit{parents, change}
 
 putChange :: Change -> Binary.Put
 putChange change = do
@@ -709,11 +598,11 @@ getChange = do
   case tag of
     0 -> do
       task <- btraverse (\Dict -> Identity <$> Binary.get) (bdicts @Binary)
-      pure NewTask{ task }
+      pure NewTask{task}
     1 -> do
       taskId <- Binary.get
       updateTask <- btraverse (\Dict -> getUpdate) (bdicts @Binary)
-      pure UpdateTask{ taskId, updateTask }
+      pure UpdateTask{taskId, updateTask}
     _ -> fail $ "invalid Change tag: " ++ show tag
 
 putUpdate :: Binary a => Update a -> Binary.Put
@@ -757,7 +646,11 @@ stateDeserialise path =
   where
     headerParser :: Attoparsec.Parser (ByteString, ByteString)
     headerParser =
-      (,) <$
-      Attoparsec.string (fromString "tsk;") <*>
-      (Attoparsec.string (fromString "version=") *> Attoparsec.takeWhile (/= fromIntegral (ord ';')) <* Attoparsec.string (fromString ";")) <*>
-      Attoparsec.takeWhile (/= fromIntegral (ord '\n')) <* Attoparsec.string (fromString "\n")
+      (,)
+        <$ Attoparsec.string (fromString "tsk;")
+        <*> ( Attoparsec.string (fromString "version=")
+                *> Attoparsec.takeWhile (/= fromIntegral (ord ';'))
+                <* Attoparsec.string (fromString ";")
+            )
+        <*> Attoparsec.takeWhile (/= fromIntegral (ord '\n'))
+        <* Attoparsec.string (fromString "\n")

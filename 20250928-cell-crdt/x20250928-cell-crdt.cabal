@@ -27,7 +27,11 @@ library
         text >=2.0,
         time,
         uuid
-    exposed-modules:  Lib, Todo
+    exposed-modules:
+        Base32
+        Lib
+        MD5
+        Todo
     hs-source-dirs:   src
     default-language: Haskell2010
 
