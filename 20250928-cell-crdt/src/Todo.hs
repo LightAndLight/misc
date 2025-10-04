@@ -53,6 +53,7 @@ import GHC.Generics (Generic)
 import MD5 (MD5, hashMD5, md5ToBase32)
 import System.Entropy (getEntropy)
 import System.IO (IOMode (..), withFile)
+import Data.Monoid (getAny, Any (..))
 
 newtype StateId = StateId MD5
   deriving (Show, Eq, Ord)
@@ -203,6 +204,9 @@ gidFromBase32 s
 newtype TaskId = TaskId {unTaskId :: GID}
   deriving (Show, Eq, Ord)
   deriving newtype (Binary)
+
+renderTaskId :: TaskId -> String
+renderTaskId (TaskId gid) = gidToBase32 gid
 
 data Metadata
   = Metadata
@@ -455,6 +459,9 @@ lowestCommonAncestor history = loop . Set.toList
                 _ -> do
                   b' <- lowestCommonAncestor history parents
                   go enrouteSet b'
+
+stateConflicts :: State -> Map TaskId (Task (Map StateId))
+stateConflicts state = Map.filter (getAny . bfoldMap (Any . (1 <) . Map.size)) (tasks state)
 
 data History
   = Nil

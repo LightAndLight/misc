@@ -5,7 +5,7 @@
 
 module Main where
 
-import Barbies (bfoldMap, bmap, btraverseC, bzip, bzipWith)
+import Barbies (bfoldMap, bmap, btraverseC, bzip, bzipWith, bfor_)
 import Control.Applicative (Const (..), optional, some, (<**>), (<|>))
 import Control.Exception (finally)
 import Control.Monad (unless, when)
@@ -170,6 +170,14 @@ merge path other = do
   Todo.stateSerialise pathNew state'
   renameFile pathNew path
   putStrLn $ "Merged " ++ other ++ " into " ++ path
+
+  let conflicts = Todo.stateConflicts state'
+  unless (Map.null conflicts) $ do
+    putStrLn "\nConflicts:\n"
+    for_ (Map.toList conflicts) $ \(taskId, task) -> do
+      putStrLn $ "(" ++ Todo.renderTaskId taskId ++ ")"
+      bfor_ (bzip Todo.taskFieldNames task) $ \(Const fieldName `Pair` value) -> do
+        unless (Map.size value <= 1) . putStrLn $ "* " ++ Text.unpack fieldName
 
 newTask :: FilePath -> IO ()
 newTask path = do
