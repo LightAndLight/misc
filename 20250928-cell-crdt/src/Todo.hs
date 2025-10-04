@@ -19,7 +19,6 @@ module Todo where
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Hashable (Hashable, hash)
 import Data.Set (Set)
 import GHC.Generics (Generic)
 import Data.Text (Text)
@@ -52,57 +51,41 @@ import Data.Bits (shiftL, (.|.), FiniteBits, finiteBitSize)
 import System.Entropy (getEntropy)
 import Numeric.Natural (Natural)
 import Data.List (elemIndex)
+import qualified Crypto.Hash.MD5 as MD5
+import Data.ByteString.Lazy (LazyByteString)
+import Data.Functor.Compose (Compose(..))
+import Control.Applicative (Const (..))
 
-newtype StateId = StateId Int
-  deriving (Show, Eq, Ord)
-  deriving newtype (Hashable, Binary)
+data MD5 = MD5 !Word64 !Word64
+  deriving (Show, Eq, Ord, Generic, Binary)
 
-mkStateId :: Set StateId -> Change -> StateId
-mkStateId parents change = StateId $ hash (parents, change)
+word64FromBytes ::
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word64
+word64FromBytes a b c d e f g h =
+  fromIntegral a `shiftL` 56 .|.
+  fromIntegral b `shiftL` 48 .|.
+  fromIntegral c `shiftL` 40 .|.
+  fromIntegral d `shiftL` 32 .|.
+  fromIntegral e `shiftL` 24 .|.
+  fromIntegral f `shiftL` 16 .|.
+  fromIntegral g `shiftL` 8 .|.
+  fromIntegral h
 
-data Task f
-  = Task
-  { title :: f Text
-  , description :: f Text
-  } deriving (Generic, FunctorB, TraversableB, ApplicativeB, ConstraintsB, DistributiveB)
-
-deriving instance (forall x. Show x => Show (f x)) => Show (Task f)
-deriving instance (forall x. Eq x => Eq (f x)) => Eq (Task f)
-deriving instance (forall x. Eq x => Eq (f x), forall x. Hashable x => Hashable (f x)) => Hashable (Task f)
-
-taskDiff :: Task (Map StateId) -> Task Identity -> Task Update
-taskDiff task1 task2 =
-  Task
-    { title =
-        case Map.toList (title task1) of
-          [(_, title1)]
-            | title1 == runIdentity (title task2) -> None
-            | otherwise -> Set (runIdentity $ title task2)
-          _ -> error "TODO: resolving title conflict"
-    , description =
-        case Map.toList (description task1) of
-          [(_, description1)]
-            | description1 == runIdentity (description task2) -> None
-            | otherwise -> Set (runIdentity $ description task2)
-          _ -> error "TODO: resolving title conflict"
-    }
-
-data GID = GID !Word16 !Word16 !Word16 !Word16 !Word16
-  deriving (Show, Eq, Ord, Generic, Hashable, Binary)
-
-newGID :: IO GID
-newGID = do
-  bytes <- ByteString.unpack <$> getEntropy 10
-  pure $
-    GID
-      (word16FromBytes (bytes !! 0) (bytes !! 1))
-      (word16FromBytes (bytes !! 2) (bytes !! 3))
-      (word16FromBytes (bytes !! 4) (bytes !! 5))
-      (word16FromBytes (bytes !! 6) (bytes !! 7))
-      (word16FromBytes (bytes !! 8) (bytes !! 9))
-
-word16FromBytes :: Word8 -> Word8 -> Word16
-word16FromBytes a b = ((fromIntegral a :: Word16) `shiftL` 8) .|. fromIntegral b
+hashMd5 :: LazyByteString -> MD5
+hashMd5 input =
+  MD5
+    (word64FromBytes (bytes !! 0) (bytes !! 1) (bytes !! 2) (bytes !! 3) (bytes !! 4) (bytes !! 5) (bytes !! 6) (bytes !! 7))
+    (word64FromBytes (bytes !! 8) (bytes !! 9) (bytes !! 10) (bytes !! 11) (bytes !! 12) (bytes !! 13) (bytes !! 14) (bytes !! 15))
+  where
+    bytes = ByteString.unpack . MD5.finalize $ MD5.startlazy input
 
 toBits :: forall a. (FiniteBits a, Integral a) => a -> [Bool]
 toBits = go (2^(finiteBitSize (undefined :: a) - 1))
@@ -123,16 +106,11 @@ fromBits = snd . go
       in
       (n + 1, x')
 
-alphabet :: String
-alphabet = "abcdefghijklmnopqrstuvwxyz234567"
-
-gidToBase32 :: GID -> String
-gidToBase32 (GID a b c d e) =
-  go $ toBits a ++ toBits b ++ toBits c ++ toBits d ++ toBits e
+bitsToBase32 :: [Bool] -> String
+bitsToBase32 = go
   where
-
     base32Char :: [Bool] -> Char
-    base32Char bits = alphabet !! fromIntegral (fromBits bits)
+    base32Char bits = base32Alphabet !! fromIntegral (fromBits bits)
 
     go :: [Bool] -> String
     go [] = []
@@ -141,16 +119,197 @@ gidToBase32 (GID a b c d e) =
       let !char = base32Char prefix in
       char : go suffix
 
+bitsFromBase32 :: String -> Maybe [Bool]
+bitsFromBase32 s = do
+  points <- traverse (`elemIndex` base32Alphabet) s
+  pure
+    [ bit
+    | point <- points
+    , bit <- drop 3 $ toBits (fromIntegral point :: Word8)
+    ]
+
+md5ToBase32 :: MD5 -> String
+md5ToBase32 (MD5 a b) = bitsToBase32 $ toBits a ++ toBits b ++ [False, False]
+
+md5FromBase32 :: String -> Maybe MD5
+md5FromBase32 s
+  | length s == 26 = do
+      bits <- bitsFromBase32 s
+      pure $
+        MD5
+          (word64FromBytes
+            (fromIntegral . fromBits $ take 8 bits)
+            (fromIntegral . fromBits . take 8 $ drop 8 bits)
+            (fromIntegral . fromBits . take 8 $ drop 16 bits)
+            (fromIntegral . fromBits . take 8 $ drop 24 bits)
+            (fromIntegral . fromBits . take 8 $ drop 32 bits)
+            (fromIntegral . fromBits . take 8 $ drop 40 bits)
+            (fromIntegral . fromBits . take 8 $ drop 48 bits)
+            (fromIntegral . fromBits . take 8 $ drop 56 bits)
+          )
+          (word64FromBytes
+            (fromIntegral . fromBits . take 8 $ drop 64 bits)
+            (fromIntegral . fromBits . take 8 $ drop 72 bits)
+            (fromIntegral . fromBits . take 8 $ drop 80 bits)
+            (fromIntegral . fromBits . take 8 $ drop 88 bits)
+            (fromIntegral . fromBits . take 8 $ drop 96 bits)
+            (fromIntegral . fromBits . take 8 $ drop 104 bits)
+            (fromIntegral . fromBits . take 8 $ drop 112 bits)
+            (fromIntegral . fromBits . take 8 $ drop 120 bits)
+          )
+  | otherwise = Nothing
+
+newtype StateId = StateId MD5
+  deriving (Show, Eq, Ord)
+  deriving newtype (Binary)
+
+mkStateId :: Set StateId -> Change -> StateId
+mkStateId parents change = StateId . hashMd5 . runPut $ putSet parents <> putChange change
+
+renderStateId :: StateId -> String
+renderStateId (StateId s) = md5ToBase32 s
+
+data Task f
+  = Task
+  { title :: f Text
+  , description :: f Text
+  } deriving (Generic, FunctorB, TraversableB, ApplicativeB, ConstraintsB, DistributiveB)
+
+deriving instance (forall x. Show x => Show (f x)) => Show (Task f)
+deriving instance (forall x. Eq x => Eq (f x)) => Eq (Task f)
+
+taskFieldNames :: Task (Const Text)
+taskFieldNames =
+  Task
+  { title = Const $ fromString "title"
+  , description = Const $ fromString "description"
+  }
+
+taskDiff :: Task (Map StateId) -> Task Identity -> Task Update
+taskDiff task1 task2 =
+  Task
+    { title =
+        case Map.toList (title task1) of
+          [(_, title1)] | title1 == runIdentity (title task2) -> None
+          _ -> Set (runIdentity $ title task2)
+    , description =
+        case Map.toList (description task1) of
+          [(_, description1)] | description1 == runIdentity (description task2) -> None
+          _ -> Set (runIdentity $ description task2)
+    }
+
+data TaskDiffConflictedError
+  -- | A state ID mentioned in the target 'Task' was not present in the source 'Task'.
+  = StateIdNotFound
+      -- | Field name
+      !Text
+      !StateId
+
+  -- | The target 'Task' appears to be 'Pick'ing a value by state ID from the source 'Task', but
+  -- the value in the target 'Task' doesn't match the value in the source 'Task'.
+  --
+  -- It's unclear whether the intention is to 'Pick' an existing value by state ID, or 'Set' the
+  -- field to the new, changed value.
+  | AmbiguousUpdate
+      -- | Field name
+      !Text
+      !StateId
+      -- | Expected
+      !Text
+      -- | Actual
+      !Text
+
+  -- | The target 'Task' still contains conflicts.
+  | UnresolvedConflicts
+      -- | Field name
+      !Text
+      -- | Conflicting states
+      !(Set StateId)
+
+  -- | A field in the target 'Task' is missing a value.
+  | NoValue
+      -- | Field name
+      !Text
+
+  deriving (Show, Eq)
+
+data Conflicted a
+  = Resolved a
+  | Conflicted (Map StateId a)
+
+taskDiffConflicted ::
+  Task (Map StateId) ->
+  Task Conflicted ->
+  Either TaskDiffConflictedError (Task Update)
+taskDiffConflicted task1 task2 =
+  bsequence $
+  Task
+    { title =
+        case title task2 of
+          Resolved title2 ->
+            case Map.toList (title task1) of
+              [(_, title1)] | title1 == title2 -> Compose $ Right None
+              _ -> Compose . Right $ Set title2
+          Conflicted titles ->
+            case Map.toList titles of
+              [] -> Compose . Left $ NoValue (fromString "title")
+              [(stateId, title2)] ->
+                case Map.lookup stateId (title task1) of
+                  Just title1 ->
+                    if title1 == title2
+                    then Compose . Right $ Pick stateId
+                    else Compose . Left $ AmbiguousUpdate (fromString "title") stateId title1 title2
+                  Nothing -> Compose . Left $ StateIdNotFound (fromString "title") stateId
+              _ ->
+                Compose . Left $ UnresolvedConflicts (fromString "title") (Map.keysSet titles)
+    , description =
+        case description task2 of
+          Resolved description2 ->
+            case Map.toList (description task1) of
+              [(_, description1)] | description1 == description2 -> Compose $ Right None
+              _ -> Compose . Right $ Set description2
+          Conflicted descriptions ->
+            case Map.toList descriptions of
+              [] -> Compose . Left $ NoValue (fromString "description")
+              [(stateId, description2)] ->
+                case Map.lookup stateId (description task1) of
+                  Just description1 ->
+                    if description1 == description2
+                    then Compose . Right $ Pick stateId
+                    else Compose . Left $ AmbiguousUpdate (fromString "description") stateId description1 description2
+                  Nothing -> Compose . Left $ StateIdNotFound (fromString "description") stateId
+              _ ->
+                Compose . Left $ UnresolvedConflicts (fromString "description") (Map.keysSet descriptions)
+    }
+
+data GID = GID !Word16 !Word16 !Word16 !Word16 !Word16
+  deriving (Show, Eq, Ord, Generic, Binary)
+
+newGID :: IO GID
+newGID = do
+  bytes <- ByteString.unpack <$> getEntropy 10
+  pure $
+    GID
+      (word16FromBytes (bytes !! 0) (bytes !! 1))
+      (word16FromBytes (bytes !! 2) (bytes !! 3))
+      (word16FromBytes (bytes !! 4) (bytes !! 5))
+      (word16FromBytes (bytes !! 6) (bytes !! 7))
+      (word16FromBytes (bytes !! 8) (bytes !! 9))
+
+word16FromBytes :: Word8 -> Word8 -> Word16
+word16FromBytes a b = ((fromIntegral a :: Word16) `shiftL` 8) .|. fromIntegral b
+
+base32Alphabet :: String
+base32Alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+
+gidToBase32 :: GID -> String
+gidToBase32 (GID a b c d e) =
+  bitsToBase32 $ toBits a ++ toBits b ++ toBits c ++ toBits d ++ toBits e
+
 gidFromBase32 :: String -> Maybe GID
 gidFromBase32 s
   | length s == 16 = do
-      points <- traverse (`elemIndex` alphabet) s
-      let
-        bits =
-          [ bit
-          | point <- points
-          , bit <- drop 3 $ toBits (fromIntegral point :: Word8)
-          ]
+      bits <- bitsFromBase32 s
       Just $
         GID
           (fromIntegral . fromBits $ take 16 bits)
@@ -162,7 +321,7 @@ gidFromBase32 s
 
 newtype TaskId = TaskId{ unTaskId :: GID }
   deriving (Show, Eq, Ord)
-  deriving newtype (Hashable, Binary)
+  deriving newtype (Binary)
 
 data Metadata
   = Metadata
@@ -173,12 +332,12 @@ data Update a
   = None
   | Set a
   | Pick StateId
-  deriving (Show, Eq, Generic, Hashable)
+  deriving (Show, Eq, Generic)
 
 data Change
   = NewTask{ task :: !(Task Identity) }
   | UpdateTask{ taskId :: TaskId, updateTask :: !(Task Update) }
-  deriving (Show, Eq, Generic, Hashable)
+  deriving (Show, Eq, Generic)
 
 data Commit = Commit{ parents :: Set StateId, change :: Change }
   deriving Show
@@ -379,7 +538,8 @@ enroute history stateId =
     Nothing -> Set.empty
     Just (Commit parents _) ->
       case Set.toList parents of
-        [] -> error "change has no parents"
+        [] ->
+          Set.empty
         x : xs ->
           Set.insert stateId $
           foldl' (\acc parentStateId -> Set.intersection acc (enroute history parentStateId)) (enroute history x) xs

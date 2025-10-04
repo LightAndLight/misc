@@ -21,6 +21,7 @@ library
         binary,
         bytestring,
         containers,
+        cryptohash-md5,
         entropy,
         hashable,
         text >=2.0,
