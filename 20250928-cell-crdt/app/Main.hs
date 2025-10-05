@@ -5,7 +5,7 @@
 
 module Main where
 
-import Barbies (bfoldMap, bmap, btraverseC, bzip, bzipWith, bfor_)
+import Barbies (bfoldMap, bfor_, btraverse, btraverseC, bzip, bzipWith)
 import Control.Applicative (Const (..), optional, some, (<**>), (<|>))
 import Control.Exception (finally)
 import Control.Monad (unless, when)
@@ -15,11 +15,13 @@ import qualified Data.Char as Char
 import Data.Foldable (foldl', foldlM, for_, traverse_)
 import Data.Functor (void)
 import Data.Functor.Compose (Compose (..))
-import Data.Functor.Identity (Identity, runIdentity)
+import Data.Functor.Contravariant (Op (..))
+import Data.Functor.Identity (Identity (..), runIdentity)
 import Data.Functor.Product (Product (..))
 import Data.List (intercalate, sortOn)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Maybe (fromMaybe)
 import Data.Monoid (All (..))
 import Data.Ord (Down (..))
 import Data.Set (Set)
@@ -35,11 +37,10 @@ import qualified Options.Applicative as Options
 import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
 import qualified System.Environment
 import System.Exit (ExitCode (..), exitFailure)
+import System.IO (Handle, IOMode (..), hClose, hPutStr, withFile)
 import qualified System.Process as Process
 import qualified Todo
 import Prelude hiding (init)
-import Data.Maybe (fromMaybe)
-import System.IO (Handle, hPutStr, IOMode (..), withFile, hClose)
 
 data Cli
   = Cli {database :: FilePath, command :: Command}
@@ -92,17 +93,17 @@ cliParser =
       Merge <$> Options.strArgument (Options.metavar "PATH" <> Options.help "Database to be merged in")
 
     taskParser =
-        Options.hsubparser
-          ( Options.command
-              "new"
-              (Options.info taskNewParser (Options.progDesc "Create a new task" <> Options.fullDesc)) <>
-            Options.command
+      Options.hsubparser
+        ( Options.command
+            "new"
+            (Options.info taskNewParser (Options.progDesc "Create a new task" <> Options.fullDesc))
+            <> Options.command
               "view"
-              (Options.info taskViewParser (Options.progDesc "View a task" <> Options.fullDesc)) <>
-            Options.command
+              (Options.info taskViewParser (Options.progDesc "View a task" <> Options.fullDesc))
+            <> Options.command
               "edit"
               (Options.info taskEditParser (Options.progDesc "Edit a task" <> Options.fullDesc))
-          )
+        )
 
     taskNewParser =
       pure TaskNew
@@ -180,11 +181,20 @@ merge path other = do
       bfor_ (bzip Todo.taskFieldNames task) $ \(Const fieldName `Pair` value) -> do
         unless (Map.size value <= 1) . putStrLn $ "* " ++ Text.unpack fieldName
 
+taskFileTemplate :: String
+taskFileTemplate =
+  bfoldMap
+    (\(Const fieldName) -> "! " ++ Text.unpack fieldName ++ "\n\n")
+    Todo.taskFieldNames
+
 taskNew :: FilePath -> IO ()
 taskNew path = do
   editor <- System.Environment.getEnv "EDITOR"
   now <- getCurrentTime
+
   let taskFile = "drafts/" ++ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now ++ ".txt"
+  writeFile taskFile taskFileTemplate
+
   exitCode <- Process.withCreateProcess (Process.proc editor [taskFile]) $ \_mStdin _mStdout _mStderr processHandle -> do
     Process.waitForProcess processHandle
   case exitCode of
@@ -195,7 +205,25 @@ taskNew path = do
       exists <- doesFileExist taskFile
       if exists
         then do
-          task <- readTask taskFile rawTaskParser
+          task <-
+            btraverse
+              ( \case
+                  Todo.Resolved a ->
+                    pure $ Identity a
+                  Todo.Conflicted{} -> do
+                    -- TODO: recover gracefully
+                    putStrLn "error: a new task can't introduce conflicts"
+                    exitFailure
+              )
+              =<< either
+                ( \err -> do
+                    -- TODO: better error message
+                    print err
+                    exitFailure
+                )
+                pure
+                . validateIdentifiedTask
+              =<< readTask taskFile taskFileParser
           state <- Todo.stateDeserialise path
           state' <- Todo.stateChange (Todo.NewTask task) state
 
@@ -235,9 +263,6 @@ fieldCommentParser field =
           <* Attoparsec.takeWhile (\c -> Char.isSpace c && c /= '\n')
       )
     <* Attoparsec.char '\n'
-
-titleParser :: Attoparsec.Parser Text
-titleParser = Attoparsec.takeWhile (/= '\n') <* Attoparsec.takeWhile Char.isSpace
 
 data Identified a
   = Unidentified a
@@ -351,85 +376,98 @@ validateIdentifiedTask =
     )
     . bzip Todo.taskFieldNames
 
-identifiedTaskParser :: Attoparsec.Parser (Todo.Task (Compose [] Identified))
-identifiedTaskParser =
+taskFileParser :: Attoparsec.Parser (Todo.Task (Compose [] Identified))
+taskFileParser =
   foldl'
     (bzipWith (\(Compose a) (Compose b) -> Compose (a ++ b)))
-    Todo.Task{Todo.title = mempty, Todo.description = mempty}
+    emptyTask
     <$> some
-      ( ( do
-            mStateId <- fieldCommentParser "title"
-            title <- titleParser
-            case mStateId of
-              Nothing ->
-                pure Todo.Task{Todo.title = Compose [Unidentified title], Todo.description = mempty}
-              Just stateId ->
-                pure Todo.Task{Todo.title = Compose [Identified stateId title], Todo.description = mempty}
-        )
-          <|> ( do
-                  mStateId <- fieldCommentParser "description"
-                  description <-
-                    fmap
-                      Text.pack
-                      ( Attoparsec.manyTill
-                          Attoparsec.anyChar
-                          (void (lookAhead . Attoparsec.string $ fromString "\n!") <|> Attoparsec.endOfInput)
-                          <* optional (Attoparsec.char '\n')
-                      )
-                  case mStateId of
-                    Nothing ->
-                      pure Todo.Task{Todo.title = mempty, Todo.description = Compose [Unidentified description]}
-                    Just stateId ->
-                      pure Todo.Task{Todo.title = mempty, Todo.description = Compose [Identified stateId description]}
-              )
+      ( statusFieldParser
+          <|> titleFieldParser
+          <|> descriptionFieldParser
       )
+  where
+    emptyTask = Todo.Task{Todo.status = mempty, Todo.title = mempty, Todo.description = mempty}
 
-rawTaskParser :: Attoparsec.Parser (Todo.Task Identity)
-rawTaskParser = do
-  title <- titleParser
-  description <- Attoparsec.takeWhile (const True)
-  pure Todo.Task{Todo.title = pure title, Todo.description = pure description}
+    lineParser = Attoparsec.takeWhile (/= '\n') <* Attoparsec.takeWhile Char.isSpace
+
+    statusFieldParser = do
+      mStateId <- fieldCommentParser "status"
+      status <- lineParser
+      case mStateId of
+        Nothing ->
+          pure emptyTask{Todo.status = Compose [Unidentified status]}
+        Just stateId ->
+          pure emptyTask{Todo.status = Compose [Identified stateId status]}
+
+    titleFieldParser = do
+      mStateId <- fieldCommentParser "title"
+      title <- lineParser
+      case mStateId of
+        Nothing ->
+          pure emptyTask{Todo.title = Compose [Unidentified title]}
+        Just stateId ->
+          pure emptyTask{Todo.title = Compose [Identified stateId title]}
+
+    descriptionFieldParser = do
+      mStateId <- fieldCommentParser "description"
+      description <-
+        fmap
+          Text.pack
+          ( Attoparsec.manyTill
+              Attoparsec.anyChar
+              (void (lookAhead . Attoparsec.string $ fromString "\n!") <|> Attoparsec.endOfInput)
+              <* optional (Attoparsec.char '\n')
+          )
+      case mStateId of
+        Nothing ->
+          pure emptyTask{Todo.description = Compose [Unidentified description]}
+        Just stateId ->
+          pure emptyTask{Todo.description = Compose [Identified stateId description]}
+
+taskRenderValues :: Todo.Task (Op String)
+taskRenderValues =
+  Todo.Task
+    { Todo.status = Op Text.unpack
+    , Todo.title = Op Text.unpack
+    , Todo.description = Op Text.unpack
+    }
 
 writeTask :: Handle -> Todo.Task (Map Todo.StateId) -> IO ()
 writeTask handle task =
   hPutStr handle . intercalate "\n\n" $
-    ( case Map.toList (Todo.title task) of
-        [(_, title)] ->
-          [ (if hasConflicts then "! title\n" else "")
-              ++ Text.unpack title
-          ]
-        titles ->
-          fmap
-            (\(stateId, title) -> "! title (" ++ Todo.renderStateId stateId ++ ")\n" ++ Text.unpack title)
-            titles
-    )
-      ++ ( case Map.toList (Todo.description task) of
-            [(_, description)] ->
-              [ (if hasConflicts then "! description\n" else "")
-                  ++ Text.unpack description
+    bfoldMap
+      ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
+          case Map.toList values of
+            [(_, value)] ->
+              [ "! "
+                  ++ Text.unpack fieldName
+                  ++ "\n"
+                  ++ renderValue value
               ]
-            descriptions ->
+            values' ->
               fmap
-                ( \(stateId, description) -> "! description (" ++ Todo.renderStateId stateId ++ ")\n" ++ Text.unpack description
+                ( \(stateId, value) ->
+                    "! " ++ Text.unpack fieldName ++ " (" ++ Todo.renderStateId stateId ++ ")\n" ++ renderValue value
                 )
-                descriptions
-         )
-  where
-    hasConflicts =
-      Map.size (Todo.title task) > 1
-        || Map.size (Todo.description task) > 1
+                values'
+      )
+      (bzip (bzip Todo.taskFieldNames taskRenderValues) task)
 
 renderUpdateTask :: Todo.Task (Map Todo.StateId) -> Todo.Task Todo.Update -> String
 renderUpdateTask task update =
   foldMap (++ "\n\n") $
-    renderTextField "title" Todo.title
-      ++ renderTextField "description" Todo.description
+    bfoldMap
+      ( \(Const fieldName `Pair` Op renderValue `Pair` Todo.Getter getter) ->
+          renderField (Text.unpack fieldName) (Text.pack . renderValue) getter
+      )
+      (bzip (bzip Todo.taskFieldNames taskRenderValues) Todo.taskGetters)
   where
     prependLines prefix =
       intercalate "\n" . fmap ((prefix ++) . Text.unpack) . Text.splitOn (fromString "\n")
 
-    renderTextField :: String -> (forall f. Todo.Task f -> f Text) -> [String]
-    renderTextField fieldName getter =
+    renderField :: String -> (a -> Text) -> (forall f. Todo.Task f -> f a) -> [String]
+    renderField fieldName renderValue getter =
       case getter update of
         Todo.None ->
           []
@@ -441,14 +479,14 @@ renderUpdateTask task update =
                     ++ " ("
                     ++ Todo.renderStateId stateId'
                     ++ ")\n"
-                    ++ prependLines "- " a'
+                    ++ prependLines "- " (renderValue a')
                 ]
             )
             (Map.toList $ getter task)
             ++ [ "+ ! "
                   ++ fieldName
                   ++ "\n"
-                  ++ prependLines "+ " a
+                  ++ prependLines "+ " (renderValue a)
                ]
         Todo.Pick stateId ->
           foldMap
@@ -460,7 +498,7 @@ renderUpdateTask task update =
                         ++ " ("
                         ++ Todo.renderStateId stateId'
                         ++ ")\n"
-                        ++ prependLines "  " a'
+                        ++ prependLines "  " (renderValue a')
                     ]
                   else
                     [ "- ! "
@@ -468,7 +506,7 @@ renderUpdateTask task update =
                         ++ " ("
                         ++ Todo.renderStateId stateId'
                         ++ ")\n"
-                        ++ prependLines "- " a'
+                        ++ prependLines "- " (renderValue a')
                     ]
             )
             (Map.toList $ getter task)
@@ -542,17 +580,12 @@ taskEdit path taskId = do
               if base == new
                 then putStrLn "No change"
                 else do
-                  result <- readTask taskFile (Left <$> identifiedTaskParser <|> Right <$> rawTaskParser)
-                  updateTask <- do
-                    task' <-
-                      case result of
-                        Left identifiedTask ->
-                          -- TODO: nicer error message
-                          either (\err -> print err *> exitFailure) pure $
-                            validateIdentifiedTask identifiedTask
-                        Right task' ->
-                          pure $ bmap (Todo.Resolved . runIdentity) task'
-
+                  task' <-
+                    -- TODO: nicer error message
+                    either (\err -> print err *> exitFailure) pure
+                      . validateIdentifiedTask
+                      =<< readTask taskFile taskFileParser
+                  updateTask <-
                     case Todo.taskDiff task task' of
                       Right updateTask ->
                         pure updateTask

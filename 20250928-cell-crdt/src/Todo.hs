@@ -36,12 +36,13 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (ord)
 import Data.Fixed (Milli, Pico)
 import Data.Foldable (foldl', traverse_)
-import Data.Functor.Compose (Compose (..))
 import Data.Functor.Identity (Identity (..))
+import Data.Functor.Product (Product (..))
 import Data.Kind (Type)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import Data.Monoid (Any (..), getAny)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.String (fromString)
@@ -53,7 +54,6 @@ import GHC.Generics (Generic)
 import MD5 (MD5, hashMD5, md5ToBase32)
 import System.Entropy (getEntropy)
 import System.IO (IOMode (..), withFile)
-import Data.Monoid (getAny, Any (..))
 
 newtype StateId = StateId MD5
   deriving (Show, Eq, Ord)
@@ -67,8 +67,9 @@ renderStateId (StateId s) = md5ToBase32 s
 
 data Task f
   = Task
-  { title :: f Text
-  , description :: f Text
+  { status :: !(f Text)
+  , title :: !(f Text)
+  , description :: !(f Text)
   }
   deriving (Generic, FunctorB, TraversableB, ApplicativeB, ConstraintsB, DistributiveB)
 
@@ -78,14 +79,20 @@ deriving instance (forall x. Eq x => Eq (f x)) => Eq (Task f)
 taskFieldNames :: Task (Const Text)
 taskFieldNames =
   Task
-    { title = Const $ fromString "title"
+    { status = Const $ fromString "status"
+    , title = Const $ fromString "title"
     , description = Const $ fromString "description"
     }
 
 newtype Getter (b :: (Type -> Type) -> Type) a = Getter (forall f. b f -> f a)
 
 taskGetters :: b ~ Task => b (Getter b)
-taskGetters = Task{title = Getter title, description = Getter description}
+taskGetters =
+  Task
+    { status = Getter status
+    , title = Getter title
+    , description = Getter description
+    }
 
 data TaskDiffError
   = -- | A state ID mentioned in the target 'Task' was not present in the source 'Task'.
@@ -102,10 +109,6 @@ data TaskDiffError
       -- | Field name
       !Text
       !StateId
-      -- | Expected
-      !Text
-      -- | Actual
-      !Text
   | -- | The target 'Task' still contains conflicts.
     UnresolvedConflicts
       -- | Field name
@@ -127,45 +130,27 @@ taskDiff ::
   Task Conflicted ->
   Either TaskDiffError (Task Update)
 taskDiff task1 task2 =
-  bsequence $
-    Task
-      { title =
-          case title task2 of
-            Resolved title2 ->
-              case Map.toList (title task1) of
-                [(_, title1)] | title1 == title2 -> Compose $ Right None
-                _ -> Compose . Right $ Set title2
-            Conflicted titles ->
-              case Map.toList titles of
-                [] -> Compose . Left $ NoValue (fromString "title")
-                [(stateId, title2)] ->
-                  case Map.lookup stateId (title task1) of
-                    Just title1 ->
-                      if title1 == title2
-                        then Compose . Right $ Pick stateId
-                        else Compose . Left $ AmbiguousUpdate (fromString "title") stateId title1 title2
-                    Nothing -> Compose . Left $ StateIdNotFound (fromString "title") stateId
-                _ ->
-                  Compose . Left $ UnresolvedConflicts (fromString "title") (Map.keysSet titles)
-      , description =
-          case description task2 of
-            Resolved description2 ->
-              case Map.toList (description task1) of
-                [(_, description1)] | description1 == description2 -> Compose $ Right None
-                _ -> Compose . Right $ Set description2
-            Conflicted descriptions ->
-              case Map.toList descriptions of
-                [] -> Compose . Left $ NoValue (fromString "description")
-                [(stateId, description2)] ->
-                  case Map.lookup stateId (description task1) of
-                    Just description1 ->
-                      if description1 == description2
-                        then Compose . Right $ Pick stateId
-                        else Compose . Left $ AmbiguousUpdate (fromString "description") stateId description1 description2
-                    Nothing -> Compose . Left $ StateIdNotFound (fromString "description") stateId
-                _ ->
-                  Compose . Left $ UnresolvedConflicts (fromString "description") (Map.keysSet descriptions)
-      }
+  btraverseC @Eq
+    ( \(Getter getter `Pair` Const fieldName) ->
+        case getter task2 of
+          Resolved value2 ->
+            case Map.toList (getter task1) of
+              [(_, value1)] | value1 == value2 -> Right None
+              _ -> Right $ Set value2
+          Conflicted values ->
+            case Map.toList values of
+              [] -> Left $ NoValue fieldName
+              [(stateId, value2)] ->
+                case Map.lookup stateId (getter task1) of
+                  Just value1 ->
+                    if value1 == value2
+                      then Right $ Pick stateId
+                      else Left $ AmbiguousUpdate fieldName stateId
+                  Nothing -> Left $ StateIdNotFound fieldName stateId
+              _ ->
+                Left $ UnresolvedConflicts fieldName (Map.keysSet values)
+    )
+    (bzip taskGetters taskFieldNames)
 
 data GID = GID !Word16 !Word16 !Word16 !Word16 !Word16
   deriving (Show, Eq, Ord, Generic, Binary)
