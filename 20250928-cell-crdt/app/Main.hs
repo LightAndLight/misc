@@ -47,14 +47,11 @@ data Command
   | Init
   | Debug
   | Merge FilePath
-  | New NewCommand
-  | Edit EditCommand
+  | Task TaskCommand
 
-data NewCommand
-  = NewTask
-
-data EditCommand
-  = EditTask Todo.TaskId
+data TaskCommand
+  = TaskNew
+  | TaskEdit Todo.TaskId
 
 cliParser :: Options.Parser Cli
 cliParser =
@@ -76,11 +73,8 @@ cliParser =
                   "merge"
                   (Options.info mergeParser (Options.progDesc "Combine two databases" <> Options.fullDesc))
                 <> Options.command
-                  "new"
-                  (Options.info newParser (Options.progDesc "Add a new resource" <> Options.fullDesc))
-                <> Options.command
-                  "edit"
-                  (Options.info editParser (Options.progDesc "Edit a resource" <> Options.fullDesc))
+                  "task"
+                  (Options.info (Task <$> taskParser) (Options.progDesc "Task operations" <> Options.fullDesc))
             )
             <|> pure Default
         )
@@ -94,27 +88,21 @@ cliParser =
     mergeParser =
       Merge <$> Options.strArgument (Options.metavar "PATH" <> Options.help "Database to be merged in")
 
-    newParser =
-      New
-        <$> Options.hsubparser
+    taskParser =
+        Options.hsubparser
           ( Options.command
-              "task"
-              (Options.info newTaskParser (Options.progDesc "Create a new task" <> Options.fullDesc))
+              "new"
+              (Options.info taskNewParser (Options.progDesc "Create a new task" <> Options.fullDesc)) <>
+            Options.command
+              "edit"
+              (Options.info taskEditParser (Options.progDesc "Edit a task" <> Options.fullDesc))
           )
 
-    newTaskParser =
-      pure NewTask
+    taskNewParser =
+      pure TaskNew
 
-    editParser =
-      Edit
-        <$> Options.hsubparser
-          ( Options.command
-              "task"
-              (Options.info editTaskParser (Options.progDesc "Edit a task" <> Options.fullDesc))
-          )
-
-    editTaskParser =
-      EditTask
+    taskEditParser =
+      TaskEdit
         <$> Options.argument
           (Todo.TaskId <$> Options.maybeReader Todo.gidFromBase32)
           (Options.metavar "ID" <> Options.help "Task to edit")
@@ -128,8 +116,8 @@ main = do
     Init -> init (database cli)
     Debug -> debug (database cli)
     Merge other -> merge (database cli) other
-    New NewTask -> newTask (database cli)
-    Edit (EditTask taskId) -> editTask (database cli) taskId
+    Task TaskNew -> taskNew (database cli)
+    Task (TaskEdit taskId) -> taskEdit (database cli) taskId
 
 default_ :: FilePath -> IO ()
 default_ path = do
@@ -179,8 +167,8 @@ merge path other = do
       bfor_ (bzip Todo.taskFieldNames task) $ \(Const fieldName `Pair` value) -> do
         unless (Map.size value <= 1) . putStrLn $ "* " ++ Text.unpack fieldName
 
-newTask :: FilePath -> IO ()
-newTask path = do
+taskNew :: FilePath -> IO ()
+taskNew path = do
   editor <- System.Environment.getEnv "EDITOR"
   now <- getCurrentTime
   let taskFile = "drafts/" ++ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now ++ ".txt"
@@ -472,8 +460,8 @@ renderUpdateTask task update =
             )
             (Map.toList $ getter task)
 
-editTask :: FilePath -> Todo.TaskId -> IO ()
-editTask path taskId = do
+taskEdit :: FilePath -> Todo.TaskId -> IO ()
+taskEdit path taskId = do
   state <- Todo.stateDeserialise path
   case Map.lookup taskId (Todo.tasks state) of
     Nothing -> do
