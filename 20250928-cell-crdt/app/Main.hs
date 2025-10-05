@@ -38,6 +38,8 @@ import System.Exit (ExitCode (..), exitFailure)
 import qualified System.Process as Process
 import qualified Todo
 import Prelude hiding (init)
+import Data.Maybe (fromMaybe)
+import System.IO (Handle, hPutStr, IOMode (..), withFile, hClose)
 
 data Cli
   = Cli {database :: FilePath, command :: Command}
@@ -51,6 +53,7 @@ data Command
 
 data TaskCommand
   = TaskNew
+  | TaskView Todo.TaskId
   | TaskEdit Todo.TaskId
 
 cliParser :: Options.Parser Cli
@@ -94,12 +97,21 @@ cliParser =
               "new"
               (Options.info taskNewParser (Options.progDesc "Create a new task" <> Options.fullDesc)) <>
             Options.command
+              "view"
+              (Options.info taskViewParser (Options.progDesc "View a task" <> Options.fullDesc)) <>
+            Options.command
               "edit"
               (Options.info taskEditParser (Options.progDesc "Edit a task" <> Options.fullDesc))
           )
 
     taskNewParser =
       pure TaskNew
+
+    taskViewParser =
+      TaskView
+        <$> Options.argument
+          (Todo.TaskId <$> Options.maybeReader Todo.gidFromBase32)
+          (Options.metavar "ID" <> Options.help "Task to view")
 
     taskEditParser =
       TaskEdit
@@ -117,6 +129,7 @@ main = do
     Debug -> debug (database cli)
     Merge other -> merge (database cli) other
     Task TaskNew -> taskNew (database cli)
+    Task (TaskView taskId) -> taskView (database cli) taskId
     Task (TaskEdit taskId) -> taskEdit (database cli) taskId
 
 default_ :: FilePath -> IO ()
@@ -377,9 +390,9 @@ rawTaskParser = do
   description <- Attoparsec.takeWhile (const True)
   pure Todo.Task{Todo.title = pure title, Todo.description = pure description}
 
-writeTask :: FilePath -> Todo.Task (Map Todo.StateId) -> IO ()
-writeTask path task =
-  writeFile path . intercalate "\n\n" $
+writeTask :: Handle -> Todo.Task (Map Todo.StateId) -> IO ()
+writeTask handle task =
+  hPutStr handle . intercalate "\n\n" $
     ( case Map.toList (Todo.title task) of
         [(_, title)] ->
           [ (if hasConflicts then "! title\n" else "")
@@ -460,6 +473,38 @@ renderUpdateTask task update =
             )
             (Map.toList $ getter task)
 
+taskView :: FilePath -> Todo.TaskId -> IO ()
+taskView path taskId = do
+  state <- Todo.stateDeserialise path
+  case Map.lookup taskId (Todo.tasks state) of
+    Nothing -> do
+      putStrLn "Task not found"
+      exitFailure
+    Just task -> do
+      pager <- System.Environment.getEnv "PAGER"
+
+      let
+        pagerArgs =
+          [ {-
+            This is the `less` flag to display text starting at the top of the screen instead of
+            the bottom. Slight concern about portability.
+            -}
+            "-c"
+          ]
+      let process = (Process.proc pager pagerArgs){Process.std_in = Process.CreatePipe}
+      exitCode <- Process.withCreateProcess process $ \mStdin _mStdout _mStderr processHandle -> do
+        let hStdin = fromMaybe (error "failed to open stdin") mStdin
+        writeTask hStdin task
+        hClose hStdin
+
+        Process.waitForProcess processHandle
+      case exitCode of
+        ExitFailure status -> do
+          putStrLn $ "Aborted (pager exited with status " ++ show status ++ ")"
+          exitFailure
+        ExitSuccess ->
+          pure ()
+
 taskEdit :: FilePath -> Todo.TaskId -> IO ()
 taskEdit path taskId = do
   state <- Todo.stateDeserialise path
@@ -480,7 +525,8 @@ taskEdit path taskId = do
               ++ Todo.gidToBase32 (Todo.unTaskId taskId)
               ++ ".txt"
       let taskFileBase = taskFile ++ ".base"
-      writeTask taskFileBase task
+      withFile taskFileBase WriteMode $ \handle ->
+        writeTask handle task
       copyFile taskFileBase taskFile
 
       ( do
