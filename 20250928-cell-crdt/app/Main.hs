@@ -34,12 +34,14 @@ import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import MD5 (md5FromBase32)
 import qualified Options.Applicative as Options
+import Options.Applicative.Help.Pretty ((.$.))
 import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
 import qualified System.Environment
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (Handle, IOMode (..), hClose, hPutStr, withFile)
 import qualified System.Process as Process
 import qualified Todo
+import qualified Todoist
 import Prelude hiding (init)
 
 data Cli
@@ -47,10 +49,12 @@ data Cli
 
 data Command
   = Default
-  | Init
+  | Init (Maybe InitFrom)
   | Debug
   | Merge FilePath
   | Task TaskCommand
+
+data InitFrom = InitFrom {type_ :: String, path :: FilePath}
 
 data TaskCommand
   = TaskNew
@@ -69,7 +73,10 @@ cliParser =
     <*> ( Options.hsubparser
             ( Options.command
                 "init"
-                (Options.info initParser (Options.progDesc "Create a database" <> Options.fullDesc))
+                ( Options.info
+                    initParser
+                    (Options.progDesc "Create a database" <> Options.fullDesc <> Options.footerDoc (Just initHeader))
+                )
                 <> Options.command
                   "debug"
                   (Options.info debugParser (Options.progDesc "Debug a database" <> Options.fullDesc))
@@ -83,8 +90,35 @@ cliParser =
             <|> pure Default
         )
   where
+    initHeader =
+      fromString "Importing:"
+        .$. fromString "  Use --from/-f TYPE:PATH to import entries."
+        .$. fromString ""
+        .$. fromString "  e.g. tsk -d your_database.tsk init -f todoist:/path/to/todoist.csv"
+        .$. fromString ""
+        .$. fromString "  Supported TYPEs:"
+        .$. fromString ""
+        .$. fromString
+          "  * todoist - Todolist CSV exports (https://www.todoist.com/help/articles/import-or-export-a-project-as-a-csv-file-in-todoist-YC8YvN#h_01HMC0QDKGXBX2TNQ9A559QY0M)"
+
     initParser =
-      pure Init
+      Init
+        <$> optional
+          ( Options.option
+              ( Options.maybeReader $ \input -> do
+                  let (type_, rest) = break (== ':') input
+                  path <-
+                    case rest of
+                      ':' : path -> pure path
+                      _ -> Nothing
+                  pure InitFrom{type_, path}
+              )
+              ( Options.long "from"
+                  <> Options.short 'f'
+                  <> Options.metavar "TYPE:PATH"
+                  <> Options.help "Import entries from a TYPE-formatted database at PATH."
+              )
+          )
 
     debugParser =
       pure Debug
@@ -126,7 +160,7 @@ main = do
 
   case command cli of
     Default -> default_ (database cli)
-    Init -> init (database cli)
+    Init mFrom -> init (database cli) mFrom
     Debug -> debug (database cli)
     Merge other -> merge (database cli) other
     Task TaskNew -> taskNew (database cli)
@@ -151,11 +185,23 @@ default_ path = do
         [] -> undefined
         (_stateId, title) : _ -> Text.IO.putStrLn title
 
-init :: FilePath -> IO ()
-init path = do
+init :: FilePath -> Maybe InitFrom -> IO ()
+init path Nothing = do
   let state = Todo.stateNew
   Todo.stateSerialise path state
   putStrLn $ "Created " ++ path
+init dbPath (Just InitFrom{type_, path = importPath}) =
+  case type_ of
+    "todoist" -> do
+      project <- Todoist.decodeProject importPath
+      (Todoist.ImportStats numTasks, state) <- Todoist.projectToState project
+      Todo.stateSerialise dbPath state
+      putStrLn $ "Created " ++ dbPath ++ "\n"
+      putStrLn "Imported:"
+      putStrLn $ "* " ++ show numTasks ++ " tasks"
+    _ -> do
+      putStrLn $ "error: unsupported import type: " ++ type_
+      exitFailure
 
 debug :: FilePath -> IO ()
 debug path = do

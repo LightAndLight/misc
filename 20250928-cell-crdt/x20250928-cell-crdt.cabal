@@ -39,12 +39,14 @@ executable tsk
     import:           warnings
     hs-source-dirs:   app
     main-is:          Main.hs
+    other-modules:    Todoist
     build-depends:
         attoparsec,
         x20250928-cell-crdt,
         barbies,
         base ^>=4.19.2.0,
         bytestring,
+        cassava,
         containers,
         directory,
         text,

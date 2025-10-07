@@ -51,13 +51,16 @@ import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds, secon
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Data.Word (Word16, Word8)
 import GHC.Generics (Generic)
-import MD5 (MD5, hashMD5, md5ToBase32)
+import MD5 (MD5 (..), hashMD5, md5ToBase32)
 import System.Entropy (getEntropy)
 import System.IO (IOMode (..), withFile)
 
 newtype StateId = StateId MD5
   deriving (Show, Eq, Ord)
   deriving newtype (Binary)
+
+initialStateId :: StateId
+initialStateId = StateId (MD5 0 0)
 
 mkStateId :: Set StateId -> Change -> StateId
 mkStateId parents change = StateId . hashMD5 . runPut $ putSet parents <> putChange change
@@ -193,9 +196,12 @@ newtype TaskId = TaskId {unTaskId :: GID}
 renderTaskId :: TaskId -> String
 renderTaskId (TaskId gid) = gidToBase32 gid
 
+newTaskId :: IO TaskId
+newTaskId = TaskId <$> newGID
+
 data Metadata
   = Metadata
-  { createdAt :: UTCTime
+  { createdAt :: !UTCTime
   }
   deriving (Show, Eq)
 
@@ -236,7 +242,7 @@ stateChange change@NewTask{task} state = do
   let stateId = mkStateId (current state) change
   now <- getCurrentTime
 
-  taskId <- TaskId <$> newGID
+  taskId <- newTaskId
   pure
     state
       { current = Set.singleton stateId

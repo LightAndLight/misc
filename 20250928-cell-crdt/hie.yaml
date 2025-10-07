@@ -6,5 +6,8 @@ cradle:
     - path: "./app/Main.hs"
       component: "x20250928-cell-crdt:exe:tsk"
 
+    - path: "./app/Todoist.hs"
+      component: "x20250928-cell-crdt:exe:tsk"
+
     - path: "./test"
       component: "x20250928-cell-crdt:test:x20250928-cell-crdt-tests"
