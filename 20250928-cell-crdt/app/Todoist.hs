@@ -5,7 +5,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE NoFieldSelectors #-}
 
 module Todoist
@@ -22,14 +21,14 @@ module Todoist
 where
 
 import Control.Exception (assert)
-import Data.Bifunctor (first, second)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Csv (FromRecord)
 import qualified Data.Csv as Csv
 import Data.Either (partitionEithers)
-import Data.Foldable (foldl', for_, toList)
+import Data.Foldable (foldl', toList)
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
+import Data.Monoid (Sum (..))
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.String (fromString)
@@ -96,6 +95,7 @@ data Task
     , deadline_lang :: !Text
     -}
     notes :: ![Note]
+  , subtasks :: ![Task]
   }
   deriving (Show, Eq)
 
@@ -108,9 +108,9 @@ data Note
   }
   deriving (Show, Eq)
 
-rowsToProject :: [Row] -> Either DecodeError ([Row], Project)
+rowsToProject :: [Row] -> Either DecodeError Project
 rowsToProject rows = do
-  (skipped, tasks) <- rowsToTasks otherRows
+  tasks <- rowsToTasks otherRows
   let
     !project =
       Project
@@ -127,7 +127,7 @@ rowsToProject rows = do
               metaRows
         , tasks
         }
-  pure (skipped, project)
+  pure project
   where
     (metaRows, otherRows) = span ((fromString "meta" ==) . (.type_)) rows
 
@@ -152,10 +152,10 @@ decodeUTCTime row input =
     . iso8601ParseM
     $ Text.unpack input
 
-rowsToTasks :: [Row] -> Either DecodeError ([Row], [Task])
-rowsToTasks = go
+rowsToTasks :: [Row] -> Either DecodeError [Task]
+rowsToTasks = (fmap . fmap) snd . go
   where
-    go [] = pure ([], [])
+    go [] = pure []
     go (row : rows)
       | Text.null row.type_ = go rows
       | otherwise =
@@ -170,11 +170,12 @@ rowsToTasks = go
             let (noteRows, rest) = span ((fromString "note" ==) . (.type_)) rows
             priority <- decodeInt row row.priority
             indent <- decodeInt row row.indent
-            if indent == 1
-              then do
-                notes <- traverse rowToNote noteRows
-                second
-                  ( Task
+            notes <- traverse rowToNote noteRows
+            ( \rest' ->
+                let
+                  (subtasks, rest'') = span ((indent <) . fst) rest'
+                  task =
+                    Task
                       { content
                       , labels
                       , description = row.description
@@ -183,12 +184,12 @@ rowsToTasks = go
                       , responsible = row.responsible
                       , timezone = row.timezone
                       , notes
+                      , subtasks = fmap snd subtasks
                       }
-                      :
-                  )
-                  <$> go rest
-              else
-                first ((row :) . (noteRows ++)) <$> go rest
+                in
+                  (indent, task) : rest''
+              )
+              <$> go rest
 
 rowToNote :: Row -> Either DecodeError Note
 rowToNote row = do
@@ -219,54 +220,70 @@ decodeProject :: FilePath -> IO Project
 decodeProject path = do
   rows <- loadRows path
 
-  (skipped, project) <-
-    either
-      -- TODO: better error message
-      (error . ("decode error: " ++) . show)
-      pure
-      (rowsToProject (toList rows))
-
-  for_ skipped $ \row -> do
-    -- TODO: nicer message
-    putStrLn "warning: skipped row:"
-    putStrLn $ "* type: " ++ show row.type_
-    putStrLn $ "* content: " ++ show row.content
-    putStrLn ""
-
-  pure project
+  either
+    -- TODO: better error message
+    (error . ("decode error: " ++) . show)
+    pure
+    (rowsToProject (toList rows))
 
 data ImportStats
   = ImportStats
   { numTasks :: !Int
   }
 
+countTasks :: Task -> Int
+countTasks task = foldl' (\acc -> (acc +) . countTasks) 1 task.subtasks
+
 projectToState :: Project -> IO (ImportStats, Todo.State)
 projectToState project = do
   now <- getCurrentTime
-  (tasks, taskMetadata) <- fmap unzip . for project.tasks $ \task -> do
-    taskId <- Todo.newTaskId
-    pure
-      (
-        ( taskId
-        , Todo.Task
-            { status = Map.singleton Todo.initialStateId $ fromString "todo"
-            , labels = Map.singleton Todo.initialStateId task.labels
-            , title = Map.singleton Todo.initialStateId task.content
-            , description = Map.singleton Todo.initialStateId task.description
-            }
-        )
-      , (taskId, Todo.Metadata{createdAt = now})
-      )
+
+  let
+    mkTasks :: [Todoist.Task] -> IO [(Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.Metadata))]
+    mkTasks tasks =
+      for tasks $ \task -> do
+        subtasks <- mkTasks task.subtasks
+
+        taskId <- Todo.newTaskId
+        let
+          description :: Text
+          description
+            | null subtasks = task.description
+            | otherwise =
+                task.description
+                  <> fromString "\n\nSubtasks:\n\n"
+                  <> fromString
+                    ( foldMap
+                        ( \(subtaskId, _) ->
+                            "* <tsk:" <> Todo.renderTaskId subtaskId <> ">\n"
+                        )
+                        subtasks
+                    )
+        pure
+          ( taskId
+          ,
+            ( Todo.Task
+                { status = Map.singleton Todo.initialStateId $ fromString "todo"
+                , labels = Map.singleton Todo.initialStateId task.labels
+                , title = Map.singleton Todo.initialStateId task.content
+                , description = Map.singleton Todo.initialStateId description
+                }
+            , Todo.Metadata{createdAt = now}
+            )
+          )
+
+  let numTasks = getSum $ foldMap (Sum . countTasks) project.tasks
+  tasks <- mkTasks project.tasks
 
   let
     !state =
       Todo.State
         { current = Set.singleton Todo.initialStateId
-        , tasks = Map.fromList tasks
-        , taskMetadata = Map.fromList taskMetadata
+        , tasks = Map.fromList [(taskId, task) | (taskId, (task, _)) <- tasks]
+        , taskMetadata = Map.fromList [(taskId, metadata) | (taskId, (_, metadata)) <- tasks]
         , history = Map.empty
         }
 
-    !importStats = ImportStats{numTasks = length tasks}
+    !importStats = ImportStats{numTasks}
 
   pure (importStats, state)
