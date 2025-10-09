@@ -22,11 +22,12 @@ module Todoist
 where
 
 import Control.Exception (assert)
+import Data.Bifunctor (first, second)
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Csv (FromRecord)
 import qualified Data.Csv as Csv
 import Data.Either (partitionEithers)
-import Data.Foldable (foldl', toList)
+import Data.Foldable (foldl', for_, toList)
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -76,7 +77,6 @@ data Task
   , labels :: !(Set Text)
   , description :: !Text
   , priority :: !Int
-  , indent :: !Int
   , author :: !Text
   , responsible :: !Text
   , {- Task due dates are natural language; annoying to parse.
@@ -108,53 +108,55 @@ data Note
   }
   deriving (Show, Eq)
 
-rowsToProject :: [Row] -> Either DecodeError Project
-rowsToProject (zip [0 ..] -> rows) = do
-  tasks <- rowsToTasks otherRows
-  pure $!
-    Project
-      { meta =
-          foldl'
-            ( \acc row ->
-                let
-                  parts = Text.splitOn (fromString "=") (snd row).content
-                in
-                  assert (length parts == 2) $
-                    Map.insert (parts !! 0) (parts !! 1) acc
-            )
-            Map.empty
-            metaRows
-      , tasks
-      }
+rowsToProject :: [Row] -> Either DecodeError ([Row], Project)
+rowsToProject rows = do
+  (skipped, tasks) <- rowsToTasks otherRows
+  let
+    !project =
+      Project
+        { meta =
+            foldl'
+              ( \acc row ->
+                  let
+                    parts = Text.splitOn (fromString "=") row.content
+                  in
+                    assert (length parts == 2) $
+                      Map.insert (parts !! 0) (parts !! 1) acc
+              )
+              Map.empty
+              metaRows
+        , tasks
+        }
+  pure (skipped, project)
   where
-    (metaRows, otherRows) = span ((fromString "meta" ==) . (.type_) . snd) rows
+    (metaRows, otherRows) = span ((fromString "meta" ==) . (.type_)) rows
 
-data DecodeError = DecodeError {index :: !Int, message :: !Text}
+data DecodeError = DecodeError {row :: !Row, message :: !Text}
   deriving (Show, Eq)
 
-decodeInt :: Int -> Text -> Either DecodeError Int
-decodeInt index input =
-  maybe (Left DecodeError{index, message = fromString $ show input ++ " is not an Int"}) Right
+decodeInt :: Row -> Text -> Either DecodeError Int
+decodeInt row input =
+  maybe (Left DecodeError{row, message = fromString $ show input ++ " is not an Int"}) Right
     . readMaybe
     $ Text.unpack input
 
 decodeOptional ::
-  (Int -> Text -> Either DecodeError a) -> Int -> Text -> Either DecodeError (Maybe a)
+  (Row -> Text -> Either DecodeError a) -> Row -> Text -> Either DecodeError (Maybe a)
 decodeOptional f index input
   | Text.null input = pure Nothing
   | otherwise = Just <$> f index input
 
-decodeUTCTime :: Int -> Text -> Either DecodeError UTCTime
-decodeUTCTime index input =
-  maybe (Left DecodeError{index, message = fromString $ show input ++ " is not a UTCTime"}) Right
+decodeUTCTime :: Row -> Text -> Either DecodeError UTCTime
+decodeUTCTime row input =
+  maybe (Left DecodeError{row, message = fromString $ show input ++ " is not a UTCTime"}) Right
     . iso8601ParseM
     $ Text.unpack input
 
-rowsToTasks :: [(Int, Row)] -> Either DecodeError [Task]
+rowsToTasks :: [Row] -> Either DecodeError ([Row], [Task])
 rowsToTasks = go
   where
-    go [] = pure []
-    go ((index, row) : rows)
+    go [] = pure ([], [])
+    go (row : rows)
       | Text.null row.type_ = go rows
       | otherwise =
           assert (row.type_ == fromString "task") $ do
@@ -165,27 +167,32 @@ rowsToTasks = go
                       fmap (\input -> maybe (Right input) Left $ Text.stripPrefix (fromString "@") input) parts
               pure (Text.intercalate (fromString " ") nonLabels, Set.fromList labels)
 
-            let (noteRows, rest) = span ((fromString "note" ==) . (.type_) . snd) rows
-            priority <- decodeInt index row.priority
-            indent <- decodeInt index row.indent
-            notes <- traverse (uncurry rowToNote) noteRows
-            (:)
-              Task
-                { content
-                , labels
-                , description = row.description
-                , priority
-                , indent
-                , author = row.author
-                , responsible = row.responsible
-                , timezone = row.timezone
-                , notes
-                }
-              <$> go rest
+            let (noteRows, rest) = span ((fromString "note" ==) . (.type_)) rows
+            priority <- decodeInt row row.priority
+            indent <- decodeInt row row.indent
+            if indent == 1
+              then do
+                notes <- traverse rowToNote noteRows
+                second
+                  ( Task
+                      { content
+                      , labels
+                      , description = row.description
+                      , priority
+                      , author = row.author
+                      , responsible = row.responsible
+                      , timezone = row.timezone
+                      , notes
+                      }
+                      :
+                  )
+                  <$> go rest
+              else
+                first ((row :) . (noteRows ++)) <$> go rest
 
-rowToNote :: Int -> Row -> Either DecodeError Note
-rowToNote index row = do
-  date <- decodeOptional decodeUTCTime index row.date
+rowToNote :: Row -> Either DecodeError Note
+rowToNote row = do
+  date <- decodeOptional decodeUTCTime row row.date
   pure $!
     Note
       { content = row.content
@@ -212,11 +219,21 @@ decodeProject :: FilePath -> IO Project
 decodeProject path = do
   rows <- loadRows path
 
-  either
-    -- TODO: better error message
-    (error . ("decode error: " ++) . show)
-    pure
-    (rowsToProject (toList rows))
+  (skipped, project) <-
+    either
+      -- TODO: better error message
+      (error . ("decode error: " ++) . show)
+      pure
+      (rowsToProject (toList rows))
+
+  for_ skipped $ \row -> do
+    -- TODO: nicer message
+    putStrLn "warning: skipped row:"
+    putStrLn $ "* type: " ++ show row.type_
+    putStrLn $ "* content: " ++ show row.content
+    putStrLn ""
+
+  pure project
 
 data ImportStats
   = ImportStats
