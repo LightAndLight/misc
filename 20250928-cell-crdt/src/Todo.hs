@@ -71,6 +71,7 @@ renderStateId (StateId s) = md5ToBase32 s
 data Task f
   = Task
   { status :: !(f Text)
+  , labels :: !(f (Set Text))
   , title :: !(f Text)
   , description :: !(f Text)
   }
@@ -83,6 +84,7 @@ taskFieldNames :: Task (Const Text)
 taskFieldNames =
   Task
     { status = Const $ fromString "status"
+    , labels = Const $ fromString "labels"
     , title = Const $ fromString "title"
     , description = Const $ fromString "description"
     }
@@ -93,6 +95,7 @@ taskGetters :: b ~ Task => b (Getter b)
 taskGetters =
   Task
     { status = Getter status
+    , labels = Getter labels
     , title = Getter title
     , description = Getter description
     }

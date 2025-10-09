@@ -135,8 +135,8 @@ data DecodeError = DecodeError {index :: !Int, message :: !Text}
 decodeInt :: Int -> Text -> Either DecodeError Int
 decodeInt index input =
   maybe (Left DecodeError{index, message = fromString $ show input ++ " is not an Int"}) Right
-    . readMaybe $
-    Text.unpack input
+    . readMaybe
+    $ Text.unpack input
 
 decodeOptional ::
   (Int -> Text -> Either DecodeError a) -> Int -> Text -> Either DecodeError (Maybe a)
@@ -147,8 +147,8 @@ decodeOptional f index input
 decodeUTCTime :: Int -> Text -> Either DecodeError UTCTime
 decodeUTCTime index input =
   maybe (Left DecodeError{index, message = fromString $ show input ++ " is not a UTCTime"}) Right
-    . iso8601ParseM $
-    Text.unpack input
+    . iso8601ParseM
+    $ Text.unpack input
 
 rowsToTasks :: [(Int, Row)] -> Either DecodeError [Task]
 rowsToTasks = go
@@ -233,6 +233,7 @@ projectToState project = do
         ( taskId
         , Todo.Task
             { status = Map.singleton Todo.initialStateId $ fromString "todo"
+            , labels = Map.singleton Todo.initialStateId task.labels
             , title = Map.singleton Todo.initialStateId task.content
             , description = Map.singleton Todo.initialStateId task.description
             }

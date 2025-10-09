@@ -25,6 +25,7 @@ import Data.Maybe (fromMaybe)
 import Data.Monoid (All (..))
 import Data.Ord (Down (..))
 import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -429,13 +430,26 @@ taskFileParser =
     emptyTask
     <$> some
       ( statusFieldParser
+          <|> labelsFieldParser
           <|> titleFieldParser
           <|> descriptionFieldParser
       )
   where
-    emptyTask = Todo.Task{Todo.status = mempty, Todo.title = mempty, Todo.description = mempty}
+    emptyTask =
+      Todo.Task
+        { Todo.status = mempty
+        , Todo.labels = mempty
+        , Todo.title = mempty
+        , Todo.description = mempty
+        }
 
     lineParser = Attoparsec.takeWhile (/= '\n') <* Attoparsec.takeWhile Char.isSpace
+
+    commaSepParser =
+      Attoparsec.sepBy
+        (Attoparsec.takeWhile (`notElem` ",\n"))
+        (Attoparsec.char ',' <* Attoparsec.skipWhile Char.isSpace)
+        <* Attoparsec.skipWhile Char.isSpace
 
     statusFieldParser = do
       mStateId <- fieldCommentParser "status"
@@ -445,6 +459,15 @@ taskFileParser =
           pure emptyTask{Todo.status = Compose [Unidentified status]}
         Just stateId ->
           pure emptyTask{Todo.status = Compose [Identified stateId status]}
+
+    labelsFieldParser = do
+      mStateId <- fieldCommentParser "labels"
+      labels <- Set.fromList <$> commaSepParser
+      case mStateId of
+        Nothing ->
+          pure emptyTask{Todo.labels = Compose [Unidentified labels]}
+        Just stateId ->
+          pure emptyTask{Todo.labels = Compose [Identified stateId labels]}
 
     titleFieldParser = do
       mStateId <- fieldCommentParser "title"
@@ -475,6 +498,7 @@ taskRenderValues :: Todo.Task (Op String)
 taskRenderValues =
   Todo.Task
     { Todo.status = Op Text.unpack
+    , Todo.labels = Op (intercalate ", " . fmap Text.unpack . Set.toAscList)
     , Todo.title = Op Text.unpack
     , Todo.description = Op Text.unpack
     }
