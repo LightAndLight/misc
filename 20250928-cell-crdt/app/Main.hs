@@ -1,3 +1,6 @@
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RankNTypes #-}
@@ -12,17 +15,18 @@ import Control.Monad (unless, when)
 import Data.Attoparsec.Combinator (lookAhead)
 import qualified Data.Attoparsec.Text.Lazy as Attoparsec
 import qualified Data.Char as Char
-import Data.Foldable (foldl', foldlM, for_, traverse_)
+import Data.Foldable (fold, foldl', foldlM, for_, traverse_)
 import Data.Functor (void)
 import Data.Functor.Compose (Compose (..))
 import Data.Functor.Contravariant (Op (..))
 import Data.Functor.Identity (Identity (..), runIdentity)
 import Data.Functor.Product (Product (..))
+import Data.Kind (Type)
 import Data.List (intercalate, sortOn)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe)
-import Data.Monoid (All (..))
+import Data.Monoid (All (..), Alt (..), Any (..))
 import Data.Ord (Down (..))
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -54,13 +58,79 @@ data Command
   | Debug
   | Merge FilePath
   | Task TaskCommand
+  | Label LabelCommand
 
 data InitFrom = InitFrom {type_ :: String, path :: FilePath}
 
 data TaskCommand
   = TaskNew
+  | TaskList (Maybe (Todo.Task FieldSelectors))
   | TaskView Todo.TaskId
   | TaskEdit Todo.TaskId
+
+taskFieldSelectorsEmpty :: Todo.Task FieldSelectors
+taskFieldSelectorsEmpty =
+  Todo.Task
+    { Todo.status = mempty
+    , Todo.labels = mempty
+    , Todo.title = mempty
+    , Todo.description = mempty
+    }
+
+newtype FieldSelectors a = FieldSelectors [FieldSelector a]
+  deriving (Semigroup, Monoid)
+
+data FieldSelector :: Type -> Type where
+  FieldEq :: Eq a => a -> FieldSelector a
+  FieldIn :: Ord a => a -> FieldSelector (Set a)
+
+parseTaskListFilter :: String -> Maybe (Todo.Task FieldSelectors)
+parseTaskListFilter input =
+  case Attoparsec.parseOnly (taskListFilterParser <* Attoparsec.endOfInput) $ fromString input of
+    Left{} -> Nothing
+    Right a -> pure a
+  where
+    textFieldSelectorOpParser :: Attoparsec.Parser (FieldSelector Text)
+    textFieldSelectorOpParser = FieldEq <$ Attoparsec.char '=' <*> Attoparsec.takeWhile (/= ',')
+
+    setFieldSelectorOpParser :: Attoparsec.Parser (FieldSelector (Set Text))
+    setFieldSelectorOpParser = FieldIn <$ Attoparsec.char '=' <*> Attoparsec.takeWhile (/= ',')
+
+    textFieldSelectorParser :: Text -> Attoparsec.Parser (FieldSelectors Text)
+    textFieldSelectorParser field =
+      fmap (FieldSelectors . pure) (Attoparsec.string field *> textFieldSelectorOpParser)
+
+    setFieldSelectorParser :: Text -> Attoparsec.Parser (FieldSelectors (Set Text))
+    setFieldSelectorParser field =
+      fmap (FieldSelectors . pure) (Attoparsec.string field *> setFieldSelectorOpParser)
+
+    taskListFilterParsers :: Todo.Task (Const (Attoparsec.Parser (Todo.Task FieldSelectors)))
+    taskListFilterParsers =
+      Todo.Task
+        { Todo.status =
+            Const $
+              (\f -> taskFieldSelectorsEmpty{Todo.status = f}) <$> textFieldSelectorParser (fromString "status")
+        , Todo.labels =
+            Const $
+              (\f -> taskFieldSelectorsEmpty{Todo.labels = f}) <$> setFieldSelectorParser (fromString "label")
+        , Todo.title =
+            Const $
+              (\f -> taskFieldSelectorsEmpty{Todo.title = f}) <$> textFieldSelectorParser (fromString "title")
+        , Todo.description =
+            Const $
+              (\f -> taskFieldSelectorsEmpty{Todo.description = f})
+                <$> textFieldSelectorParser (fromString "description")
+        }
+
+    taskListFilterParser :: Attoparsec.Parser (Todo.Task FieldSelectors)
+    taskListFilterParser =
+      foldl' (bzipWith (<>)) taskFieldSelectorsEmpty
+        <$> Attoparsec.sepBy
+          (getAlt (bfoldMap (Alt . getConst) taskListFilterParsers))
+          (Attoparsec.char ',')
+
+data LabelCommand
+  = LabelList
 
 cliParser :: Options.Parser Cli
 cliParser =
@@ -87,6 +157,9 @@ cliParser =
                 <> Options.command
                   "task"
                   (Options.info (Task <$> taskParser) (Options.progDesc "Task operations" <> Options.fullDesc))
+                <> Options.command
+                  "label"
+                  (Options.info (Label <$> labelParser) (Options.progDesc "Label operations" <> Options.fullDesc))
             )
             <|> pure Default
         )
@@ -133,6 +206,9 @@ cliParser =
             "new"
             (Options.info taskNewParser (Options.progDesc "Create a new task" <> Options.fullDesc))
             <> Options.command
+              "list"
+              (Options.info taskListParser (Options.progDesc "List tasks" <> Options.fullDesc))
+            <> Options.command
               "view"
               (Options.info taskViewParser (Options.progDesc "View a task" <> Options.fullDesc))
             <> Options.command
@@ -142,6 +218,14 @@ cliParser =
 
     taskNewParser =
       pure TaskNew
+
+    taskListParser =
+      TaskList
+        <$> optional
+          ( Options.option
+              (Options.maybeReader parseTaskListFilter)
+              (Options.long "filter" <> Options.metavar "FILTER" <> Options.help "Task filter expression")
+          )
 
     taskViewParser =
       TaskView
@@ -155,6 +239,13 @@ cliParser =
           (Todo.TaskId <$> Options.maybeReader Todo.gidFromBase32)
           (Options.metavar "ID" <> Options.help "Task to edit")
 
+    labelParser =
+      Options.hsubparser
+        ( Options.command
+            "list"
+            (Options.info (pure LabelList) (Options.progDesc "List labels" <> Options.fullDesc))
+        )
+
 main :: IO ()
 main = do
   cli <- Options.execParser (Options.info (cliParser <**> Options.helper) Options.fullDesc)
@@ -165,26 +256,30 @@ main = do
     Debug -> debug (database cli)
     Merge other -> merge (database cli) other
     Task TaskNew -> taskNew (database cli)
+    Task (TaskList mQuery) -> taskList (database cli) mQuery
     Task (TaskView taskId) -> taskView (database cli) taskId
     Task (TaskEdit taskId) -> taskEdit (database cli) taskId
+    Label LabelList -> labelList (database cli)
 
 default_ :: FilePath -> IO ()
 default_ path = do
   state <- Todo.stateDeserialise path
-  traverse_ renderTask
-    . sortOn (Down . Todo.createdAt . snd . snd)
-    . Map.toList
-    $ Map.intersectionWith (,) (Todo.tasks state) (Todo.taskMetadata state)
-  where
-    renderTask :: (Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.Metadata)) -> IO ()
-    renderTask (Todo.TaskId taskId, (task, _metadata)) = do
-      putStr $ "(" ++ Todo.gidToBase32 taskId ++ ")"
-      if Map.size (Todo.title task) > 1 || Map.size (Todo.description task) > 1
-        then putStr "* "
-        else putStr "  "
-      case Map.toList (Todo.title task) of
-        [] -> undefined
-        (_stateId, title) : _ -> Text.IO.putStrLn title
+  let
+    tasks =
+      sortOn (Down . Todo.createdAt . snd . snd)
+        . Map.toList
+        $ Map.intersectionWith (,) (Todo.tasks state) (Todo.taskMetadata state)
+  traverse_ renderTask tasks
+
+renderTask :: (Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.Metadata)) -> IO ()
+renderTask (Todo.TaskId taskId, (task, _metadata)) = do
+  putStr $ "(" ++ Todo.gidToBase32 taskId ++ ")"
+  if Map.size (Todo.title task) > 1 || Map.size (Todo.description task) > 1
+    then putStr "* "
+    else putStr "  "
+  case Map.toList (Todo.title task) of
+    [] -> undefined
+    (_stateId, title) : _ -> Text.IO.putStrLn title
 
 init :: FilePath -> Maybe InitFrom -> IO ()
 init path Nothing = do
@@ -581,6 +676,31 @@ renderUpdateTask task update =
             )
             (Map.toList $ getter task)
 
+taskList :: FilePath -> Maybe (Todo.Task FieldSelectors) -> IO ()
+taskList path mFilter = do
+  state <- Todo.stateDeserialise path
+  let filteredTasks = Map.filter (maybe (const True) filterTask mFilter) (Todo.tasks state)
+  let
+    tasks =
+      sortOn (Down . Todo.createdAt . snd . snd)
+        . Map.toList
+        $ Map.intersectionWith (,) filteredTasks (Todo.taskMetadata state)
+  traverse_ renderTask tasks
+  where
+    filterTask :: Todo.Task FieldSelectors -> Todo.Task (Map Todo.StateId) -> Bool
+    filterTask taskSelectors task =
+      getAny $
+        bfoldMap
+          ( \(FieldSelectors selectors `Pair` values) ->
+              Any $
+                not (null selectors) && all (\selector -> any (matches selector) values) selectors
+          )
+          (bzip taskSelectors task)
+
+    matches :: FieldSelector a -> a -> Bool
+    matches (FieldEq a) b = a == b
+    matches (FieldIn a) b = a `Set.member` b
+
 taskView :: FilePath -> Todo.TaskId -> IO ()
 taskView path taskId = do
   state <- Todo.stateDeserialise path
@@ -678,3 +798,10 @@ taskEdit path taskId = do
                       putStrLn $ "Updated task " ++ Todo.gidToBase32 (Todo.unTaskId taskId)
         )
         `finally` removeFile taskFileBase
+
+labelList :: FilePath -> IO ()
+labelList path = do
+  state <- Todo.stateDeserialise path
+  let labels = foldMap (fold . Todo.labels) $ Todo.tasks state
+  for_ (Set.toAscList labels) $ \label -> do
+    Text.IO.putStrLn label
