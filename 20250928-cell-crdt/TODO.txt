@@ -1,0 +1,6 @@
+* [ ] Implement comments
+
+  * Metadata: created at, reply to (either task or comment)
+  * Data: description
+
+* [x] Split project apart
