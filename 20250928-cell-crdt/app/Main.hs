@@ -37,15 +37,38 @@ import qualified Data.Text.IO as Text.IO
 import qualified Data.Text.Lazy.IO as LazyText
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
+import GID (gidFromBase32, gidToBase32)
+import Getter (Getter (..))
 import MD5 (md5FromBase32)
 import qualified Options.Applicative as Options
 import Options.Applicative.Help.Pretty ((.$.))
+import StateId (StateId (..), renderStateId)
 import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
 import qualified System.Environment
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (Handle, IOMode (..), hClose, hPutStr, withFile)
 import qualified System.Process as Process
 import qualified Todo
+  ( Change (..)
+  , State (..)
+  , stateChange
+  , stateConflicts
+  , stateDeserialise
+  , stateMerge
+  , stateNew
+  , stateSerialise
+  )
+import qualified Todo.Task as Todo
+  ( Conflicted (..)
+  , Task (..)
+  , TaskId (..)
+  , TaskMetadata (..)
+  , Update (..)
+  , renderTaskId
+  , taskDiff
+  , taskFieldNames
+  , taskGetters
+  )
 import qualified Todoist
 import Prelude hiding (init)
 
@@ -230,13 +253,13 @@ cliParser =
     taskViewParser =
       TaskView
         <$> Options.argument
-          (Todo.TaskId <$> Options.maybeReader Todo.gidFromBase32)
+          (Todo.TaskId <$> Options.maybeReader gidFromBase32)
           (Options.metavar "ID" <> Options.help "Task to view")
 
     taskEditParser =
       TaskEdit
         <$> Options.argument
-          (Todo.TaskId <$> Options.maybeReader Todo.gidFromBase32)
+          (Todo.TaskId <$> Options.maybeReader gidFromBase32)
           (Options.metavar "ID" <> Options.help "Task to edit")
 
     labelParser =
@@ -271,9 +294,9 @@ default_ path = do
         $ Map.intersectionWith (,) (Todo.tasks state) (Todo.taskMetadata state)
   traverse_ renderTask tasks
 
-renderTask :: (Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.TaskMetadata)) -> IO ()
+renderTask :: (Todo.TaskId, (Todo.Task (Map StateId), Todo.TaskMetadata)) -> IO ()
 renderTask (Todo.TaskId taskId, (task, _metadata)) = do
-  putStr $ "(" ++ Todo.gidToBase32 taskId ++ ")"
+  putStr $ "(" ++ gidToBase32 taskId ++ ")"
   if Map.size (Todo.title task) > 1 || Map.size (Todo.description task) > 1
     then putStr "* "
     else putStr "  "
@@ -387,7 +410,7 @@ readTask path parser = do
     Right task ->
       pure task
 
-fieldCommentParser :: String -> Attoparsec.Parser (Maybe Todo.StateId)
+fieldCommentParser :: String -> Attoparsec.Parser (Maybe StateId)
 fieldCommentParser field =
   Attoparsec.char '!'
     *> Attoparsec.takeWhile (\c -> Char.isSpace c && c /= '\n')
@@ -399,7 +422,7 @@ fieldCommentParser field =
                 chars <- Attoparsec.takeWhile1 Char.isAlphaNum
                 case md5FromBase32 $ Text.unpack chars of
                   Nothing -> fail "invalid state ID"
-                  Just md5 -> pure $ Todo.StateId md5
+                  Just md5 -> pure $ StateId md5
              )
           <* Attoparsec.char ')'
           <* Attoparsec.takeWhile (\c -> Char.isSpace c && c /= '\n')
@@ -408,7 +431,7 @@ fieldCommentParser field =
 
 data Identified a
   = Unidentified a
-  | Identified Todo.StateId a
+  | Identified StateId a
   deriving (Show, Eq)
 
 data ValidateIdentifiedError
@@ -445,7 +468,7 @@ data ValidateIdentifiedError
       -- | Field name
       !Text
       -- | Current proposed conflicts
-      !(Set Todo.StateId)
+      !(Set StateId)
   | -- | The change proposes a conflict set in addition to a new value.
     --
     -- Example:
@@ -463,7 +486,7 @@ data ValidateIdentifiedError
       -- | Field name
       !Text
       -- | Proposed conflict
-      !Todo.StateId
+      !StateId
   | -- | A field has different values proposed for the same 'StateId'.
     --
     -- Example:
@@ -480,7 +503,7 @@ data ValidateIdentifiedError
     InconsistentConflict
       -- | Field name
       !Text
-      !Todo.StateId
+      !StateId
   | -- | The proposed field change is empty.
     EmptyChange
       -- | Field name
@@ -598,7 +621,7 @@ taskRenderValues =
     , Todo.description = Op Text.unpack
     }
 
-writeTask :: Handle -> Todo.Task (Map Todo.StateId) -> IO ()
+writeTask :: Handle -> Todo.Task (Map StateId) -> IO ()
 writeTask handle task =
   hPutStr handle . intercalate "\n\n" $
     bfoldMap
@@ -613,17 +636,17 @@ writeTask handle task =
             values' ->
               fmap
                 ( \(stateId, value) ->
-                    "! " ++ Text.unpack fieldName ++ " (" ++ Todo.renderStateId stateId ++ ")\n" ++ renderValue value
+                    "! " ++ Text.unpack fieldName ++ " (" ++ renderStateId stateId ++ ")\n" ++ renderValue value
                 )
                 values'
       )
       (bzip (bzip Todo.taskFieldNames taskRenderValues) task)
 
-renderUpdateTask :: Todo.Task (Map Todo.StateId) -> Todo.Task Todo.Update -> String
+renderUpdateTask :: Todo.Task (Map StateId) -> Todo.Task Todo.Update -> String
 renderUpdateTask task update =
   foldMap (++ "\n\n") $
     bfoldMap
-      ( \(Const fieldName `Pair` Op renderValue `Pair` Todo.Getter getter) ->
+      ( \(Const fieldName `Pair` Op renderValue `Pair` Getter getter) ->
           renderField (Text.unpack fieldName) (Text.pack . renderValue) getter
       )
       (bzip (bzip Todo.taskFieldNames taskRenderValues) Todo.taskGetters)
@@ -642,7 +665,7 @@ renderUpdateTask task update =
                 [ "- ! "
                     ++ fieldName
                     ++ " ("
-                    ++ Todo.renderStateId stateId'
+                    ++ renderStateId stateId'
                     ++ ")\n"
                     ++ prependLines "- " (renderValue a')
                 ]
@@ -661,7 +684,7 @@ renderUpdateTask task update =
                     [ "  ! "
                         ++ fieldName
                         ++ " ("
-                        ++ Todo.renderStateId stateId'
+                        ++ renderStateId stateId'
                         ++ ")\n"
                         ++ prependLines "  " (renderValue a')
                     ]
@@ -669,7 +692,7 @@ renderUpdateTask task update =
                     [ "- ! "
                         ++ fieldName
                         ++ " ("
-                        ++ Todo.renderStateId stateId'
+                        ++ renderStateId stateId'
                         ++ ")\n"
                         ++ prependLines "- " (renderValue a')
                     ]
@@ -687,7 +710,7 @@ taskList path mFilter = do
         $ Map.intersectionWith (,) filteredTasks (Todo.taskMetadata state)
   traverse_ renderTask tasks
   where
-    filterTask :: Todo.Task FieldSelectors -> Todo.Task (Map Todo.StateId) -> Bool
+    filterTask :: Todo.Task FieldSelectors -> Todo.Task (Map StateId) -> Bool
     filterTask taskSelectors task =
       getAny $
         bfoldMap
@@ -750,7 +773,7 @@ taskEdit path taskId = do
             "drafts/"
               ++ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
               ++ "-"
-              ++ Todo.gidToBase32 (Todo.unTaskId taskId)
+              ++ gidToBase32 (Todo.unTaskId taskId)
               ++ ".txt"
       let taskFileBase = taskFile ++ ".base"
       withFile taskFileBase WriteMode $ \handle ->
@@ -795,7 +818,7 @@ taskEdit path taskId = do
                       Todo.stateSerialise pathNew state'
                       renameFile pathNew path
                       removeFile taskFile
-                      putStrLn $ "Updated task " ++ Todo.gidToBase32 (Todo.unTaskId taskId)
+                      putStrLn $ "Updated task " ++ gidToBase32 (Todo.unTaskId taskId)
         )
         `finally` removeFile taskFileBase
 

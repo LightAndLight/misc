@@ -1,26 +1,13 @@
-{-# LANGUAGE BinaryLiterals #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE QuantifiedConstraints #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE UndecidableInstances #-}
 
 module Todo where
 
 import Barbies
 import Barbies.Constraints (Dict (..))
-import Base32 (bitsFromBase32, bitsToBase32, fromBits, toBits)
-import Control.Applicative (Const (..))
 import Control.Exception (Exception, throwIO)
 import Control.Monad (guard, replicateM)
 import qualified Data.Attoparsec.ByteString.Lazy as Attoparsec
@@ -28,7 +15,6 @@ import Data.Binary (Binary, Word64)
 import qualified Data.Binary as Binary
 import Data.Binary.Get (runGet)
 import Data.Binary.Put (runPut)
-import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
@@ -37,8 +23,6 @@ import Data.Char (ord)
 import Data.Fixed (Milli, Pico)
 import Data.Foldable (foldl', traverse_)
 import Data.Functor.Identity (Identity (..))
-import Data.Functor.Product (Product (..))
-import Data.Kind (Type)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -46,178 +30,22 @@ import Data.Monoid (Any (..), getAny)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.String (fromString)
-import Data.Text (Text)
 import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds, secondsToNominalDiffTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
-import Data.Word (Word16, Word8)
 import GHC.Generics (Generic)
-import MD5 (MD5 (..), hashMD5, md5ToBase32)
-import System.Entropy (getEntropy)
+import Getter (Getter (..))
+import MD5 (hashMD5)
+import StateId (StateId (..))
 import System.IO (IOMode (..), withFile)
-
-newtype StateId = StateId MD5
-  deriving (Show, Eq, Ord)
-  deriving newtype (Binary)
-
-initialStateId :: StateId
-initialStateId = StateId (MD5 0 0)
-
-mkStateId :: Set StateId -> Change -> StateId
-mkStateId parents change = StateId . hashMD5 . runPut $ putSet parents <> putChange change
-
-renderStateId :: StateId -> String
-renderStateId (StateId s) = md5ToBase32 s
-
-data Task f
-  = Task
-  { status :: !(f Text)
-  , labels :: !(f (Set Text))
-  , title :: !(f Text)
-  , description :: !(f Text)
-  }
-  deriving (Generic, FunctorB, TraversableB, ApplicativeB, ConstraintsB, DistributiveB)
-
-deriving instance (forall x. Show x => Show (f x)) => Show (Task f)
-deriving instance (forall x. Eq x => Eq (f x)) => Eq (Task f)
-
-taskFieldNames :: Task (Const Text)
-taskFieldNames =
-  Task
-    { status = Const $ fromString "status"
-    , labels = Const $ fromString "labels"
-    , title = Const $ fromString "title"
-    , description = Const $ fromString "description"
-    }
-
-newtype Getter (b :: (Type -> Type) -> Type) a = Getter (forall f. b f -> f a)
-
-taskGetters :: b ~ Task => b (Getter b)
-taskGetters =
-  Task
-    { status = Getter status
-    , labels = Getter labels
-    , title = Getter title
-    , description = Getter description
-    }
-
-data TaskDiffError
-  = -- | A state ID mentioned in the target 'Task' was not present in the source 'Task'.
-    StateIdNotFound
-      -- | Field name
-      !Text
-      !StateId
-  | -- | The target 'Task' appears to be 'Pick'ing a value by state ID from the source 'Task', but
-    -- the value in the target 'Task' doesn't match the value in the source 'Task'.
-    --
-    -- It's unclear whether the intention is to 'Pick' an existing value by state ID, or 'Set' the
-    -- field to the new, changed value.
-    AmbiguousUpdate
-      -- | Field name
-      !Text
-      !StateId
-  | -- | The target 'Task' still contains conflicts.
-    UnresolvedConflicts
-      -- | Field name
-      !Text
-      -- | Conflicting states
-      !(Set StateId)
-  | -- | A field in the target 'Task' is missing a value.
-    NoValue
-      -- | Field name
-      !Text
-  deriving (Show, Eq)
-
-data Conflicted a
-  = Resolved a
-  | Conflicted (Map StateId a)
-
-taskDiff ::
-  Task (Map StateId) ->
-  Task Conflicted ->
-  Either TaskDiffError (Task Update)
-taskDiff task1 task2 =
-  btraverseC @Eq
-    ( \(Getter getter `Pair` Const fieldName) ->
-        case getter task2 of
-          Resolved value2 ->
-            case Map.toList (getter task1) of
-              [(_, value1)] | value1 == value2 -> Right None
-              _ -> Right $ Set value2
-          Conflicted values ->
-            case Map.toList values of
-              [] -> Left $ NoValue fieldName
-              [(stateId, value2)] ->
-                case Map.lookup stateId (getter task1) of
-                  Just value1 ->
-                    if value1 == value2
-                      then Right $ Pick stateId
-                      else Left $ AmbiguousUpdate fieldName stateId
-                  Nothing -> Left $ StateIdNotFound fieldName stateId
-              _ ->
-                Left $ UnresolvedConflicts fieldName (Map.keysSet values)
-    )
-    (bzip taskGetters taskFieldNames)
-
-data GID = GID !Word16 !Word16 !Word16 !Word16 !Word16
-  deriving (Show, Eq, Ord, Generic, Binary)
-
-newGID :: IO GID
-newGID = do
-  bytes <- ByteString.unpack <$> getEntropy 10
-  pure $
-    GID
-      (word16FromBytes (bytes !! 0) (bytes !! 1))
-      (word16FromBytes (bytes !! 2) (bytes !! 3))
-      (word16FromBytes (bytes !! 4) (bytes !! 5))
-      (word16FromBytes (bytes !! 6) (bytes !! 7))
-      (word16FromBytes (bytes !! 8) (bytes !! 9))
-
-word16FromBytes :: Word8 -> Word8 -> Word16
-word16FromBytes a b = ((fromIntegral a :: Word16) `shiftL` 8) .|. fromIntegral b
-
-gidToBase32 :: GID -> String
-gidToBase32 (GID a b c d e) =
-  bitsToBase32 $ toBits a ++ toBits b ++ toBits c ++ toBits d ++ toBits e
-
-gidFromBase32 :: String -> Maybe GID
-gidFromBase32 s
-  | length s == 16 = do
-      bits <- bitsFromBase32 s
-      Just $
-        GID
-          (fromIntegral . fromBits $ take 16 bits)
-          (fromIntegral . fromBits . take 16 $ drop 16 bits)
-          (fromIntegral . fromBits . take 16 $ drop 32 bits)
-          (fromIntegral . fromBits . take 16 $ drop 48 bits)
-          (fromIntegral . fromBits . take 16 $ drop 64 bits)
-  | otherwise = Nothing
-
-newtype TaskId = TaskId {unTaskId :: GID}
-  deriving (Show, Eq, Ord)
-  deriving newtype (Binary)
-
-renderTaskId :: TaskId -> String
-renderTaskId (TaskId gid) = gidToBase32 gid
-
-newTaskId :: IO TaskId
-newTaskId = TaskId <$> newGID
-
-data TaskMetadata
-  = TaskMetadata
-  { createdAt :: !UTCTime
-  }
-  deriving (Show, Eq)
-
-data Update a
-  = None
-  | Set a
-  | Pick StateId
-  deriving (Show, Eq, Generic)
+import Todo.Task (Task, TaskId, TaskMetadata (..), Update (..), newTaskId, taskGetters)
 
 data Change
   = NewTask {task :: !(Task Identity)}
   | UpdateTask {taskId :: !TaskId, updateTask :: !(Task Update)}
   deriving (Show, Eq, Generic)
+
+mkStateId :: Set StateId -> Change -> StateId
+mkStateId parents change = StateId . hashMD5 . runPut $ putSet parents <> putChange change
 
 data Commit = Commit {parents :: !(Set StateId), change :: !Change}
   deriving (Show)

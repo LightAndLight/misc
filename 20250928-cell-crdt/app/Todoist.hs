@@ -38,10 +38,12 @@ import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Data.Traversable (for)
 import GHC.Generics (Generic)
+import StateId (StateId, initialStateId)
 import System.Exit (exitFailure)
 import System.IO (IOMode (..), withFile)
 import Text.Read (readMaybe)
-import qualified Todo
+import qualified Todo as Todo (State (..))
+import qualified Todo.Task as Todo (Task (..), TaskId, TaskMetadata (..), newTaskId, renderTaskId)
 
 data Row
   = Row
@@ -239,7 +241,7 @@ projectToState project = do
   now <- getCurrentTime
 
   let
-    mkTasks :: [Todoist.Task] -> IO [(Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.TaskMetadata))]
+    mkTasks :: [Todoist.Task] -> IO [(Todo.TaskId, (Todo.Task (Map StateId), Todo.TaskMetadata))]
     mkTasks tasks =
       for tasks $ \task -> do
         subtasks <- mkTasks task.subtasks
@@ -263,10 +265,10 @@ projectToState project = do
           ( taskId
           ,
             ( Todo.Task
-                { status = Map.singleton Todo.initialStateId $ fromString "todo"
-                , labels = Map.singleton Todo.initialStateId task.labels
-                , title = Map.singleton Todo.initialStateId task.content
-                , description = Map.singleton Todo.initialStateId description
+                { status = Map.singleton initialStateId $ fromString "todo"
+                , labels = Map.singleton initialStateId task.labels
+                , title = Map.singleton initialStateId task.content
+                , description = Map.singleton initialStateId description
                 }
             , Todo.TaskMetadata{createdAt = now}
             )
@@ -278,7 +280,7 @@ projectToState project = do
   let
     !state =
       Todo.State
-        { current = Set.singleton Todo.initialStateId
+        { current = Set.singleton initialStateId
         , tasks = Map.fromList [(taskId, task) | (taskId, (task, _)) <- tasks]
         , taskMetadata = Map.fromList [(taskId, metadata) | (taskId, (_, metadata)) <- tasks]
         , history = Map.empty
