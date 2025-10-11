@@ -271,7 +271,7 @@ default_ path = do
         $ Map.intersectionWith (,) (Todo.tasks state) (Todo.taskMetadata state)
   traverse_ renderTask tasks
 
-renderTask :: (Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.Metadata)) -> IO ()
+renderTask :: (Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.TaskMetadata)) -> IO ()
 renderTask (Todo.TaskId taskId, (task, _metadata)) = do
   putStr $ "(" ++ Todo.gidToBase32 taskId ++ ")"
   if Map.size (Todo.title task) > 1 || Map.size (Todo.description task) > 1

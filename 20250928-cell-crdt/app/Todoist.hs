@@ -239,7 +239,7 @@ projectToState project = do
   now <- getCurrentTime
 
   let
-    mkTasks :: [Todoist.Task] -> IO [(Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.Metadata))]
+    mkTasks :: [Todoist.Task] -> IO [(Todo.TaskId, (Todo.Task (Map Todo.StateId), Todo.TaskMetadata))]
     mkTasks tasks =
       for tasks $ \task -> do
         subtasks <- mkTasks task.subtasks
@@ -268,7 +268,7 @@ projectToState project = do
                 , title = Map.singleton Todo.initialStateId task.content
                 , description = Map.singleton Todo.initialStateId description
                 }
-            , Todo.Metadata{createdAt = now}
+            , Todo.TaskMetadata{createdAt = now}
             )
           )
 

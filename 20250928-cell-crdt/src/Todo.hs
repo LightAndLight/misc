@@ -202,8 +202,8 @@ renderTaskId (TaskId gid) = gidToBase32 gid
 newTaskId :: IO TaskId
 newTaskId = TaskId <$> newGID
 
-data Metadata
-  = Metadata
+data TaskMetadata
+  = TaskMetadata
   { createdAt :: !UTCTime
   }
   deriving (Show, Eq)
@@ -226,7 +226,7 @@ data State
   = State
   { current :: !(Set StateId)
   , tasks :: !(Map TaskId (Task (Map StateId)))
-  , taskMetadata :: !(Map TaskId Metadata)
+  , taskMetadata :: !(Map TaskId TaskMetadata)
   , history :: !(Map StateId Commit)
   }
   deriving (Show)
@@ -250,7 +250,7 @@ stateChange change@NewTask{task} state = do
     state
       { current = Set.singleton stateId
       , tasks = Map.insert taskId (bmap (Map.singleton stateId . runIdentity) task) (tasks state)
-      , taskMetadata = Map.insert taskId Metadata{createdAt = now} (taskMetadata state)
+      , taskMetadata = Map.insert taskId TaskMetadata{createdAt = now} (taskMetadata state)
       , history = Map.insert stateId (Commit (current state) change) (history state)
       }
 stateChange change@UpdateTask{taskId, updateTask} state = do
@@ -535,20 +535,20 @@ putTasks = putMap (bfoldMapC @Binary (putMap Binary.put))
 getTasks :: Binary.Get (Map TaskId (Task (Map StateId)))
 getTasks = getMap (btraverse (\Dict -> getMap Binary.get) (bdicts @Binary))
 
-putTaskMetadata :: Map TaskId Metadata -> Binary.Put
+putTaskMetadata :: Map TaskId TaskMetadata -> Binary.Put
 putTaskMetadata = putMap putMetadata
+  where
+    putMetadata :: TaskMetadata -> Binary.Put
+    putMetadata (TaskMetadata createdAt) = do
+      putUTCTime createdAt
 
-getTaskMetadata :: Binary.Get (Map TaskId Metadata)
+getTaskMetadata :: Binary.Get (Map TaskId TaskMetadata)
 getTaskMetadata = getMap getMetadata
-
-putMetadata :: Metadata -> Binary.Put
-putMetadata (Metadata createdAt) = do
-  putUTCTime createdAt
-
-getMetadata :: Binary.Get Metadata
-getMetadata = do
-  createdAt <- getUTCTime
-  pure Metadata{createdAt}
+  where
+    getMetadata :: Binary.Get TaskMetadata
+    getMetadata = do
+      createdAt <- getUTCTime
+      pure TaskMetadata{createdAt}
 
 putUTCTime :: UTCTime -> Binary.Put
 putUTCTime utcTime = do
