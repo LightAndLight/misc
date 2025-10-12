@@ -58,6 +58,8 @@ import qualified Todo
   , stateNew
   , stateSerialise
   )
+import qualified Todo.Comment as Comment
+import qualified Todo.Comment as Todo (Comment, CommentId (..), CommentMetadata)
 import qualified Todo.Task as Todo
   ( Conflicted (..)
   , Task (..)
@@ -82,6 +84,7 @@ data Command
   | Merge FilePath
   | Task TaskCommand
   | Label LabelCommand
+  | Comment CommentCommand
 
 data InitFrom = InitFrom {type_ :: String, path :: FilePath}
 
@@ -90,6 +93,9 @@ data TaskCommand
   | TaskList (Maybe (Todo.Task FieldSelectors))
   | TaskView Todo.TaskId
   | TaskEdit Todo.TaskId
+
+data CommentCommand
+  = CommentList
 
 taskFieldSelectorsEmpty :: Todo.Task FieldSelectors
 taskFieldSelectorsEmpty =
@@ -183,6 +189,10 @@ cliParser =
                 <> Options.command
                   "label"
                   (Options.info (Label <$> labelParser) (Options.progDesc "Label operations" <> Options.fullDesc))
+                <> Options.command
+                  "comment"
+                  ( Options.info (Comment <$> commentParser) (Options.progDesc "Comment operations" <> Options.fullDesc)
+                  )
             )
             <|> pure Default
         )
@@ -269,6 +279,16 @@ cliParser =
             (Options.info (pure LabelList) (Options.progDesc "List labels" <> Options.fullDesc))
         )
 
+    commentParser =
+      Options.hsubparser
+        ( Options.command
+            "list"
+            (Options.info commentListParser (Options.progDesc "List comments" <> Options.fullDesc))
+        )
+
+    commentListParser =
+      pure CommentList
+
 main :: IO ()
 main = do
   cli <- Options.execParser (Options.info (cliParser <**> Options.helper) Options.fullDesc)
@@ -283,6 +303,7 @@ main = do
     Task (TaskView taskId) -> taskView (database cli) taskId
     Task (TaskEdit taskId) -> taskEdit (database cli) taskId
     Label LabelList -> labelList (database cli)
+    Comment CommentList -> commentList (database cli)
 
 default_ :: FilePath -> IO ()
 default_ path = do
@@ -304,6 +325,19 @@ renderTask (Todo.TaskId taskId, (task, _metadata)) = do
     [] -> undefined
     (_stateId, title) : _ -> Text.IO.putStrLn title
 
+renderComment :: (Todo.CommentId, (Todo.Comment (Map StateId), Todo.CommentMetadata)) -> IO ()
+renderComment (Todo.CommentId commentId, (comment, _metadata)) = do
+  putStr $ "(" ++ gidToBase32 commentId ++ ")"
+  if Map.size (Comment.description comment) > 1
+    then putStr "* "
+    else putStr "  "
+  case Map.toList (Comment.description comment) of
+    [] -> undefined
+    (_stateId, description) : _ -> do
+      Text.IO.putStr . Text.map (\c -> if c == '\n' then '⏎' else c) $ Text.take 100 description
+      when (Text.length description > 100) $ putStr "..."
+      putStrLn ""
+
 init :: FilePath -> Maybe InitFrom -> IO ()
 init path Nothing = do
   let state = Todo.stateNew
@@ -313,11 +347,12 @@ init dbPath (Just InitFrom{type_, path = importPath}) =
   case type_ of
     "todoist" -> do
       project <- Todoist.decodeProject importPath
-      (Todoist.ImportStats numTasks, state) <- Todoist.projectToState project
+      (Todoist.ImportStats numTasks numNotes, state) <- Todoist.projectToState project
       Todo.stateSerialise dbPath state
       putStrLn $ "Created " ++ dbPath ++ "\n"
       putStrLn "Imported:"
       putStrLn $ "* " ++ show numTasks ++ " tasks"
+      putStrLn $ "* " ++ show numNotes ++ " notes"
     _ -> do
       putStrLn $ "error: unsupported import type: " ++ type_
       exitFailure
@@ -828,3 +863,14 @@ labelList path = do
   let labels = foldMap (fold . Todo.labels) $ Todo.tasks state
   for_ (Set.toAscList labels) $ \label -> do
     Text.IO.putStrLn label
+
+commentList :: FilePath -> IO ()
+commentList path = do
+  state <- Todo.stateDeserialise path
+  let comments = Todo.comments state
+  let
+    comments' =
+      sortOn (Down . Comment.createdAt . snd . snd)
+        . Map.toList
+        $ Map.intersectionWith (,) comments (Todo.commentMetadata state)
+  traverse_ renderComment comments'

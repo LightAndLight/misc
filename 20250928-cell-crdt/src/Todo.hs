@@ -11,7 +11,7 @@ import Barbies.Constraints (Dict (..))
 import Control.Exception (Exception, throwIO)
 import Control.Monad (guard, replicateM)
 import qualified Data.Attoparsec.ByteString.Lazy as Attoparsec
-import Data.Binary (Binary, Word64)
+import Data.Binary (Binary, Word64, Word8)
 import qualified Data.Binary as Binary
 import Data.Binary.Get (runGet)
 import Data.Binary.Put (runPut)
@@ -37,11 +37,23 @@ import Getter (Getter (..))
 import MD5 (hashMD5)
 import StateId (StateId (..))
 import System.IO (IOMode (..), withFile)
+import Todo.Comment
+  ( Comment
+  , CommentId
+  , CommentMetadata (CommentMetadata)
+  , ReplyId (..)
+  , commentGetters
+  , newCommentId
+  )
+import qualified Todo.Comment as Comment
 import Todo.Task (Task, TaskId, TaskMetadata (..), Update (..), newTaskId, taskGetters)
+import qualified Todo.Task as Task
 
 data Change
   = NewTask {task :: !(Task Identity)}
   | UpdateTask {taskId :: !TaskId, updateTask :: !(Task Update)}
+  | NewComment {replyTo :: !ReplyId, comment :: !(Comment Identity)}
+  | UpdateComment {commentId :: !CommentId, updateComment :: !(Comment Update)}
   deriving (Show, Eq, Generic)
 
 mkStateId :: Set StateId -> Change -> StateId
@@ -55,6 +67,8 @@ data State
   { current :: !(Set StateId)
   , tasks :: !(Map TaskId (Task (Map StateId)))
   , taskMetadata :: !(Map TaskId TaskMetadata)
+  , comments :: !(Map CommentId (Comment (Map StateId)))
+  , commentMetadata :: !(Map CommentId CommentMetadata)
   , history :: !(Map StateId Commit)
   }
   deriving (Show)
@@ -65,6 +79,8 @@ stateNew =
     { current = Set.empty
     , tasks = Map.empty
     , taskMetadata = Map.empty
+    , comments = Map.empty
+    , commentMetadata = Map.empty
     , history = Map.empty
     }
 
@@ -78,7 +94,7 @@ stateChange change@NewTask{task} state = do
     state
       { current = Set.singleton stateId
       , tasks = Map.insert taskId (bmap (Map.singleton stateId . runIdentity) task) (tasks state)
-      , taskMetadata = Map.insert taskId TaskMetadata{createdAt = now} (taskMetadata state)
+      , taskMetadata = Map.insert taskId TaskMetadata{Task.createdAt = now} (taskMetadata state)
       , history = Map.insert stateId (Commit (current state) change) (history state)
       }
 stateChange change@UpdateTask{taskId, updateTask} state = do
@@ -110,9 +126,58 @@ stateChange change@UpdateTask{taskId, updateTask} state = do
                 (tasks state)
           , history = Map.insert stateId (Commit (current state) change) (history state)
           }
+stateChange change@NewComment{replyTo, comment} state = do
+  let stateId = mkStateId (current state) change
+  now <- getCurrentTime
+
+  commentId <- newCommentId
+  pure
+    state
+      { current = Set.singleton stateId
+      , comments =
+          Map.insert commentId (bmap (Map.singleton stateId . runIdentity) comment) (comments state)
+      , commentMetadata =
+          Map.insert
+            commentId
+            CommentMetadata{Comment.createdAt = now, Comment.replyTo}
+            (commentMetadata state)
+      , history = Map.insert stateId (Commit (current state) change) (history state)
+      }
+stateChange change@UpdateComment{commentId, updateComment} state = do
+  let stateId = mkStateId (current state) change
+
+  case Map.lookup commentId (comments state) of
+    Nothing -> error $ show commentId ++ " not found"
+    Just comment -> do
+      pure
+        state
+          { current = Set.singleton stateId
+          , comments =
+              Map.insert
+                commentId
+                ( bzipWith
+                    ( \current update ->
+                        case update of
+                          None -> current
+                          Set a -> Map.singleton stateId a
+                          Pick stateId' ->
+                            Map.singleton stateId $
+                              fromMaybe
+                                (error $ show stateId' ++ " missing from " ++ show (Map.keys current))
+                                (Map.lookup stateId' current)
+                    )
+                    comment
+                    updateComment
+                )
+                (comments state)
+          , history = Map.insert stateId (Commit (current state) change) (history state)
+          }
 
 fastForwardTask ::
-  Map (Set StateId) (Map StateId Change) -> TaskId -> Task (Map StateId) -> Task (Map StateId)
+  Map (Set StateId) (Map StateId Change) ->
+  TaskId ->
+  Task (Map StateId) ->
+  Task (Map StateId)
 fastForwardTask edges taskId =
   bzipWith
     ( \(Getter getter) ->
@@ -133,10 +198,48 @@ fastForwardTask edges taskId =
                           fromMaybe (error $ show stateId ++ " missing from" ++ show (Map.keys current)) $
                             Map.lookup stateId current
                       )
+              NewComment{} ->
+                Nothing
+              UpdateComment{} ->
+                Nothing
           )
           edges
     )
     taskGetters
+
+fastForwardComment ::
+  Map (Set StateId) (Map StateId Change) ->
+  CommentId ->
+  Comment (Map StateId) ->
+  Comment (Map StateId)
+fastForwardComment edges commentId =
+  bzipWith
+    ( \(Getter getter) ->
+        fastForward
+          ( \case
+              NewComment{comment = comment'} ->
+                Just (const $ runIdentity (getter comment'))
+              UpdateComment{commentId = commentId', updateComment} -> do
+                guard $ commentId == commentId'
+                case getter updateComment of
+                  None ->
+                    Nothing
+                  Set a ->
+                    Just (const a)
+                  Pick stateId ->
+                    Just
+                      ( \current ->
+                          fromMaybe (error $ show stateId ++ " missing from" ++ show (Map.keys current)) $
+                            Map.lookup stateId current
+                      )
+              NewTask{} ->
+                Nothing
+              UpdateTask{} ->
+                Nothing
+          )
+          edges
+    )
+    commentGetters
 
 fastForward ::
   (Change -> Maybe (Map StateId a -> a)) ->
@@ -191,11 +294,12 @@ stateMerge s1 s2 =
 
     mLca = lowestCommonAncestor newHistory currentStateIds
 
-    (newCurrent, newTasks) =
+    (newCurrent, newTasks, newComments) =
       case mLca of
         Nothing ->
           ( current s1 <> current s2
           , Map.unionWith (bzipWith (<>)) (tasks s1) (tasks s2)
+          , Map.unionWith (bzipWith (<>)) (comments s1) (comments s2)
           )
         Just lca ->
           let edges = edgesToLca newHistory lca currentStateIds
@@ -204,12 +308,18 @@ stateMerge s1 s2 =
                 (bzipWith (<>))
                 (Map.mapWithKey (fastForwardTask edges) (tasks s1))
                 (Map.mapWithKey (fastForwardTask edges) (tasks s2))
+             , Map.unionWith
+                (bzipWith (<>))
+                (Map.mapWithKey (fastForwardComment edges) (comments s1))
+                (Map.mapWithKey (fastForwardComment edges) (comments s2))
              )
   in
     State
       { current = newCurrent
       , tasks = newTasks
       , taskMetadata = taskMetadata s1 <> taskMetadata s2
+      , comments = newComments
+      , commentMetadata = commentMetadata s1 <> commentMetadata s2
       , history = newHistory
       }
 
@@ -314,11 +424,13 @@ stateHistory versioned = go Nothing (current versioned)
               (go mAncestor . Set.singleton <$> Set.toList stateIds)
 
 stateBinaryPut :: State -> Binary.Put
-stateBinaryPut (State current tasks taskMetadata history) = do
+stateBinaryPut (State current tasks taskMetadata comments commentMetadata history) = do
   traverse_ Binary.put . ByteString.unpack $ ByteString.Char8.pack "tsk;version=0;\n"
   putCurrent current
   putTasks tasks
   putTaskMetadata taskMetadata
+  putComments comments
+  putCommentMetadata commentMetadata
   putHistory history
 
 stateBinaryGet :: Binary.Get State
@@ -326,8 +438,10 @@ stateBinaryGet = do
   current <- getCurrent
   tasks <- getTasks
   taskMetadata <- getTaskMetadata
+  comments <- getComments
+  commentMetadata <- getCommentMetadata
   history <- getHistory
-  pure State{current, tasks, taskMetadata, history}
+  pure State{current, tasks, taskMetadata, comments, commentMetadata, history}
 
 putSet :: Binary a => Set a -> Binary.Put
 putSet = Binary.put . Set.toAscList
@@ -376,7 +490,42 @@ getTaskMetadata = getMap getMetadata
     getMetadata :: Binary.Get TaskMetadata
     getMetadata = do
       createdAt <- getUTCTime
-      pure TaskMetadata{createdAt}
+      pure TaskMetadata{Task.createdAt}
+
+putComments :: Map CommentId (Comment (Map StateId)) -> Binary.Put
+putComments = putMap (bfoldMapC @Binary (putMap Binary.put))
+
+getComments :: Binary.Get (Map CommentId (Comment (Map StateId)))
+getComments = getMap (btraverse (\Dict -> getMap Binary.get) (bdicts @Binary))
+
+putCommentMetadata :: Map CommentId CommentMetadata -> Binary.Put
+putCommentMetadata = putMap putMetadata
+  where
+    putMetadata :: CommentMetadata -> Binary.Put
+    putMetadata (CommentMetadata createdAt replyTo) = do
+      putUTCTime createdAt
+      putReplyId replyTo
+
+getCommentMetadata :: Binary.Get (Map CommentId CommentMetadata)
+getCommentMetadata = getMap getMetadata
+  where
+    getMetadata :: Binary.Get CommentMetadata
+    getMetadata = do
+      createdAt <- getUTCTime
+      replyTo <- getReplyId
+      pure CommentMetadata{Comment.createdAt, Comment.replyTo}
+
+putReplyId :: ReplyId -> Binary.Put
+putReplyId (ReplyTask taskId) = Binary.put (0 :: Word8) <> Binary.put taskId
+putReplyId (ReplyComment commentId) = Binary.put (1 :: Word8) <> Binary.put commentId
+
+getReplyId :: Binary.Get ReplyId
+getReplyId = do
+  tag <- Binary.get @Word8
+  case tag of
+    0 -> ReplyTask <$> Binary.get
+    1 -> ReplyComment <$> Binary.get
+    _ -> fail $ "invalid ReplyId tag: " ++ show tag
 
 putUTCTime :: UTCTime -> Binary.Put
 putUTCTime utcTime = do
@@ -413,6 +562,8 @@ putChange change = do
 putChangeTag :: Change -> Binary.Put
 putChangeTag NewTask{} = Binary.put @Word64 0
 putChangeTag UpdateTask{} = Binary.put @Word64 1
+putChangeTag NewComment{} = Binary.put @Word64 2
+putChangeTag UpdateComment{} = Binary.put @Word64 3
 
 putChangeValue :: Change -> Binary.Put
 putChangeValue (NewTask task) =
@@ -420,6 +571,12 @@ putChangeValue (NewTask task) =
 putChangeValue (UpdateTask taskId task) = do
   Binary.put taskId
   bfoldMapC @Binary putUpdate task
+putChangeValue (NewComment replyTo comment) = do
+  putReplyId replyTo
+  bfoldMapC @Binary (\(Identity a) -> Binary.put a) comment
+putChangeValue (UpdateComment commentId comment) = do
+  Binary.put commentId
+  bfoldMapC @Binary putUpdate comment
 
 getChange :: Binary.Get Change
 getChange = do
@@ -432,6 +589,14 @@ getChange = do
       taskId <- Binary.get
       updateTask <- btraverse (\Dict -> getUpdate) (bdicts @Binary)
       pure UpdateTask{taskId, updateTask}
+    2 -> do
+      replyTo <- getReplyId
+      comment <- btraverse (\Dict -> Identity <$> Binary.get) (bdicts @Binary)
+      pure NewComment{replyTo, comment}
+    3 -> do
+      commentId <- Binary.get
+      updateComment <- btraverse (\Dict -> getUpdate) (bdicts @Binary)
+      pure UpdateComment{commentId, updateComment}
     _ -> fail $ "invalid Change tag: " ++ show tag
 
 putUpdate :: Binary a => Update a -> Binary.Put

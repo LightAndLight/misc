@@ -34,15 +34,21 @@ import qualified Data.Set as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Clock (UTCTime, getCurrentTime)
-import Data.Time.Format.ISO8601 (iso8601ParseM)
+import Data.Time.Clock (getCurrentTime)
 import Data.Traversable (for)
 import GHC.Generics (Generic)
 import StateId (StateId, initialStateId)
 import System.Exit (exitFailure)
 import System.IO (IOMode (..), withFile)
 import Text.Read (readMaybe)
-import qualified Todo as Todo (State (..))
+import qualified Todo (State (..))
+import qualified Todo.Comment as Todo
+  ( Comment (..)
+  , CommentId
+  , CommentMetadata (..)
+  , ReplyId (..)
+  , newCommentId
+  )
 import qualified Todo.Task as Todo (Task (..), TaskId, TaskMetadata (..), newTaskId, renderTaskId)
 
 data Row
@@ -105,8 +111,11 @@ data Note
   = Note
   { content :: !Text
   , author :: !Text
+  {- Don't need these for now.
+
   , date :: !(Maybe UTCTime)
   , timezone :: !Text
+  -}
   }
   deriving (Show, Eq)
 
@@ -142,6 +151,7 @@ decodeInt row input =
     . readMaybe
     $ Text.unpack input
 
+{-
 decodeOptional ::
   (Row -> Text -> Either DecodeError a) -> Row -> Text -> Either DecodeError (Maybe a)
 decodeOptional f index input
@@ -153,6 +163,7 @@ decodeUTCTime row input =
   maybe (Left DecodeError{row, message = fromString $ show input ++ " is not a UTCTime"}) Right
     . iso8601ParseM
     $ Text.unpack input
+-}
 
 rowsToTasks :: [Row] -> Either DecodeError [Task]
 rowsToTasks = (fmap . fmap) snd . go
@@ -194,14 +205,11 @@ rowsToTasks = (fmap . fmap) snd . go
               <$> go rest
 
 rowToNote :: Row -> Either DecodeError Note
-rowToNote row = do
-  date <- decodeOptional decodeUTCTime row row.date
+rowToNote row =
   pure $!
     Note
       { content = row.content
       , author = row.author
-      , date
-      , timezone = row.timezone
       }
 
 loadRows :: FilePath -> IO [Row]
@@ -231,40 +239,51 @@ decodeProject path = do
 data ImportStats
   = ImportStats
   { numTasks :: !Int
+  , numNotes :: !Int
   }
 
 countTasks :: Task -> Int
 countTasks task = foldl' (\acc -> (acc +) . countTasks) 1 task.subtasks
+
+countNotes :: Task -> Int
+countNotes task = foldl' (\acc -> (acc +) . countNotes) (length task.notes) task.subtasks
 
 projectToState :: Project -> IO (ImportStats, Todo.State)
 projectToState project = do
   now <- getCurrentTime
 
   let
-    mkTasks :: [Todoist.Task] -> IO [(Todo.TaskId, (Todo.Task (Map StateId), Todo.TaskMetadata))]
-    mkTasks tasks =
-      for tasks $ \task -> do
-        subtasks <- mkTasks task.subtasks
+    mkTasks ::
+      [Todoist.Task] ->
+      IO
+        ( Map Todo.TaskId Todoist.Task
+        , [(Todo.TaskId, (Todo.Task (Map StateId), Todo.TaskMetadata))]
+        )
+    mkTasks tasks = do
+      tasks' <-
+        for tasks $ \task -> do
+          (idMap, subtasks) <- mkTasks task.subtasks
 
-        taskId <- Todo.newTaskId
-        let
-          description :: Text
-          description
-            | null subtasks = task.description
-            | otherwise =
-                task.description
-                  <> fromString "\n\nSubtasks:\n\n"
-                  <> fromString
-                    ( foldMap
-                        ( \(subtaskId, _) ->
-                            "* <tsk:" <> Todo.renderTaskId subtaskId <> ">\n"
-                        )
-                        subtasks
-                    )
-        pure
-          ( taskId
-          ,
-            ( Todo.Task
+          taskId <- Todo.newTaskId
+          let
+            description :: Text
+            description
+              | null subtasks = task.description
+              | otherwise =
+                  task.description
+                    <> fromString "\n\nSubtasks:\n\n"
+                    <> fromString
+                      ( foldMap
+                          ( \(subtaskId, _) ->
+                              "* <tsk:" <> Todo.renderTaskId subtaskId <> ">\n"
+                          )
+                          subtasks
+                      )
+          pure
+            ( Map.insert taskId task idMap
+            , taskId
+            , task
+            , Todo.Task
                 { status = Map.singleton initialStateId $ fromString "todo"
                 , labels = Map.singleton initialStateId task.labels
                 , title = Map.singleton initialStateId task.content
@@ -272,20 +291,43 @@ projectToState project = do
                 }
             , Todo.TaskMetadata{createdAt = now}
             )
-          )
+
+      let !idMap' = foldMap (\(x, _, _, _, _) -> x) tasks'
+      let tasks'' = fmap (\(_, taskId, _, task, metadata) -> (taskId, (task, metadata))) tasks'
+
+      pure (idMap', tasks'')
+
+    mkComments ::
+      [(Todo.TaskId, Todoist.Task)] ->
+      IO [(Todo.CommentId, (Todo.Comment (Map StateId), Todo.CommentMetadata))]
+    mkComments tasks =
+      fmap concat . for tasks $ \(taskId, task) -> do
+        for task.notes $ \note -> do
+          commentId <- Todo.newCommentId
+          let comment = Todo.Comment{description = Map.singleton initialStateId note.content}
+          let metadata = Todo.CommentMetadata{createdAt = now, replyTo = Todo.ReplyTask taskId}
+          pure (commentId, (comment, metadata))
 
   let numTasks = getSum $ foldMap (Sum . countTasks) project.tasks
-  tasks <- mkTasks project.tasks
+  let numNotes = getSum $ foldMap (Sum . countNotes) project.tasks
+  (tasksWithIds, tasks) <- mkTasks project.tasks
+  comments <- mkComments (Map.toList tasksWithIds)
 
   let
     !state =
       Todo.State
         { current = Set.singleton initialStateId
-        , tasks = Map.fromList [(taskId, task) | (taskId, (task, _)) <- tasks]
-        , taskMetadata = Map.fromList [(taskId, metadata) | (taskId, (_, metadata)) <- tasks]
+        , tasks =
+            Map.fromList [(taskId, task) | (taskId, (task, _)) <- tasks]
+        , taskMetadata =
+            Map.fromList [(taskId, metadata) | (taskId, (_, metadata)) <- tasks]
+        , comments =
+            Map.fromList [(commentId, comment) | (commentId, (comment, _)) <- comments]
+        , commentMetadata =
+            Map.fromList [(commentId, metadata) | (commentId, (_, metadata)) <- comments]
         , history = Map.empty
         }
 
-    !importStats = ImportStats{numTasks}
+    !importStats = ImportStats{numTasks, numNotes}
 
   pure (importStats, state)
