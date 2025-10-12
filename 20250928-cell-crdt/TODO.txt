@@ -1,4 +1,6 @@
-* [ ] Implement comments
+* [ ] Comment section in `task view`
+
+* [x] Implement comments
 
   * Metadata: created at, reply to (either task or comment)
   * Data: description
