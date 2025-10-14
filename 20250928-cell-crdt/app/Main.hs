@@ -700,9 +700,9 @@ taskFileParser =
 taskRenderValues :: Todo.Task (Op String)
 taskRenderValues =
   Todo.Task
-    { Todo.status = Op Text.unpack
-    , Todo.labels = Op (intercalate ", " . fmap Text.unpack . Set.toAscList)
-    , Todo.title = Op Text.unpack
+    { Todo.status = Op ((++ "\n") . Text.unpack)
+    , Todo.labels = Op ((++ "\n") . intercalate ", " . fmap Text.unpack . Set.toAscList)
+    , Todo.title = Op ((++ "\n") . Text.unpack)
     , Todo.description = Op Text.unpack
     }
 
@@ -711,7 +711,7 @@ taskPage ::
   [Tree (Todo.CommentId, Todo.CommentMetadata, Todo.Comment (Map StateId))] ->
   String
 taskPage task comments =
-  intercalate "\n\n" $
+  intercalate "\n" $
     bfoldMap
       ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
           case Map.toList values of
@@ -737,7 +737,7 @@ taskPage task comments =
                     (Comment.createdAt . (\(_, x, _) -> x) . Tree.rootLabel)
                     trees
               , line <-
-                  [ "--- comment (" ++ Todo.renderCommentId commentId ++ ") ---"
+                  [ "--- comment (" ++ Todo.renderCommentId commentId ++ ") ---\n"
                   , commentPage comment
                   ]
                     ++ go (level + 1) trees'
@@ -965,7 +965,7 @@ commentRenderValues =
 
 commentPage :: Todo.Comment (Map StateId) -> String
 commentPage comment =
-  intercalate "\n\n" $
+  intercalate "\n" $
     bfoldMap
       ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
           case Map.toList values of

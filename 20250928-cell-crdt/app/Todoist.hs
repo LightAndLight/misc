@@ -248,6 +248,11 @@ countTasks task = foldl' (\acc -> (acc +) . countTasks) 1 task.subtasks
 countNotes :: Task -> Int
 countNotes task = foldl' (\acc -> (acc +) . countNotes) (length task.notes) task.subtasks
 
+withTrailingNewline :: Text -> Text
+withTrailingNewline input
+  | not (Text.null input), Text.last input == '\n' = input
+  | otherwise = input <> fromString "\n"
+
 projectToState :: Project -> IO (ImportStats, Todo.State)
 projectToState project = do
   now <- getCurrentTime
@@ -287,7 +292,7 @@ projectToState project = do
                 { status = Map.singleton initialStateId $ fromString "todo"
                 , labels = Map.singleton initialStateId task.labels
                 , title = Map.singleton initialStateId task.content
-                , description = Map.singleton initialStateId description
+                , description = Map.singleton initialStateId $ withTrailingNewline description
                 }
             , Todo.TaskMetadata{createdAt = now}
             )
@@ -304,7 +309,7 @@ projectToState project = do
       fmap concat . for tasks $ \(taskId, task) -> do
         for task.notes $ \note -> do
           commentId <- Todo.newCommentId
-          let comment = Todo.Comment{description = Map.singleton initialStateId note.content}
+          let comment = Todo.Comment{description = Map.singleton initialStateId $ withTrailingNewline note.content}
           let metadata = Todo.CommentMetadata{createdAt = now, replyTo = Todo.ReplyTask taskId}
           pure (commentId, (comment, metadata))
 
