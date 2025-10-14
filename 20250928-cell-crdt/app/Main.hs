@@ -9,7 +9,7 @@
 module Main where
 
 import Barbies (bfoldMap, bfor_, btraverse, btraverseC, bzip, bzipWith)
-import Control.Applicative (Const (..), optional, some, (<**>), (<|>))
+import Control.Applicative (Const (..), many, optional, some, (<**>), (<|>))
 import Control.Exception (finally)
 import Control.Monad (unless, when)
 import Data.Attoparsec.Combinator (lookAhead)
@@ -609,6 +609,7 @@ taskFileParser =
           <|> labelsFieldParser
           <|> titleFieldParser
           <|> descriptionFieldParser
+          <|> ignoreItemParser
       )
   where
     emptyTask =
@@ -661,7 +662,10 @@ taskFileParser =
           Text.pack
           ( Attoparsec.manyTill
               Attoparsec.anyChar
-              (void (lookAhead . Attoparsec.string $ fromString "\n!") <|> Attoparsec.endOfInput)
+              ( void (lookAhead . Attoparsec.string $ fromString "\n!")
+                  <|> void (lookAhead . Attoparsec.string $ fromString "\n---")
+                  <|> Attoparsec.endOfInput
+              )
               <* optional (Attoparsec.char '\n')
           )
       case mStateId of
@@ -669,6 +673,29 @@ taskFileParser =
           pure emptyTask{Todo.description = Compose [Unidentified description]}
         Just stateId ->
           pure emptyTask{Todo.description = Compose [Identified stateId description]}
+
+    ignoreItemParser = do
+      _itemType <-
+        Attoparsec.string (fromString "---")
+          *> Attoparsec.takeWhile (/= '-')
+          <* Attoparsec.string (fromString "---")
+          <* Attoparsec.takeWhile Char.isSpace
+      _fields <-
+        many $ do
+          _fieldName <- Attoparsec.char '!' *> Attoparsec.takeWhile (/= '\n') <* Attoparsec.char '\n'
+          _fieldValue <-
+            fmap
+              Text.pack
+              ( Attoparsec.manyTill
+                  Attoparsec.anyChar
+                  ( void (lookAhead . Attoparsec.string $ fromString "\n!")
+                      <|> void (lookAhead . Attoparsec.string $ fromString "\n---")
+                      <|> Attoparsec.endOfInput
+                  )
+                  <* optional (Attoparsec.char '\n')
+              )
+          pure ()
+      pure emptyTask
 
 taskRenderValues :: Todo.Task (Op String)
 taskRenderValues =
