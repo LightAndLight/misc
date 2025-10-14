@@ -59,7 +59,13 @@ import qualified Todo
   , stateSerialise
   )
 import qualified Todo.Comment as Comment
-import qualified Todo.Comment as Todo (Comment, CommentId (..), CommentMetadata)
+import qualified Todo.Comment as Todo
+  ( Comment
+  , CommentId (..)
+  , CommentMetadata
+  , commentFieldNames
+  , renderReplyId
+  )
 import qualified Todo.Task as Todo
   ( Conflicted (..)
   , Task (..)
@@ -96,6 +102,7 @@ data TaskCommand
 
 data CommentCommand
   = CommentList
+  | CommentView Todo.CommentId
 
 taskFieldSelectorsEmpty :: Todo.Task FieldSelectors
 taskFieldSelectorsEmpty =
@@ -284,10 +291,19 @@ cliParser =
         ( Options.command
             "list"
             (Options.info commentListParser (Options.progDesc "List comments" <> Options.fullDesc))
+            <> Options.command
+              "view"
+              (Options.info commentViewParser (Options.progDesc "View a comment" <> Options.fullDesc))
         )
 
     commentListParser =
       pure CommentList
+
+    commentViewParser =
+      CommentView
+        <$> Options.argument
+          (Todo.CommentId <$> Options.maybeReader gidFromBase32)
+          (Options.metavar "ID" <> Options.help "Comment to edit")
 
 main :: IO ()
 main = do
@@ -304,6 +320,7 @@ main = do
     Task (TaskEdit taskId) -> taskEdit (database cli) taskId
     Label LabelList -> labelList (database cli)
     Comment CommentList -> commentList (database cli)
+    Comment (CommentView commentId) -> commentView (database cli) commentId
 
 default_ :: FilePath -> IO ()
 default_ path = do
@@ -656,9 +673,9 @@ taskRenderValues =
     , Todo.description = Op Text.unpack
     }
 
-writeTask :: Handle -> Todo.Task (Map StateId) -> IO ()
-writeTask handle task =
-  hPutStr handle . intercalate "\n\n" $
+taskPage :: Todo.Task (Map StateId) -> String
+taskPage task =
+  intercalate "\n\n" $
     bfoldMap
       ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
           case Map.toList values of
@@ -676,6 +693,9 @@ writeTask handle task =
                 values'
       )
       (bzip (bzip Todo.taskFieldNames taskRenderValues) task)
+
+writeTask :: Handle -> Todo.Task (Map StateId) -> IO ()
+writeTask handle = hPutStr handle . taskPage
 
 renderUpdateTask :: Todo.Task (Map StateId) -> Todo.Task Todo.Update -> String
 renderUpdateTask task update =
@@ -759,6 +779,34 @@ taskList path mFilter = do
     matches (FieldEq a) b = a == b
     matches (FieldIn a) b = a `Set.member` b
 
+viewInPager :: String -> IO ()
+viewInPager input = do
+  pager <- System.Environment.getEnv "PAGER"
+
+  let
+    pagerArgs =
+      [ {-
+        This is the `less` flag to display text starting at the top of the screen instead of
+        the bottom. Slight concern about portability.
+        -}
+        "-c"
+      ]
+  let process = (Process.proc pager pagerArgs){Process.std_in = Process.CreatePipe}
+
+  exitCode <- Process.withCreateProcess process $ \mStdin _mStdout _mStderr processHandle -> do
+    let hStdin = fromMaybe (error "failed to open stdin") mStdin
+    hPutStr hStdin input
+    hClose hStdin
+
+    Process.waitForProcess processHandle
+
+  case exitCode of
+    ExitFailure status -> do
+      putStrLn $ "Aborted (pager exited with status " ++ show status ++ ")"
+      exitFailure
+    ExitSuccess ->
+      pure ()
+
 taskView :: FilePath -> Todo.TaskId -> IO ()
 taskView path taskId = do
   state <- Todo.stateDeserialise path
@@ -766,30 +814,8 @@ taskView path taskId = do
     Nothing -> do
       putStrLn "Task not found"
       exitFailure
-    Just task -> do
-      pager <- System.Environment.getEnv "PAGER"
-
-      let
-        pagerArgs =
-          [ {-
-            This is the `less` flag to display text starting at the top of the screen instead of
-            the bottom. Slight concern about portability.
-            -}
-            "-c"
-          ]
-      let process = (Process.proc pager pagerArgs){Process.std_in = Process.CreatePipe}
-      exitCode <- Process.withCreateProcess process $ \mStdin _mStdout _mStderr processHandle -> do
-        let hStdin = fromMaybe (error "failed to open stdin") mStdin
-        writeTask hStdin task
-        hClose hStdin
-
-        Process.waitForProcess processHandle
-      case exitCode of
-        ExitFailure status -> do
-          putStrLn $ "Aborted (pager exited with status " ++ show status ++ ")"
-          exitFailure
-        ExitSuccess ->
-          pure ()
+    Just task ->
+      viewInPager $ taskPage task
 
 taskEdit :: FilePath -> Todo.TaskId -> IO ()
 taskEdit path taskId = do
@@ -874,3 +900,47 @@ commentList path = do
         . Map.toList
         $ Map.intersectionWith (,) comments (Todo.commentMetadata state)
   traverse_ renderComment comments'
+
+commentRenderValues :: Todo.Comment (Op String)
+commentRenderValues =
+  Comment.Comment
+    { Comment.description = Op Text.unpack
+    }
+
+commentPage :: Todo.CommentMetadata -> Todo.Comment (Map StateId) -> String
+commentPage metadata comment =
+  intercalate "\n\n" $
+    [ "! reply to\n" ++ Todo.renderReplyId (Comment.replyTo metadata)
+    ]
+      ++ bfoldMap
+        ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
+            case Map.toList values of
+              [(_, value)] ->
+                [ "! "
+                    ++ Text.unpack fieldName
+                    ++ "\n"
+                    ++ renderValue value
+                ]
+              values' ->
+                fmap
+                  ( \(stateId, value) ->
+                      "! " ++ Text.unpack fieldName ++ " (" ++ renderStateId stateId ++ ")\n" ++ renderValue value
+                  )
+                  values'
+        )
+        (bzip (bzip Todo.commentFieldNames commentRenderValues) comment)
+
+commentView :: FilePath -> Todo.CommentId -> IO ()
+commentView path commentId = do
+  state <- Todo.stateDeserialise path
+  let
+    result =
+      (,)
+        <$> Map.lookup commentId (Todo.commentMetadata state)
+        <*> Map.lookup commentId (Todo.comments state)
+  case result of
+    Nothing -> do
+      putStrLn "error: comment not found"
+      exitFailure
+    Just (metadata, comment) ->
+      viewInPager $ commentPage metadata comment

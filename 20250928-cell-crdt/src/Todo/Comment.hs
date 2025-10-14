@@ -18,7 +18,7 @@ import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
 import GID (GID, gidToBase32, newGID)
 import Getter (Getter (..))
-import Todo.Task (TaskId)
+import Todo.Task (TaskId, renderTaskId)
 
 newtype CommentId = CommentId {unCommentId :: GID}
   deriving (Show, Eq, Ord)
@@ -34,6 +34,10 @@ data ReplyId
   = ReplyTask !TaskId
   | ReplyComment !CommentId
   deriving (Show, Eq)
+
+renderReplyId :: ReplyId -> String
+renderReplyId (ReplyTask taskId) = "task:" ++ renderTaskId taskId
+renderReplyId (ReplyComment commentId) = "comment:" ++ renderCommentId commentId
 
 data CommentMetadata
   = CommentMetadata

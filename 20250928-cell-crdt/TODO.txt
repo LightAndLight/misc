@@ -1,8 +1,8 @@
+* [ ] Update a task and leave a comment in a single "transaction"
+
 * [ ] Comment section in `task view`
 
-  * Update a task and leave a comment in a single "transaction"
-
-* [ ] `comment view` command
+* [x] `comment view` command
 
 * [x] Implement comments
 
