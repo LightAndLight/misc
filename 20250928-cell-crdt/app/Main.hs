@@ -23,6 +23,7 @@ import Data.Functor.Identity (Identity (..), runIdentity)
 import Data.Functor.Product (Product (..))
 import Data.Kind (Type)
 import Data.List (intercalate, sortOn)
+import qualified Data.List as List
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe)
@@ -37,6 +38,8 @@ import qualified Data.Text.IO as Text.IO
 import qualified Data.Text.Lazy.IO as LazyText
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Tree (Tree)
+import qualified Data.Tree as Tree
 import GID (gidFromBase32, gidToBase32)
 import Getter (Getter (..))
 import MD5 (md5FromBase32)
@@ -57,13 +60,16 @@ import qualified Todo
   , stateMerge
   , stateNew
   , stateSerialise
+  , stateThread
   )
 import qualified Todo.Comment as Comment
 import qualified Todo.Comment as Todo
   ( Comment
   , CommentId (..)
   , CommentMetadata
+  , ReplyId (..)
   , commentFieldNames
+  , renderCommentId
   , renderReplyId
   )
 import qualified Todo.Task as Todo
@@ -673,8 +679,11 @@ taskRenderValues =
     , Todo.description = Op Text.unpack
     }
 
-taskPage :: Todo.Task (Map StateId) -> String
-taskPage task =
+taskPage ::
+  Todo.Task (Map StateId) ->
+  [Tree (Todo.CommentId, Todo.CommentMetadata, Todo.Comment (Map StateId))] ->
+  String
+taskPage task comments =
   intercalate "\n\n" $
     bfoldMap
       ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
@@ -693,9 +702,29 @@ taskPage task =
                 values'
       )
       (bzip (bzip Todo.taskFieldNames taskRenderValues) task)
+      ++ ( let
+            go level trees =
+              [ replicate (2 * level) ' ' ++ line
+              | Tree.Node (commentId, _metadata, comment) trees' <-
+                  List.sortOn
+                    (Comment.createdAt . (\(_, x, _) -> x) . Tree.rootLabel)
+                    trees
+              , line <-
+                  [ "--- comment (" ++ Todo.renderCommentId commentId ++ ") ---"
+                  , commentPage comment
+                  ]
+                    ++ go (level + 1) trees'
+              ]
+           in
+            go 0 comments
+         )
 
-writeTask :: Handle -> Todo.Task (Map StateId) -> IO ()
-writeTask handle = hPutStr handle . taskPage
+writeTask ::
+  Handle ->
+  Todo.Task (Map StateId) ->
+  [Tree (Todo.CommentId, Todo.CommentMetadata, Todo.Comment (Map StateId))] ->
+  IO ()
+writeTask handle task = hPutStr handle . taskPage task
 
 renderUpdateTask :: Todo.Task (Map StateId) -> Todo.Task Todo.Update -> String
 renderUpdateTask task update =
@@ -815,7 +844,7 @@ taskView path taskId = do
       putStrLn "Task not found"
       exitFailure
     Just task ->
-      viewInPager $ taskPage task
+      viewInPager $ taskPage task (Todo.stateThread state (Todo.ReplyTask taskId))
 
 taskEdit :: FilePath -> Todo.TaskId -> IO ()
 taskEdit path taskId = do
@@ -838,7 +867,7 @@ taskEdit path taskId = do
               ++ ".txt"
       let taskFileBase = taskFile ++ ".base"
       withFile taskFileBase WriteMode $ \handle ->
-        writeTask handle task
+        writeTask handle task (Todo.stateThread state $ Todo.ReplyTask taskId)
       copyFile taskFileBase taskFile
 
       ( do
@@ -907,28 +936,26 @@ commentRenderValues =
     { Comment.description = Op Text.unpack
     }
 
-commentPage :: Todo.CommentMetadata -> Todo.Comment (Map StateId) -> String
-commentPage metadata comment =
+commentPage :: Todo.Comment (Map StateId) -> String
+commentPage comment =
   intercalate "\n\n" $
-    [ "! reply to\n" ++ Todo.renderReplyId (Comment.replyTo metadata)
-    ]
-      ++ bfoldMap
-        ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
-            case Map.toList values of
-              [(_, value)] ->
-                [ "! "
-                    ++ Text.unpack fieldName
-                    ++ "\n"
-                    ++ renderValue value
-                ]
-              values' ->
-                fmap
-                  ( \(stateId, value) ->
-                      "! " ++ Text.unpack fieldName ++ " (" ++ renderStateId stateId ++ ")\n" ++ renderValue value
-                  )
-                  values'
-        )
-        (bzip (bzip Todo.commentFieldNames commentRenderValues) comment)
+    bfoldMap
+      ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
+          case Map.toList values of
+            [(_, value)] ->
+              [ "! "
+                  ++ Text.unpack fieldName
+                  ++ "\n"
+                  ++ renderValue value
+              ]
+            values' ->
+              fmap
+                ( \(stateId, value) ->
+                    "! " ++ Text.unpack fieldName ++ " (" ++ renderStateId stateId ++ ")\n" ++ renderValue value
+                )
+                values'
+      )
+      (bzip (bzip Todo.commentFieldNames commentRenderValues) comment)
 
 commentView :: FilePath -> Todo.CommentId -> IO ()
 commentView path commentId = do
@@ -943,4 +970,8 @@ commentView path commentId = do
       putStrLn "error: comment not found"
       exitFailure
     Just (metadata, comment) ->
-      viewInPager $ commentPage metadata comment
+      viewInPager $
+        "! reply to\n"
+          ++ Todo.renderReplyId (Comment.replyTo metadata)
+          ++ "\n\n"
+          ++ commentPage comment

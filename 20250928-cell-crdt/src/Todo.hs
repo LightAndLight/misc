@@ -25,13 +25,15 @@ import Data.Foldable (foldl', traverse_)
 import Data.Functor.Identity (Identity (..))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, maybeToList)
 import Data.Monoid (Any (..), getAny)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.String (fromString)
 import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds, secondsToNominalDiffTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
+import Data.Tree (Tree)
+import qualified Data.Tree as Tree
 import GHC.Generics (Generic)
 import Getter (Getter (..))
 import MD5 (hashMD5)
@@ -648,3 +650,18 @@ stateDeserialise path =
             )
         <*> Attoparsec.takeWhile (/= fromIntegral (ord '\n'))
         <* Attoparsec.string (fromString "\n")
+
+stateThread :: State -> ReplyId -> [Tree (CommentId, CommentMetadata, Comment (Map StateId))]
+stateThread state = go
+  where
+    go :: ReplyId -> [Tree (CommentId, CommentMetadata, Comment (Map StateId))]
+    go target =
+      let
+        found =
+          [ (commentId, metadata, comment)
+          | (commentId, metadata) <- Map.toList $ commentMetadata state
+          , Comment.replyTo metadata == target
+          , comment <- maybeToList $ Map.lookup commentId (comments state)
+          ]
+      in
+        fmap (\x@(commentId, _, _) -> Tree.Node x $ go (ReplyComment commentId)) found
