@@ -275,7 +275,7 @@ projectToState project = do
                     <> fromString
                       ( foldMap
                           ( \(subtaskId, _) ->
-                              "* <tsk:" <> Todo.renderTaskId subtaskId <> ">\n"
+                              "* <tsk:task:" <> Todo.renderTaskId subtaskId <> ">\n"
                           )
                           subtasks
                       )
