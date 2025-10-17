@@ -1,5 +1,9 @@
 * [ ] Update a task and leave a comment in a single "transaction"
 
+* [ ] Create a comment
+
+  * Use argument `--reply-to ID`
+
 * [x] Comment section in `task view`
 
 * [x] `comment view` command
