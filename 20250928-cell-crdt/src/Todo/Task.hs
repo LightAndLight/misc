@@ -21,7 +21,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
-import GID (GID, gidToBase32, newGID)
+import GID (GID, gidFromBase32, gidToBase32, newGID)
 import Getter (Getter (..))
 import StateId (StateId)
 
@@ -31,6 +31,9 @@ newtype TaskId = TaskId {unTaskId :: GID}
 
 renderTaskId :: TaskId -> String
 renderTaskId (TaskId gid) = gidToBase32 gid
+
+parseTaskId :: String -> Maybe TaskId
+parseTaskId = fmap TaskId . gidFromBase32
 
 newTaskId :: IO TaskId
 newTaskId = TaskId <$> newGID

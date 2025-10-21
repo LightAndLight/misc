@@ -8,7 +8,18 @@
 
 module Main where
 
-import Barbies (bfoldMap, bfor_, btraverse, btraverseC, bzip, bzipWith)
+import Barbies
+  ( AllB
+  , ApplicativeB
+  , ConstraintsB
+  , TraversableB
+  , bfoldMap
+  , bfor_
+  , btraverse
+  , btraverseC
+  , bzip
+  , bzipWith
+  )
 import Control.Applicative (Const (..), many, optional, some, (<**>), (<|>))
 import Control.Exception (finally)
 import Control.Monad (unless, when)
@@ -46,7 +57,7 @@ import MD5 (md5FromBase32)
 import qualified Options.Applicative as Options
 import Options.Applicative.Help.Pretty ((.$.))
 import StateId (StateId (..), renderStateId)
-import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
+import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, removeFile)
 import qualified System.Environment
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (Handle, IOMode (..), hClose, hPutStr, withFile)
@@ -59,16 +70,19 @@ import qualified Todo
   , stateDeserialise
   , stateMerge
   , stateNew
+  , stateSave
   , stateSerialise
   , stateThread
   )
-import qualified Todo.Comment as Comment
+import qualified Todo.Comment as Comment (Comment (..))
+import qualified Todo.Comment as CommentMetadata (CommentMetadata (..))
 import qualified Todo.Comment as Todo
-  ( Comment
+  ( Comment (Comment)
   , CommentId (..)
   , CommentMetadata
   , ReplyId (..)
   , commentFieldNames
+  , parseReplyId
   , renderCommentId
   , renderReplyId
   )
@@ -107,7 +121,8 @@ data TaskCommand
   | TaskEdit Todo.TaskId
 
 data CommentCommand
-  = CommentList
+  = CommentNew Todo.ReplyId
+  | CommentList
   | CommentView Todo.CommentId
 
 taskFieldSelectorsEmpty :: Todo.Task FieldSelectors
@@ -298,12 +313,21 @@ cliParser =
             "list"
             (Options.info commentListParser (Options.progDesc "List comments" <> Options.fullDesc))
             <> Options.command
+              "new"
+              (Options.info commentNewParser (Options.progDesc "Create a new comment" <> Options.fullDesc))
+            <> Options.command
               "view"
               (Options.info commentViewParser (Options.progDesc "View a comment" <> Options.fullDesc))
         )
 
     commentListParser =
       pure CommentList
+
+    commentNewParser =
+      CommentNew
+        <$> Options.option
+          (Options.maybeReader Todo.parseReplyId)
+          (Options.long "reply-to" <> Options.metavar "ID" <> Options.help "Comment to edit")
 
     commentViewParser =
       CommentView
@@ -325,6 +349,7 @@ main = do
     Task (TaskView taskId) -> taskView (database cli) taskId
     Task (TaskEdit taskId) -> taskEdit (database cli) taskId
     Label LabelList -> labelList (database cli)
+    Comment (CommentNew replyId) -> commentNew (database cli) replyId
     Comment CommentList -> commentList (database cli)
     Comment (CommentView commentId) -> commentView (database cli) commentId
 
@@ -391,9 +416,7 @@ merge path other = do
   otherState <- Todo.stateDeserialise other
   let state' = Todo.stateMerge state otherState
 
-  let pathNew = path ++ ".new"
-  Todo.stateSerialise pathNew state'
-  renameFile pathNew path
+  Todo.stateSave path state'
   putStrLn $ "Merged " ++ other ++ " into " ++ path
 
   let conflicts = Todo.stateConflicts state'
@@ -412,52 +435,45 @@ taskFileTemplate =
 
 taskNew :: FilePath -> IO ()
 taskNew path = do
-  editor <- System.Environment.getEnv "EDITOR"
   now <- getCurrentTime
 
   let taskFile = "drafts/" ++ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now ++ ".txt"
   writeFile taskFile taskFileTemplate
 
-  exitCode <- Process.withCreateProcess (Process.proc editor [taskFile]) $ \_mStdin _mStdout _mStderr processHandle -> do
-    Process.waitForProcess processHandle
-  case exitCode of
-    ExitFailure status -> do
-      putStrLn $ "Aborted (editor exited with status " ++ show status ++ ")"
+  viewInEditor taskFile
+  exists <- doesFileExist taskFile
+  if exists
+    then do
+      task <-
+        btraverse
+          ( \case
+              Todo.Resolved a ->
+                pure $ Identity a
+              Todo.Conflicted{} -> do
+                -- TODO: recover gracefully
+                putStrLn "error: a new task can't introduce conflicts"
+                exitFailure
+          )
+          =<< either
+            ( \err -> do
+                -- TODO: better error message
+                print err
+                exitFailure
+            )
+            pure
+            . validateIdentified Todo.taskFieldNames
+          =<< readTask taskFile taskFileParser
+      state <- Todo.stateDeserialise path
+
+      state' <- Todo.stateChange (Todo.NewTask task) state
+      Todo.stateSave path state'
+
+      removeFile taskFile
+      -- TODO: print task ID?
+      putStrLn $ "Created task " ++ Text.unpack (runIdentity $ Todo.title task)
+    else do
+      putStrLn "error: missing task file"
       exitFailure
-    ExitSuccess -> do
-      exists <- doesFileExist taskFile
-      if exists
-        then do
-          task <-
-            btraverse
-              ( \case
-                  Todo.Resolved a ->
-                    pure $ Identity a
-                  Todo.Conflicted{} -> do
-                    -- TODO: recover gracefully
-                    putStrLn "error: a new task can't introduce conflicts"
-                    exitFailure
-              )
-              =<< either
-                ( \err -> do
-                    -- TODO: better error message
-                    print err
-                    exitFailure
-                )
-                pure
-                . validateIdentifiedTask
-              =<< readTask taskFile taskFileParser
-          state <- Todo.stateDeserialise path
-          state' <- Todo.stateChange (Todo.NewTask task) state
-
-          let pathNew = path ++ ".new"
-          Todo.stateSerialise pathNew state'
-          renameFile pathNew path
-          removeFile taskFile
-
-          -- TODO: print task ID?
-          putStrLn $ "Created task " ++ Text.unpack (runIdentity $ Todo.title task)
-        else putStrLn "Aborted"
 
 readTask :: FilePath -> Attoparsec.Parser a -> IO a
 readTask path parser = do
@@ -568,9 +584,13 @@ data ValidateIdentifiedError
       !Text
   deriving (Show, Eq)
 
-validateIdentifiedTask ::
-  Todo.Task (Compose [] Identified) -> Either ValidateIdentifiedError (Todo.Task Todo.Conflicted)
-validateIdentifiedTask =
+validateIdentified ::
+  (TraversableB b, ApplicativeB b, ConstraintsB b, AllB Eq b) =>
+  -- | Field names
+  b (Const Text) ->
+  b (Compose [] Identified) ->
+  Either ValidateIdentifiedError (b Todo.Conflicted)
+validateIdentified fieldNames =
   btraverseC @Eq
     ( \(Const fieldName `Pair` Compose identifieds) -> do
         let
@@ -597,7 +617,20 @@ validateIdentifiedTask =
           Just conflicted -> pure conflicted
           Nothing -> Left $ EmptyChange fieldName
     )
-    . bzip Todo.taskFieldNames
+    . bzip fieldNames
+
+descriptionBodyParser :: Attoparsec.Parser Text
+descriptionBodyParser =
+  fmap
+    Text.pack
+    ( Attoparsec.manyTill
+        Attoparsec.anyChar
+        ( void (lookAhead . Attoparsec.string $ fromString "\n!")
+            <|> void (lookAhead . Attoparsec.string $ fromString "\n---")
+            <|> Attoparsec.endOfInput
+        )
+        <* optional (Attoparsec.char '\n')
+    )
 
 taskFileParser :: Attoparsec.Parser (Todo.Task (Compose [] Identified))
 taskFileParser =
@@ -657,17 +690,7 @@ taskFileParser =
 
     descriptionFieldParser = do
       mStateId <- fieldCommentParser "description"
-      description <-
-        fmap
-          Text.pack
-          ( Attoparsec.manyTill
-              Attoparsec.anyChar
-              ( void (lookAhead . Attoparsec.string $ fromString "\n!")
-                  <|> void (lookAhead . Attoparsec.string $ fromString "\n---")
-                  <|> Attoparsec.endOfInput
-              )
-              <* optional (Attoparsec.char '\n')
-          )
+      description <- descriptionBodyParser
       case mStateId of
         Nothing ->
           pure emptyTask{Todo.description = Compose [Unidentified description]}
@@ -734,7 +757,7 @@ taskPage task comments =
               [ replicate (2 * level) ' ' ++ line
               | Tree.Node (commentId, _metadata, comment) trees' <-
                   List.sortOn
-                    (Comment.createdAt . (\(_, x, _) -> x) . Tree.rootLabel)
+                    (CommentMetadata.createdAt . (\(_, x, _) -> x) . Tree.rootLabel)
                     trees
               , line <-
                   [ "--- comment (" ++ Todo.renderCommentId commentId ++ ") ---\n"
@@ -873,6 +896,22 @@ taskView path taskId = do
     Just task ->
       viewInPager $ taskPage task (Todo.stateThread state (Todo.ReplyTask taskId))
 
+viewInEditor ::
+  -- | File to edit
+  FilePath ->
+  IO ()
+viewInEditor file = do
+  editor <- System.Environment.getEnv "EDITOR"
+
+  exitCode <- Process.withCreateProcess (Process.proc editor [file]) $ \_mStdin _mStdout _mStderr processHandle -> do
+    Process.waitForProcess processHandle
+  case exitCode of
+    ExitFailure status -> do
+      putStrLn $ "Aborted (editor exited with status " ++ show status ++ ")"
+      exitFailure
+    ExitSuccess ->
+      pure ()
+
 taskEdit :: FilePath -> Todo.TaskId -> IO ()
 taskEdit path taskId = do
   state <- Todo.stateDeserialise path
@@ -881,7 +920,6 @@ taskEdit path taskId = do
       putStrLn "Task not found"
       exitFailure
     Just task -> do
-      editor <- System.Environment.getEnv "EDITOR"
       createDirectoryIfMissing True "drafts"
 
       now <- getCurrentTime
@@ -898,44 +936,42 @@ taskEdit path taskId = do
       copyFile taskFileBase taskFile
 
       ( do
-          exitCode <- Process.withCreateProcess (Process.proc editor [taskFile]) $ \_mStdin _mStdout _mStderr processHandle -> do
-            Process.waitForProcess processHandle
-          case exitCode of
-            ExitFailure status -> do
-              putStrLn $ "Aborted (editor exited with status " ++ show status ++ ")"
-              exitFailure
-            ExitSuccess -> do
-              base <- readFile taskFileBase
-              new <- readFile taskFile
-              if base == new
-                then putStrLn "No change"
-                else do
-                  task' <-
+          viewInEditor taskFile
+
+          base <- readFile taskFileBase
+          new <- readFile taskFile
+          if base == new
+            then do
+              removeFile taskFile
+              putStrLn "No change"
+            else do
+              task' <-
+                -- TODO: nicer error message
+                either (\err -> print err *> exitFailure) pure
+                  . validateIdentified Todo.taskFieldNames
+                  =<< readTask taskFile taskFileParser
+              updateTask <-
+                case Todo.taskDiff task task' of
+                  Right updateTask ->
+                    pure updateTask
+                  Left err -> do
                     -- TODO: nicer error message
-                    either (\err -> print err *> exitFailure) pure
-                      . validateIdentifiedTask
-                      =<< readTask taskFile taskFileParser
-                  updateTask <-
-                    case Todo.taskDiff task task' of
-                      Right updateTask ->
-                        pure updateTask
-                      Left err -> do
-                        -- TODO: nicer error message
-                        print err
-                        exitFailure
+                    print err
+                    exitFailure
 
-                  if getAll $ bfoldMap (All . (\case Todo.None -> True; _ -> False)) updateTask
-                    then putStrLn "No change"
-                    else do
-                      putStrLn "Changes:\n"
+              if getAll $ bfoldMap (All . (\case Todo.None -> True; _ -> False)) updateTask
+                then do
+                  removeFile taskFile
+                  putStrLn "No change"
+                else do
+                  putStrLn "Changes:\n"
+                  putStr $ renderUpdateTask task updateTask
 
-                      putStr $ renderUpdateTask task updateTask
-                      state' <- Todo.stateChange Todo.UpdateTask{Todo.taskId, Todo.updateTask} state
-                      let pathNew = path ++ ".new"
-                      Todo.stateSerialise pathNew state'
-                      renameFile pathNew path
-                      removeFile taskFile
-                      putStrLn $ "Updated task " ++ gidToBase32 (Todo.unTaskId taskId)
+                  state' <- Todo.stateChange Todo.UpdateTask{Todo.taskId, Todo.updateTask} state
+                  Todo.stateSave path state'
+
+                  removeFile taskFile
+                  putStrLn $ "Updated task " ++ gidToBase32 (Todo.unTaskId taskId)
         )
         `finally` removeFile taskFileBase
 
@@ -946,13 +982,91 @@ labelList path = do
   for_ (Set.toAscList labels) $ \label -> do
     Text.IO.putStrLn label
 
+commentFileTemplate :: String
+commentFileTemplate =
+  bfoldMap
+    (\(Const fieldName) -> "! " ++ Text.unpack fieldName ++ "\n\n")
+    Todo.commentFieldNames
+
+readComment :: FilePath -> Attoparsec.Parser a -> IO a
+readComment path parser = do
+  input <- LazyText.readFile path
+  case Attoparsec.parseOnly (parser <* Attoparsec.endOfInput) input of
+    Left{} ->
+      error $ "failed to parse comment " ++ path
+    Right task ->
+      pure task
+
+commentFileParser :: Attoparsec.Parser (Todo.Comment (Compose [] Identified))
+commentFileParser =
+  foldl'
+    (bzipWith (\(Compose a) (Compose b) -> Compose (a ++ b)))
+    emptyComment
+    <$> some descriptionFieldParser
+  where
+    emptyComment =
+      Todo.Comment
+        { Comment.description = mempty
+        }
+
+    descriptionFieldParser = do
+      mStateId <- fieldCommentParser "description"
+      description <- descriptionBodyParser
+      case mStateId of
+        Nothing ->
+          pure emptyComment{Comment.description = Compose [Unidentified description]}
+        Just stateId ->
+          pure emptyComment{Comment.description = Compose [Identified stateId description]}
+
+commentNew :: FilePath -> Todo.ReplyId -> IO ()
+commentNew path replyId = do
+  now <- getCurrentTime
+
+  let commentFile = "drafts/" ++ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now ++ ".txt"
+  writeFile commentFile commentFileTemplate
+
+  viewInEditor commentFile
+  exists <- doesFileExist commentFile
+  if exists
+    then do
+      comment <-
+        btraverse
+          ( \case
+              Todo.Resolved a ->
+                pure $ Identity a
+              Todo.Conflicted{} -> do
+                -- TODO: recover gracefully
+                putStrLn "error: a new comment can't introduce conflicts"
+                exitFailure
+          )
+          =<< either
+            ( \err -> do
+                -- TODO: better error message
+                print err
+                exitFailure
+            )
+            pure
+            . validateIdentified Todo.commentFieldNames
+          =<< readComment commentFile commentFileParser
+      state <- Todo.stateDeserialise path
+
+      state' <- Todo.stateChange Todo.NewComment{Todo.replyTo = replyId, Todo.comment = comment} state
+      Todo.stateSave path state'
+
+      removeFile commentFile
+      -- TODO: print comment ID?
+      putStrLn "Created comment"
+    else do
+      putStrLn "error: missing comment file"
+      exitFailure
+
 commentList :: FilePath -> IO ()
 commentList path = do
   state <- Todo.stateDeserialise path
   let comments = Todo.comments state
   let
     comments' =
-      sortOn (Down . Comment.createdAt . snd . snd)
+      sortOn (Down . CommentMetadata.createdAt . snd . snd)
         . Map.toList
         $ Map.intersectionWith (,) comments (Todo.commentMetadata state)
   traverse_ renderComment comments'
@@ -999,6 +1113,6 @@ commentView path commentId = do
     Just (metadata, comment) ->
       viewInPager $
         "! reply to\n"
-          ++ Todo.renderReplyId (Comment.replyTo metadata)
+          ++ Todo.renderReplyId (CommentMetadata.replyTo metadata)
           ++ "\n\n"
           ++ commentPage comment

@@ -1,6 +1,8 @@
 * [ ] Update a task and leave a comment in a single "transaction"
 
-* [ ] Create a comment
+* [ ] Show comment timestamps in task view
+
+* [x] Create a comment
 
   * Use argument `--reply-to ID`
 

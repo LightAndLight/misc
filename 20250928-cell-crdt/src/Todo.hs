@@ -38,6 +38,7 @@ import GHC.Generics (Generic)
 import Getter (Getter (..))
 import MD5 (hashMD5)
 import StateId (StateId (..))
+import System.Directory (renameFile)
 import System.IO (IOMode (..), withFile)
 import Todo.Comment
   ( Comment
@@ -665,3 +666,9 @@ stateThread state = go
           ]
       in
         fmap (\x@(commentId, _, _) -> Tree.Node x $ go (ReplyComment commentId)) found
+
+stateSave :: FilePath -> State -> IO ()
+stateSave path state = do
+  let pathNew = path ++ ".new"
+  stateSerialise pathNew state
+  renameFile pathNew path
