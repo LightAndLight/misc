@@ -720,68 +720,75 @@ taskFileParser =
           pure ()
       pure emptyTask
 
-taskRenderValues :: Todo.Task (Op String)
+taskRenderValues :: Todo.Task (Op [Text])
 taskRenderValues =
   Todo.Task
-    { Todo.status = Op ((++ "\n") . Text.unpack)
-    , Todo.labels = Op ((++ "\n") . intercalate ", " . fmap Text.unpack . Set.toAscList)
-    , Todo.title = Op ((++ "\n") . Text.unpack)
-    , Todo.description = Op Text.unpack
+    { Todo.status = Op pure
+    , Todo.labels = Op (pure . Text.intercalate (fromString ", ") . Set.toAscList)
+    , Todo.title = Op pure
+    , Todo.description = Op (Text.split (== '\n'))
     }
 
 taskPage ::
   Todo.Task (Map StateId) ->
   [Tree (Todo.CommentId, Todo.CommentMetadata, Todo.Comment (Map StateId))] ->
-  String
+  [Text]
 taskPage task comments =
-  intercalate "\n" $
-    bfoldMap
-      ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
-          case Map.toList values of
-            [(_, value)] ->
-              [ "! "
-                  ++ Text.unpack fieldName
-                  ++ "\n"
-                  ++ renderValue value
-              ]
-            values' ->
-              fmap
-                ( \(stateId, value) ->
-                    "! " ++ Text.unpack fieldName ++ " (" ++ renderStateId stateId ++ ")\n" ++ renderValue value
-                )
-                values'
-      )
-      (bzip (bzip Todo.taskFieldNames taskRenderValues) task)
-      ++ ( let
-            go level trees =
-              [ replicate (2 * level) ' ' ++ line
-              | Tree.Node (commentId, _metadata, comment) trees' <-
-                  List.sortOn
-                    (CommentMetadata.createdAt . (\(_, x, _) -> x) . Tree.rootLabel)
-                    trees
-              , line <-
-                  [ "--- comment (" ++ Todo.renderCommentId commentId ++ ") ---\n"
-                  , commentPage comment
-                  ]
-                    ++ go (level + 1) trees'
-              ]
-           in
-            go 0 comments
-         )
+  bfoldMap
+    ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
+        case Map.toList values of
+          [(_, value)] ->
+            (fromString "! " <> fieldName)
+              : withTrailingNewline (renderValue value)
+          values' ->
+            concatMap
+              ( \(stateId, value) ->
+                  ( fromString "! "
+                      <> fieldName
+                      <> fromString " ("
+                      <> Text.pack (renderStateId stateId)
+                      <> fromString ")"
+                  )
+                    : withTrailingNewline (renderValue value)
+              )
+              values'
+    )
+    (bzip (bzip Todo.taskFieldNames taskRenderValues) task)
+    ++ ( let
+          go :: Int -> [Tree (Todo.CommentId, Todo.CommentMetadata, Todo.Comment (Map StateId))] -> [Text]
+          go level trees =
+            [ Text.replicate (2 * level) (fromString " ") <> line
+            | Tree.Node (commentId, _metadata, comment) trees' <-
+                List.sortOn
+                  (CommentMetadata.createdAt . (\(_, x, _) -> x) . Tree.rootLabel)
+                  trees
+            , line <-
+                (fromString "--- comment (" <> Text.pack (Todo.renderCommentId commentId) <> fromString ") ---\n")
+                  : commentPage comment
+                  ++ go (level + 1) trees'
+            ]
+         in
+          go 0 comments
+       )
+  where
+    withTrailingNewline :: (Monoid a, Eq a) => [a] -> [a]
+    withTrailingNewline xs
+      | null xs = [mempty]
+      | otherwise = if last xs == mempty then xs else xs ++ [mempty]
 
 writeTask ::
   Handle ->
   Todo.Task (Map StateId) ->
   [Tree (Todo.CommentId, Todo.CommentMetadata, Todo.Comment (Map StateId))] ->
   IO ()
-writeTask handle task = hPutStr handle . taskPage task
+writeTask handle task = Text.IO.hPutStr handle . Text.intercalate (fromString "\n") . taskPage task
 
 renderUpdateTask :: Todo.Task (Map StateId) -> Todo.Task Todo.Update -> String
 renderUpdateTask task update =
   foldMap (++ "\n\n") $
     bfoldMap
       ( \(Const fieldName `Pair` Op renderValue `Pair` Getter getter) ->
-          renderField (Text.unpack fieldName) (Text.pack . renderValue) getter
+          renderField (Text.unpack fieldName) (Text.intercalate (fromString "\n") . renderValue) getter
       )
       (bzip (bzip Todo.taskFieldNames taskRenderValues) Todo.taskGetters)
   where
@@ -894,7 +901,8 @@ taskView path taskId = do
       putStrLn "Task not found"
       exitFailure
     Just task ->
-      viewInPager $ taskPage task (Todo.stateThread state (Todo.ReplyTask taskId))
+      viewInPager . intercalate "\n" . fmap Text.unpack $
+        taskPage task (Todo.stateThread state (Todo.ReplyTask taskId))
 
 viewInEditor ::
   -- | File to edit
@@ -1071,32 +1079,33 @@ commentList path = do
         $ Map.intersectionWith (,) comments (Todo.commentMetadata state)
   traverse_ renderComment comments'
 
-commentRenderValues :: Todo.Comment (Op String)
+commentRenderValues :: Todo.Comment (Op [Text])
 commentRenderValues =
   Comment.Comment
-    { Comment.description = Op Text.unpack
+    { Comment.description = Op (Text.split (== '\n'))
     }
 
-commentPage :: Todo.Comment (Map StateId) -> String
+commentPage :: Todo.Comment (Map StateId) -> [Text]
 commentPage comment =
-  intercalate "\n" $
-    bfoldMap
-      ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
-          case Map.toList values of
-            [(_, value)] ->
-              [ "! "
-                  ++ Text.unpack fieldName
-                  ++ "\n"
-                  ++ renderValue value
-              ]
-            values' ->
-              fmap
-                ( \(stateId, value) ->
-                    "! " ++ Text.unpack fieldName ++ " (" ++ renderStateId stateId ++ ")\n" ++ renderValue value
-                )
-                values'
-      )
-      (bzip (bzip Todo.commentFieldNames commentRenderValues) comment)
+  bfoldMap
+    ( \(Const fieldName `Pair` Op renderValue `Pair` values) ->
+        case Map.toList values of
+          [(_, value)] ->
+            (fromString "! " <> fieldName) : renderValue value
+          values' ->
+            concatMap
+              ( \(stateId, value) ->
+                  ( fromString "! "
+                      <> fieldName
+                      <> fromString " ("
+                      <> Text.pack (renderStateId stateId)
+                      <> fromString ")"
+                  )
+                    : renderValue value
+              )
+              values'
+    )
+    (bzip (bzip Todo.commentFieldNames commentRenderValues) comment)
 
 commentView :: FilePath -> Todo.CommentId -> IO ()
 commentView path commentId = do
@@ -1115,4 +1124,4 @@ commentView path commentId = do
         "! reply to\n"
           ++ Todo.renderReplyId (CommentMetadata.replyTo metadata)
           ++ "\n\n"
-          ++ commentPage comment
+          ++ intercalate "\n" (Text.unpack <$> commentPage comment)
