@@ -453,12 +453,19 @@ taskNew path = do
   now <- getCurrentTime
 
   let taskFile = "drafts/" ++ formatTime defaultTimeLocale formatYMDHMS now ++ ".txt"
-  writeFile taskFile taskFileTemplate
+  let taskFileBase = taskFile ++ ".base"
+  writeFile taskFileBase taskFileTemplate
+  copyFile taskFileBase taskFile
 
   viewInEditor taskFile
-  exists <- doesFileExist taskFile
-  if exists
+
+  base <- readFile taskFileBase
+  new <- readFile taskFile
+  if base == new
     then do
+      putStrLn "Aborted (no changes detected)"
+      exitFailure
+    else flip finally (removeFile taskFileBase) $ do
       task <-
         btraverse
           ( \case
@@ -486,9 +493,6 @@ taskNew path = do
       removeFile taskFile
       -- TODO: print task ID?
       putStrLn $ "Created task " ++ Text.unpack (runIdentity $ Todo.title task)
-    else do
-      putStrLn "error: missing task file"
-      exitFailure
 
 readTask :: FilePath -> Attoparsec.Parser a -> IO a
 readTask path parser = do
