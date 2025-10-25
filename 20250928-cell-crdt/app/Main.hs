@@ -427,17 +427,32 @@ merge path other = do
       bfor_ (bzip Todo.taskFieldNames task) $ \(Const fieldName `Pair` value) -> do
         unless (Map.size value <= 1) . putStrLn $ "* " ++ Text.unpack fieldName
 
+taskFieldDefaults :: Todo.Task Maybe
+taskFieldDefaults =
+  Todo.Task
+    { Todo.status = Just (fromString "todo")
+    , Todo.labels = Nothing
+    , Todo.title = Nothing
+    , Todo.description = Nothing
+    }
+
 taskFileTemplate :: String
 taskFileTemplate =
   bfoldMap
-    (\(Const fieldName) -> "! " ++ Text.unpack fieldName ++ "\n\n")
-    Todo.taskFieldNames
+    ( \(Const fieldName `Pair` mFieldDefault `Pair` Op renderValue) ->
+        "! "
+          ++ Text.unpack fieldName
+          ++ "\n"
+          ++ maybe "" (foldMap (Text.unpack . (<> fromString "\n")) . renderValue) mFieldDefault
+          ++ "\n"
+    )
+    (Todo.taskFieldNames `bzip` taskFieldDefaults `bzip` taskRenderValues)
 
 taskNew :: FilePath -> IO ()
 taskNew path = do
   now <- getCurrentTime
 
-  let taskFile = "drafts/" ++ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now ++ ".txt"
+  let taskFile = "drafts/" ++ formatTime defaultTimeLocale formatYMDHMS now ++ ".txt"
   writeFile taskFile taskFileTemplate
 
   viewInEditor taskFile
@@ -758,12 +773,17 @@ taskPage task comments =
           go :: Int -> [Tree (Todo.CommentId, Todo.CommentMetadata, Todo.Comment (Map StateId))] -> [Text]
           go level trees =
             [ Text.replicate (2 * level) (fromString " ") <> line
-            | Tree.Node (commentId, _metadata, comment) trees' <-
+            | Tree.Node (commentId, metadata, comment) trees' <-
                 List.sortOn
                   (CommentMetadata.createdAt . (\(_, x, _) -> x) . Tree.rootLabel)
                   trees
             , line <-
-                (fromString "--- comment (" <> Text.pack (Todo.renderCommentId commentId) <> fromString ") ---\n")
+                ( fromString "--- comment:"
+                    <> Text.pack (Todo.renderCommentId commentId)
+                    <> fromString " @ "
+                    <> fromString (formatTime defaultTimeLocale formatYMDHMS $ CommentMetadata.createdAt metadata)
+                    <> fromString " ---\n"
+                )
                   : commentPage comment
                   ++ go (level + 1) trees'
             ]
@@ -920,6 +940,9 @@ viewInEditor file = do
     ExitSuccess ->
       pure ()
 
+formatYMDHMS :: String
+formatYMDHMS = "%Y-%m-%dT%H:%M:%SZ"
+
 taskEdit :: FilePath -> Todo.TaskId -> IO ()
 taskEdit path taskId = do
   state <- Todo.stateDeserialise path
@@ -934,7 +957,7 @@ taskEdit path taskId = do
 
       let taskFile =
             "drafts/"
-              ++ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
+              ++ formatTime defaultTimeLocale formatYMDHMS now
               ++ "-"
               ++ gidToBase32 (Todo.unTaskId taskId)
               ++ ".txt"
@@ -1030,7 +1053,7 @@ commentNew :: FilePath -> Todo.ReplyId -> IO ()
 commentNew path replyId = do
   now <- getCurrentTime
 
-  let commentFile = "drafts/" ++ formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now ++ ".txt"
+  let commentFile = "drafts/" ++ formatTime defaultTimeLocale formatYMDHMS now ++ ".txt"
   writeFile commentFile commentFileTemplate
 
   viewInEditor commentFile

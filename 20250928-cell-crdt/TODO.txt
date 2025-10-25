@@ -1,6 +1,8 @@
 * [ ] Update a task and leave a comment in a single "transaction"
 
-* [ ] Show comment timestamps in task view
+* [ ] `task new` without editing the file shouldn't create a task
+
+* [x] Show comment timestamps in task view
 
 * [x] Create a comment
 
