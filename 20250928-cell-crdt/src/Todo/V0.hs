@@ -4,7 +4,10 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -24,14 +27,14 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.String (fromString)
+import Data.String (IsString, fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy.Builder as Text
 import qualified Data.Text.Lazy.Builder as Text.Builder
 import Data.Word (Word64)
 
-data HList (f :: Type -> Type) :: [Type] -> Type where
+data HList (f :: a -> Type) :: [a] -> Type where
   HNil :: HList f '[]
   HCons :: f x -> HList f xs -> HList f (x ': xs)
 
@@ -43,58 +46,71 @@ happend :: HList f xs -> HList f ys -> HList f (xs `Append` ys)
 happend HNil ys = ys
 happend (HCons x xs) ys = HCons x (happend xs ys)
 
-data Desc (ctx :: [Type]) (params :: [Type]) a where
+data Ty = CodecOf Type | A Type
+
+type An = A
+
+data TyDecoder :: Ty -> Type where
+  DCodecOf :: Binary.Get a -> TyDecoder (CodecOf a)
+  DA :: a -> TyDecoder (A a)
+
+data TyEncoder :: Ty -> Type where
+  ECodecOf :: (a -> Binary.Put) -> TyEncoder (CodecOf a)
+  EA :: a -> TyEncoder (A a)
+
+data Param (a :: Ty)
+  = Unused
+  | Used !Text
+
+instance IsString (Param a) where
+  fromString = Used . fromString
+
+data Desc (params :: [Ty]) (a :: Type) where
   Define ::
     { name :: !Text
     , description :: !Text
-    , context :: !(HList (Const Text) ctx)
-    , params :: !(HList (Const Text) params)
-    , body :: !(Desc ctx params a)
+    , params :: !(HList Param params)
+    , body :: !(Desc params a)
     } ->
-    Desc ctx params a
+    Desc params a
   Opaque ::
     { name :: !Text
     , description :: !Text
-    , context :: !(HList (Const Text) ctx)
-    , params :: !(HList (Const Text) params)
-    , get :: !(HList Binary.Get ctx -> HList Identity params -> Binary.Get a)
-    , put :: !(HList (Op Binary.Put) ctx -> HList Identity params -> a -> Binary.Put)
+    , params :: !(HList Param params)
+    , get :: !(HList TyDecoder params -> Binary.Get a)
+    , put :: !(HList TyEncoder params -> a -> Binary.Put)
     } ->
-    Desc ctx params a
+    Desc params a
   Field ::
     Text ->
-    Desc ctx params a ->
-    Desc ctx (a ': params) b ->
-    Desc ctx params (a, b)
-  End :: Desc ctx params ()
-  Iso :: (a -> b, b -> a) -> Desc ctx params a -> Desc ctx params b
+    Desc params a ->
+    Desc (An a ': params) b ->
+    Desc params (a, b)
+  End :: Desc params ()
+  Iso :: (a -> b, b -> a) -> Desc params a -> Desc params b
 
-descGet :: Desc ctx params a -> HList Binary.Get ctx -> HList Identity params -> Binary.Get a
-descGet Define{body} ctx params = descGet body ctx params
-descGet Opaque{get} ctx params = get ctx params
-descGet (Field _name value rest) ctx params = do
-  a <- descGet value ctx params
-  b <- descGet rest ctx (HCons (pure a) params)
+descGet :: Desc params a -> HList TyDecoder params -> Binary.Get a
+descGet Define{body} params = descGet body params
+descGet Opaque{get} params = get params
+descGet (Field _name value rest) params = do
+  a <- descGet value params
+  b <- descGet rest (HCons (DA a) params)
   pure (a, b)
-descGet End _ctx _params = Binary.get @()
-descGet (Iso (to, _from) rest) ctx params = to <$> descGet rest ctx params
+descGet End _params = Binary.get @()
+descGet (Iso (to, _from) rest) params = to <$> descGet rest params
 
-descPut ::
-  Desc ctx params a -> HList (Op Binary.Put) ctx -> HList Identity params -> a -> Binary.Put
-descPut Define{body} ctx params a = descPut body ctx params a
-descPut Opaque{put} ctx params a = put ctx params a
-descPut (Field _name value rest) ctx params (a, b) = do
-  descPut value ctx params a
-  descPut rest ctx (HCons (pure a) params) b
-descPut End _ctx _params () = Binary.put @() ()
-descPut (Iso (_to, from) rest) ctx params a = descPut rest ctx params (from a)
+descPut :: Desc params a -> HList TyEncoder params -> a -> Binary.Put
+descPut Define{body} params a = descPut body params a
+descPut Opaque{put} params a = put params a
+descPut (Field _name value rest) params (a, b) = do
+  descPut value params a
+  descPut rest (HCons (EA a) params) b
+descPut End _params () = Binary.put @() ()
+descPut (Iso (_to, from) rest) params a = descPut rest params (from a)
 
-asList :: HList (Const a) xs -> [a]
-asList HNil = []
-asList (HCons (Const x) rest) = x : asList rest
-
-renderNames :: HList (Const Text) xs -> Text.Builder
-renderNames = Text.Builder.fromText . Text.unwords . asList
+asList :: (forall x. f x -> Maybe a) -> HList f xs -> [a]
+asList _ HNil = []
+asList f (HCons x rest) = maybe id (:) (f x) $ asList f rest
 
 data Documented
   = DocumentedDefine
@@ -113,8 +129,8 @@ data DocumentedType
   = DocumentedName !Text
   | DocumentedStruct ![(Text, DocumentedType)]
 
-documentedDefinition :: MonadState (Map Text Documented) m => Desc ctx params a -> m DocumentedType
-documentedDefinition Define{name, description, context, params, body} = do
+documentedDefinition :: MonadState (Map Text Documented) m => Desc params a -> m DocumentedType
+documentedDefinition Define{name, description, params, body} = do
   body' <- documentedType body
   mDesc <- gets $ Map.lookup name
   case mDesc of
@@ -125,12 +141,12 @@ documentedDefinition Define{name, description, context, params, body} = do
           DocumentedDefine
             { dDescription = if Text.null description then Nothing else Just description
             , dName = name
-            , dParams = asList $ happend context params
+            , dParams = asList (\case Unused -> Nothing; Used x -> Just x) params
             , dBody = body'
             }
       modify $ Map.insert name doc
   pure $ DocumentedName name
-documentedDefinition Opaque{name, description, context, params} = do
+documentedDefinition Opaque{name, description, params} = do
   mDesc <- gets $ Map.lookup name
   case mDesc of
     Just{} -> pure ()
@@ -139,7 +155,7 @@ documentedDefinition Opaque{name, description, context, params} = do
         doc =
           DocumentedOpaque
             { dName = name
-            , dParams = asList $ happend context params
+            , dParams = asList (\case Unused -> Nothing; Used x -> Just x) params
             , dDefinition = description
             }
       modify $ Map.insert name doc
@@ -148,7 +164,7 @@ documentedDefinition Field{} = error "Field cannot be documented as a definition
 documentedDefinition End = error "End cannot be documented as a definition"
 documentedDefinition Iso{} = error "Iso cannot be documented as a definition"
 
-documentedType :: MonadState (Map Text Documented) m => Desc ctx params a -> m DocumentedType
+documentedType :: MonadState (Map Text Documented) m => Desc params a -> m DocumentedType
 documentedType desc@Field{} = DocumentedStruct <$> documentedStructType desc
 documentedType desc@End = DocumentedStruct <$> documentedStructType desc
 documentedType (Iso (_to, _from) rest) = documentedType rest
@@ -156,7 +172,7 @@ documentedType desc@Define{} = documentedDefinition desc
 documentedType desc@Opaque{} = documentedDefinition desc
 
 documentedStructType ::
-  MonadState (Map Text Documented) m => Desc ctx params a -> m [(Text, DocumentedType)]
+  MonadState (Map Text Documented) m => Desc params a -> m [(Text, DocumentedType)]
 documentedStructType (Field name value rest) = (:) . (,) name <$> documentedType value <*> documentedStructType rest
 documentedStructType End = pure []
 documentedStructType Iso{} = error "Iso cannot be documented as a struct type"
@@ -166,65 +182,63 @@ documentedStructType Opaque{} = error "Opaque cannot be documented as a struct t
 {-
 type Word64 is "An 8 byte natural number (big endian)"
 -}
-word64 :: Desc '[] '[] Word64
+word64 :: Desc '[] Word64
 word64 =
   Opaque
     { name = fromString "Word64"
-    , context = HNil
     , params = HNil
     , description = fromString "An 8 byte natural number (big endian)"
-    , get = \HNil HNil -> Binary.get @Word64
-    , put = \HNil HNil -> Binary.put @Word64
+    , get = \HNil -> Binary.get @Word64
+    , put = \HNil -> Binary.put @Word64
     }
 
 type List = []
 
-vector :: Desc '[a] '[Word64] (List a)
+vector :: Desc '[A Word64, CodecOf a] (List a)
 vector =
   Opaque
     { name = fromString "Vector"
-    , context = HCons (Const $ fromString "a") HNil
-    , params = HCons (Const $ fromString "len") HNil
+    , params = HCons (fromString "len") (HCons (fromString "a") HNil)
     , description = fromString "`len` consecutive `a`s"
-    , get = \(HCons get_a HNil) (HCons (Identity len) HNil) -> do
+    , get = \(HCons (DA len) (HCons (DCodecOf get_a) HNil)) -> do
         replicateM (fromIntegral len) get_a
-    , put = \(HCons (Op put_a) HNil) (HCons (Identity _len) HNil) xs -> do
+    , put = \(HCons (EA _len) (HCons (ECodecOf put_a) HNil)) xs -> do
         traverse_ put_a xs
     }
 
-extend :: Desc ctx a b -> Desc (x ': ctx) a b
+extend :: Desc params a -> Desc (x ': params) a
 extend End = End
 extend Define{..} =
   Define
-    { context = HCons (Const $ fromString "<unnamed>") context
+    { params = HCons Unused params
     , body = extend body
     , ..
     }
 extend Opaque{..} =
   Opaque
-    { context = HCons (Const $ fromString "<unnamed>") context
+    { params = HCons Unused params
     , get = \(HCons _ ctx) -> get ctx
     , put = \(HCons _ ctx) -> put ctx
     , ..
     }
 extend (Field fieldName fieldDesc rest) =
-  Field fieldName (extend fieldDesc) (extend rest)
+  Field fieldName (extend fieldDesc) (_ rest)
 extend (Iso (from, to) rest) =
   Iso (from, to) (extend rest)
 
-iso :: (a -> b, b -> a) -> Desc ctx params a -> Desc ctx params b
+iso :: (a -> b, b -> a) -> Desc params a -> Desc params b
 iso = Iso
 
 field ::
   -- | Field name
   Text ->
   -- | Field description
-  Desc ctx params a ->
-  Desc ctx (a ': params) b ->
-  Desc ctx params (a, b)
+  Desc params a ->
+  Desc (An a ': params) b ->
+  Desc params (a, b)
 field = Field
 
-end :: Desc ctx a ()
+end :: Desc params ()
 end = End
 
 lengthWord64 :: [a] -> Word64
@@ -236,18 +250,17 @@ type List a = {
   items : Vector len a
 }
 -}
-list :: Desc '[a] '[] (List a)
+list :: Desc '[CodecOf a] (List a)
 list =
   Define
     { name = fromString "List"
     , description = fromString ""
-    , context = HCons (Const $ fromString "a") HNil
-    , params = HNil
+    , params = HCons (fromString "a") HNil
     , body =
         iso (to, from) $
-          field (fromString "len") (extend word64) $
+          field (fromString "len") (_ word64) $
             field (fromString "items") vector $
-              extend end
+              _ end
     }
   where
     to (_len, (items, ())) = items
@@ -257,12 +270,11 @@ list =
 # The `List` is sorted in ascending order.
 type Set a = List a
 -}
-set :: Ord a => Desc '[a] '[] (Set a)
+set :: Ord a => Desc '[CodecOf a] (Set a)
 set =
   Define
     { name = fromString "Set"
     , description = fromString "The `List` is sorted in ascending order."
-    , context = HCons (Const $ fromString "a") HNil
-    , params = HNil
+    , params = HCons (fromString "a") HNil
     , body = iso (Set.fromAscList, Set.toAscList) list
     }
