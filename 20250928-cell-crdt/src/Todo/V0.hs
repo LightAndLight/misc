@@ -1,285 +1,256 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 
 module Todo.V0 where
 
-import Control.Monad (replicateM)
-import Control.Monad.State (MonadState, gets, modify)
+import Control.Monad.State.Class (MonadState, gets, modify)
 import qualified Data.Binary as Binary
 import Data.Foldable (traverse_)
+import Data.Functor.Const (Const (..), getConst)
 import Data.Kind (Type)
+import Data.List (intercalate)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.String (IsString, fromString)
+import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
+import GHC.Stack (HasCallStack)
 
 data HList (f :: a -> Type) :: [a] -> Type where
   HNil :: HList f '[]
   HCons :: f x -> HList f xs -> HList f (x ': xs)
 
-type family Append (xs :: [k]) (ys :: [k]) :: [k] where
-  Append '[] ys = ys
-  Append (x ': xs) ys = x ': Append xs ys
-
-happend :: HList f xs -> HList f ys -> HList f (xs `Append` ys)
-happend HNil ys = ys
-happend (HCons x xs) ys = HCons x (happend xs ys)
-
-data Ty = CodecOf Type | A Type | Arr Ty Ty
-
-infixr 5 `Arr`
+data Ty = Codec Type | A Type | Arr Ty Ty
 
 type An = A
 
-data TyDecoder :: Ty -> Type where
-  DCodecOf :: Binary.Get a -> TyDecoder (CodecOf a)
-  DA :: a -> TyDecoder (A a)
+infixr 5 `Arr`
 
-data TyEncoder :: Ty -> Type where
-  ECodecOf :: (a -> Binary.Put) -> TyEncoder (CodecOf a)
-  EA :: a -> TyEncoder (A a)
+data Index :: [Ty] -> Ty -> Type where
+  Z :: Index (a ': xs) a
+  S :: Index xs b -> Index (a ': xs) b
 
-data Param (a :: Ty)
-  = Unused
-  | Used !Text
+index :: HList f xs -> Index xs a -> f a
+index (HCons x _) Z = x
+index (HCons _ xs) (S ix) = index xs ix
+index HNil _ = undefined
 
-instance IsString (Param a) where
-  fromString = Used . fromString
+type family BGet (a :: Ty) :: Type where
+  BGet (Arr a b) = BGet a -> BGet b
+  BGet (Codec a) = Binary.Get a
+  BGet (An a) = a
 
-data Params (args :: [Ty]) (ret :: Type) :: Ty -> Type where
-  PNil :: Params '[] ret (CodecOf ret)
-  PCons :: !Text -> Params xs ret a -> Params (x ': xs) ret (x `Arr` a)
+newtype A_BGet a = A_BGet {fromA_BGet :: BGet a}
 
-data Desc (ctx :: [Ty]) (a :: Ty) where
-  Define ::
+type family BPut (a :: Ty) :: Type where
+  BPut (Arr a b) = BPut a -> BPut b
+  BPut (Codec a) = a -> Binary.Put
+  BPut (An a) = a
+
+newtype A_BPut a = A_BPut {fromA_BPut :: BPut a}
+
+data B (ctx :: [Ty]) :: Ty -> Type where
+  Named ::
     -- | Name
     !Text ->
     -- | Description
     !Text ->
-    !(Params params a ty) ->
-    !(Desc (params `Append` ctx) ty) ->
-    {-
-    { name :: !Text
-    , description :: !Text
-    , params :: !(HList Param params)
-    , body :: !(Desc ctx a)
-    } ->
-    -}
-    Desc ctx ty
-  Opaque ::
-    -- | Name
-    !Text ->
+    B ctx a ->
+    B ctx a
+  Prim ::
     -- | Description
     !Text ->
-    !(Params params a ty) ->
-    !(HList TyDecoder (params `Append` ctx) -> Binary.Get a) ->
-    !(HList TyEncoder (params `Append` ctx) -> a -> Binary.Put) ->
-    {-
-    { name :: !Text
-    , description :: !Text
-    -- , params :: !(HList Param params)
-    , get :: !(HList TyDecoder ctx -> Binary.Get a)
-    , put :: !(HList TyEncoder ctx -> a -> Binary.Put)
-    } ->
-    -}
-    Desc ctx ty
+    (HList A_BGet ctx -> Binary.Get a) ->
+    (HList A_BPut ctx -> a -> Binary.Put) ->
+    B ctx (Codec a)
+  Var :: Index ctx a -> B ctx a
+  Abs :: !Text -> B (a ': ctx) b -> B ctx (a `Arr` b)
+  App :: B ctx (a `Arr` b) -> B ctx a -> B ctx b
   Field ::
-    Text ->
-    Desc ctx (CodecOf a) ->
-    Desc (An a ': ctx) (CodecOf b) ->
-    Desc ctx (CodecOf (a, b))
-  End :: Desc ctx (CodecOf ())
-  Iso :: (a -> b, b -> a) -> Desc ctx (CodecOf a) -> Desc ctx (CodecOf b)
-  Embed :: Desc '[] a -> Desc ctx a
+    -- | Field name
+    !Text ->
+    B ctx (Codec a) ->
+    B (An a ': ctx) (Codec b) ->
+    B ctx (Codec (a, b))
+  Unit :: B ctx (Codec ())
+  Iso :: (a -> b) -> (b -> a) -> B ctx (Codec a) -> B ctx (Codec b)
 
-descGet :: Desc params (CodecOf a) -> HList TyDecoder params -> Binary.Get a
-descGet (Define _name _desc _params body) params = descGet body params
-descGet (Opaque _name _desc PNil get _put) decoders = get decoders
-descGet (Field _name value rest) params = do
-  a <- descGet value params
-  b <- descGet rest (HCons (DA a) params)
+(.@) :: B ctx (a `Arr` b) -> B ctx a -> B ctx b
+(.@) = App
+
+infixl 1 .@
+
+bget :: B ctx a -> HList A_BGet ctx -> BGet a
+bget (Var ix) ctx = fromA_BGet $ index ctx ix
+bget (Named _name _desc body) ctx = bget body ctx
+bget (Prim _desc get _put) ctx = get ctx
+bget (Abs _name body) ctx = \d -> bget body (A_BGet d `HCons` ctx)
+bget (App f x) ctx =
+  bget f ctx (bget x ctx)
+bget (Field _name value rest) ctx = do
+  a <- bget value ctx
+  b <- bget rest (A_BGet a `HCons` ctx)
   pure (a, b)
-descGet End _params = Binary.get @()
-descGet (Iso (to, _from) rest) params = to <$> descGet rest params
-descGet (Embed rest) _params = descGet rest HNil
+bget Unit _ctx = Binary.get
+bget (Iso to _from rest) ctx = to <$> bget rest ctx
 
-descPut :: Desc params (CodecOf a) -> HList TyEncoder params -> a -> Binary.Put
-descPut (Define _name _desc _params body) params a = descPut body params a
-descPut (Opaque _name _desc PNil _get put) encoders a = put encoders a
-descPut (Field _name value rest) params (a, b) = do
-  descPut value params a
-  descPut rest (HCons (EA a) params) b
-descPut End _params () = Binary.put @() ()
-descPut (Iso (_to, from) rest) params a = descPut rest params (from a)
-descPut (Embed rest) _params a = descPut rest HNil a
-
-asList :: (forall x. f x -> Maybe a) -> HList f xs -> [a]
-asList _ HNil = []
-asList f (HCons x rest) = maybe id (:) (f x) $ asList f rest
-
-data Documented
-  = DocumentedDefine
-      { dDescription :: !(Maybe Text)
-      , dName :: !Text
-      , dParams :: ![Text]
-      , dBody :: DocumentedType
-      }
-  | DocumentedOpaque
-      { dName :: !Text
-      , dParams :: ![Text]
-      , dDefinition :: !Text
-      }
-  deriving (Show)
-
-data DocumentedType
-  = DocumentedName !Text
-  | DocumentedStruct ![(Text, DocumentedType)]
-  deriving (Show)
-
-documentedDefinition :: MonadState (Map Text Documented) m => Desc params a -> m DocumentedType
-documentedDefinition (Embed rest) = documentedDefinition rest
-documentedDefinition (Define name description _params body) = do
-  body' <- documentedType body
-  mDesc <- gets $ Map.lookup name
-  case mDesc of
-    Just{} -> pure ()
-    Nothing -> do
-      let
-        !doc =
-          DocumentedDefine
-            { dDescription = if Text.null description then Nothing else Just description
-            , dName = name
-            , dParams = asList (\case Unused -> Nothing; Used x -> Just x) _
-            , dBody = body'
-            }
-      modify $ Map.insert name doc
-  pure $ DocumentedName name
-documentedDefinition (Opaque name description _params _get _put) = do
-  mDesc <- gets $ Map.lookup name
-  case mDesc of
-    Just{} -> pure ()
-    Nothing -> do
-      let
-        doc =
-          DocumentedOpaque
-            { dName = name
-            , dParams = asList (\case Unused -> Nothing; Used x -> Just x) _
-            , dDefinition = description
-            }
-      modify $ Map.insert name doc
-  pure $ DocumentedName name
-documentedDefinition Field{} = error "Field cannot be documented as a definition"
-documentedDefinition End = error "End cannot be documented as a definition"
-documentedDefinition Iso{} = error "Iso cannot be documented as a definition"
-
-documentedType :: MonadState (Map Text Documented) m => Desc params a -> m DocumentedType
-documentedType (Embed rest) = documentedType rest
-documentedType desc@Field{} = DocumentedStruct <$> documentedStructType desc
-documentedType desc@End = DocumentedStruct <$> documentedStructType desc
-documentedType (Iso (_to, _from) rest) = documentedType rest
-documentedType desc@Define{} = documentedDefinition desc
-documentedType desc@Opaque{} = documentedDefinition desc
-
-documentedStructType ::
-  MonadState (Map Text Documented) m => Desc params a -> m [(Text, DocumentedType)]
-documentedStructType (Embed rest) = documentedStructType rest
-documentedStructType (Field name value rest) = (:) . (,) name <$> documentedType value <*> documentedStructType rest
-documentedStructType End = pure []
-documentedStructType Iso{} = error "Iso cannot be documented as a struct type"
-documentedStructType Define{} = error "Define cannot be documented as a struct type"
-documentedStructType Opaque{} = error "Opaque cannot be documented as a struct type"
-
-{-
-type Word64 is "An 8 byte natural number (big endian)"
--}
-word64 :: Desc ctx (CodecOf Word64)
-word64 =
-  Opaque
-    (fromString "Word64")
-    (fromString "An 8 byte natural number (big endian)")
-    PNil
-    (\_ -> Binary.get @Word64)
-    (\_ -> Binary.put @Word64)
+bput :: B ctx a -> HList A_BPut ctx -> BPut a
+bput (Var ix) ctx = fromA_BPut $ index ctx ix
+bput (Named _name _desc body) ctx = bput body ctx
+bput (Prim _ _get put) ctx = put ctx
+bput (Abs _name body) ctx = \d -> bput body (A_BPut d `HCons` ctx)
+bput (App f x) ctx =
+  bput f ctx (bput x ctx)
+bput (Field _name value rest) ctx = \(a, b) -> do
+  bput value ctx a
+  bput rest (A_BPut a `HCons` ctx) b
+bput Unit _ctx = Binary.put
+bput (Iso _to from rest) ctx = bput rest ctx . from
 
 type List = []
 
-vector :: Desc ctx (A Word64 `Arr` CodecOf a `Arr` CodecOf (List a))
-vector =
-  Opaque
-    (fromString "Vector")
-    (fromString "`len` consecutive `a`s")
-    (PCons (fromString "len") (PCons (fromString "a") PNil))
-    ( \(HCons (DA len) (HCons (DCodecOf get_a) _ctx)) -> do
-        replicateM (fromIntegral len) get_a
-    )
-    ( \(HCons (EA _len) (HCons (ECodecOf put_a) _ctx)) xs -> do
-        traverse_ put_a xs
-    )
+word64 :: B ctx (Codec Word64)
+word64 =
+  Named (fromString "Word64") (fromString "") $
+    Prim (fromString "an 8 byte natural number (big endian)") get put
+  where
+    get :: HList A_BGet ctx -> Binary.Get Word64
+    get _ctx = Binary.get
 
-embed :: Desc '[] a -> Desc params a
-embed = Embed
-
-iso :: (a -> b, b -> a) -> Desc params (CodecOf a) -> Desc params (CodecOf b)
-iso = Iso
-
-field ::
-  -- | Field name
-  Text ->
-  -- | Field description
-  Desc ctx (CodecOf a) ->
-  Desc (An a ': ctx) (CodecOf b) ->
-  Desc ctx (CodecOf (a, b))
-field = Field
-
-end :: Desc params (CodecOf ())
-end = End
+    put :: HList A_BPut ctx -> Word64 -> Binary.Put
+    put _ctx = Binary.put
 
 lengthWord64 :: [a] -> Word64
 lengthWord64 = foldr (\_x -> (+) 1) 0
 
-{-
-type List a = {
-  len : Word64,
-  items : Vector len a
-}
--}
-list :: Desc ctx (CodecOf a `Arr` CodecOf (List a))
-list =
-  Define
-    (fromString "List")
-    (fromString "")
-    (PCons (fromString "a") PNil)
-    ( iso (to, from) $
-        field (fromString "len") word64 $
-          field (fromString "items") (vector .@ var z .@ var (s z)) $
-            end
-    )
-  where
-    to (_len, (items, ())) = items
-    from items = (lengthWord64 items, (items, ()))
+replicateMWord64 :: Applicative m => Word64 -> m a -> m [a]
+replicateMWord64 0 _ = pure []
+replicateMWord64 n ma = (:) <$> ma <*> replicateMWord64 (n - 1) ma
 
-{-
-# The `List` is sorted in ascending order.
-type Set a = List a
--}
-set :: Ord a => Desc ctx (CodecOf a `Arr` CodecOf (Set a))
+vector :: B ctx (A Word64 `Arr` Codec a `Arr` Codec (List a))
+vector =
+  Named (fromString "Vector") (fromString "") $
+    Abs (fromString "len") $
+      Abs (fromString "a") $
+        Prim (fromString "`len` consecutive `a`s") get put
+  where
+    get :: HList A_BGet (Codec a : A Word64 : ctx) -> Binary.Get (List a)
+    get (HCons (A_BGet get_a) (HCons (A_BGet len) _ctx)) = replicateMWord64 len get_a
+
+    put :: HList A_BPut (Codec a : A Word64 : ctx) -> List a -> Binary.Put
+    put (HCons (A_BPut put_a) (HCons _len _ctx)) = traverse_ put_a
+
+list :: B ctx (Codec a `Arr` Codec (List a))
+list =
+  Named (fromString "List") (fromString "") $
+    Abs (fromString "a") $
+      Iso (\(_len, (xs, ())) -> xs) (\xs -> (lengthWord64 xs, (xs, ()))) $
+        Field (fromString "len") word64 $
+          Field (fromString "items") (vector .@ Var Z .@ Var (S Z)) $
+            Unit
+
+set :: Ord a => B ctx (Codec a `Arr` Codec (Set a))
 set =
-  Define
-    (fromString "Set")
-    (fromString "The `List` is sorted in ascending order.")
-    (PCons (fromString "a") PNil)
-    (iso (Set.fromAscList, Set.toAscList) list)
+  Named (fromString "Set") (fromString "The `List` is sorted in ascending order.") $
+    Abs (fromString "a") $
+      Iso Set.fromAscList Set.toAscList (list .@ Var Z)
+
+data Documented
+  = Documented
+  { dDescription :: !(Maybe Text)
+  , dName :: !Text
+  , dParams :: ![Text]
+  , dBody :: DocumentedBody
+  }
+  deriving (Show)
+
+data DocumentedBody
+  = DocumentedPrim Text
+  | DocumentedType DocumentedType
+  deriving (Show)
+
+renderDocumented :: Documented -> String
+renderDocumented (Documented mDesc name params body) =
+  maybe "" (("# " ++) . Text.unpack) mDesc
+    ++ "type "
+    ++ Text.unpack name
+    ++ (if null params then "" else foldMap ((" " ++) . Text.unpack) params)
+    ++ renderDocumentedBody body
+
+renderDocumentedBody :: DocumentedBody -> String
+renderDocumentedBody (DocumentedPrim desc) = " is \"" ++ Text.unpack desc ++ "\""
+renderDocumentedBody (DocumentedType ty) = " = " ++ renderDocumentedType ty
+
+renderDocumentedType :: DocumentedType -> String
+renderDocumentedType (DocumentedName n) = Text.unpack n
+renderDocumentedType (DocumentedApp f x) = renderDocumentedType f ++ " " ++ renderDocumentedType x
+renderDocumentedType (DocumentedStruct fields) =
+  "{ "
+    ++ intercalate ", " (fmap (\(name, ty) -> Text.unpack name ++ " : " ++ renderDocumentedType ty) fields)
+    ++ " }"
+
+data DocumentedType
+  = DocumentedName !Text
+  | DocumentedStruct ![(Text, DocumentedType)]
+  | DocumentedApp DocumentedType DocumentedType
+  deriving (Show)
+
+documented ::
+  MonadState (Map Text Documented) m => B ctx a -> HList (Const Text) ctx -> m DocumentedType
+documented (Named name desc body) ctx = do
+  mDef <- gets $ Map.lookup name
+  case mDef of
+    Just{} -> pure ()
+    Nothing -> do
+      (params, body') <- documentedBody body ctx
+      let doc = Documented (if Text.null desc then Nothing else Just desc) name params body'
+      modify $ Map.insert name doc
+  pure $ DocumentedName name
+documented _ _ctx = error "expected Named"
+
+documentedBody ::
+  MonadState (Map Text Documented) m =>
+  B ctx a ->
+  HList (Const Text) ctx ->
+  m ([Text], DocumentedBody)
+documentedBody (Abs name body) ctx = do
+  (params, body') <- documentedBody body (HCons (Const name) ctx)
+  pure (name : params, body')
+documentedBody (Prim desc _get _put) _ctx = pure ([], DocumentedPrim desc)
+documentedBody b ctx = (,) [] . DocumentedType <$> documentedType b ctx
+
+documentedType ::
+  HasCallStack =>
+  MonadState (Map Text Documented) m =>
+  B ctx a ->
+  HList (Const Text) ctx ->
+  m DocumentedType
+documentedType b@Named{} ctx = documented b ctx
+documentedType (Var ix) ctx = pure $ DocumentedName (getConst $ index ctx ix)
+documentedType (App f x) ctx = DocumentedApp <$> documentedType f ctx <*> documentedType x ctx
+documentedType b@Field{} ctx = DocumentedStruct <$> documentedStruct b ctx
+documentedType (Iso _to _from rest) ctx = documentedType rest ctx
+documentedType Unit _ctx = error "got Unit"
+documentedType Prim{} _ctx = error "got Prim"
+documentedType Abs{} _ctx = error "got Abs"
+
+documentedStruct ::
+  MonadState (Map Text Documented) m =>
+  B ctx a ->
+  HList (Const Text) ctx ->
+  m [(Text, DocumentedType)]
+documentedStruct (Field name value rest) ctx = do
+  a <- documentedType value ctx
+  fields <- documentedStruct rest (HCons (Const name) ctx)
+  pure $ (name, a) : fields
+documentedStruct Unit _ctx = pure []
+documentedStruct _ _ctx = error "Not Field or Unit"
