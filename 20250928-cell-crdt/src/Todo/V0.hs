@@ -2,6 +2,7 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -10,11 +11,13 @@
 module Todo.V0 where
 
 import Control.Monad.State.Class (MonadState, gets, modify)
+import Data.Binary (Binary)
 import qualified Data.Binary as Binary
+import Data.Bitraversable (bitraverse)
 import Data.Foldable (traverse_)
 import Data.Functor.Const (Const (..), getConst)
 import Data.Kind (Type)
-import Data.List (intercalate)
+import Data.List (find, intercalate)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -58,6 +61,12 @@ type family BPut (a :: Ty) :: Type where
 
 newtype A_BPut a = A_BPut {fromA_BPut :: BPut a}
 
+class (Eq a, Binary a) => IsLit (a :: Type) where
+  renderLit :: a -> Text
+
+instance IsLit Word64 where
+  renderLit = Text.pack . show
+
 data B (ctx :: [Ty]) :: Ty -> Type where
   Named ::
     -- | Name
@@ -82,7 +91,8 @@ data B (ctx :: [Ty]) :: Ty -> Type where
     B (An a ': ctx) (Codec b) ->
     B ctx (Codec (a, b))
   Unit :: B ctx (Codec ())
-  Iso :: (a -> b) -> (b -> a) -> B ctx (Codec a) -> B ctx (Codec b)
+  Cast :: (a -> b) -> (b -> Maybe a) -> B ctx (Codec a) -> B ctx (Codec b)
+  Choice :: IsLit a => B ctx (An a) -> [(a, B ctx (Codec b))] -> B ctx (Codec b)
 
 (.@) :: B ctx (a `Arr` b) -> B ctx a -> B ctx b
 (.@) = App
@@ -101,7 +111,18 @@ bget (Field _name value rest) ctx = do
   b <- bget rest (A_BGet a `HCons` ctx)
   pure (a, b)
 bget Unit _ctx = Binary.get
-bget (Iso to _from rest) ctx = to <$> bget rest ctx
+bget (Cast to _from rest) ctx = to <$> bget rest ctx
+bget (Choice x ys) ctx = do
+  let a = bget x ctx
+  case find (\(a', _) -> a == a') ys of
+    Nothing ->
+      error $
+        "expected one of: "
+          ++ intercalate ", " (fmap (Text.unpack . renderLit . fst) ys)
+          ++ " (got "
+          ++ Text.unpack (renderLit a)
+          ++ ")"
+    Just (_a, rest) -> bget rest ctx
 
 bput :: B ctx a -> HList A_BPut ctx -> BPut a
 bput (Var ix) ctx = fromA_BPut $ index ctx ix
@@ -114,20 +135,29 @@ bput (Field _name value rest) ctx = \(a, b) -> do
   bput value ctx a
   bput rest (A_BPut a `HCons` ctx) b
 bput Unit _ctx = Binary.put
-bput (Iso _to from rest) ctx = bput rest ctx . from
+bput (Cast _to from rest) ctx =
+  \a ->
+    case from a of
+      Nothing -> error "conversion failed"
+      Just b -> bput rest ctx b
+bput (Choice x ys) ctx =
+  let a = bput x ctx
+  in case find (\(a', _) -> a == a') ys of
+      Nothing ->
+        error $
+          "expected one of: "
+            ++ intercalate ", " (fmap (Text.unpack . renderLit . fst) ys)
+            ++ " (got "
+            ++ Text.unpack (renderLit a)
+            ++ ")"
+      Just (_a, rest) -> bput rest ctx
 
 type List = []
 
 word64 :: B ctx (Codec Word64)
 word64 =
   Named (fromString "Word64") (fromString "") $
-    Prim (fromString "an 8 byte natural number (big endian)") get put
-  where
-    get :: HList A_BGet ctx -> Binary.Get Word64
-    get _ctx = Binary.get
-
-    put :: HList A_BPut ctx -> Word64 -> Binary.Put
-    put _ctx = Binary.put
+    Prim (fromString "an 8 byte natural number (big endian)") (const Binary.get) (const Binary.put)
 
 lengthWord64 :: [a] -> Word64
 lengthWord64 = foldr (\_x -> (+) 1) 0
@@ -153,7 +183,7 @@ list :: B ctx (Codec a `Arr` Codec (List a))
 list =
   Named (fromString "List") (fromString "") $
     Abs (fromString "a") $
-      Iso (\(_len, (xs, ())) -> xs) (\xs -> (lengthWord64 xs, (xs, ()))) $
+      Cast (\(_len, (xs, ())) -> xs) (\xs -> Just (lengthWord64 xs, (xs, ()))) $
         Field (fromString "len") word64 $
           Field (fromString "items") (vector .@ Var Z .@ Var (S Z)) $
             Unit
@@ -162,7 +192,26 @@ set :: Ord a => B ctx (Codec a `Arr` Codec (Set a))
 set =
   Named (fromString "Set") (fromString "The `List` is sorted in ascending order.") $
     Abs (fromString "a") $
-      Iso Set.fromAscList Set.toAscList (list .@ Var Z)
+      Cast Set.fromAscList (Just . Set.toAscList) (list .@ Var Z)
+
+either :: B ctx (Codec a `Arr` Codec b `Arr` Codec (Either a b))
+either =
+  Named (fromString "Either") (fromString "")
+    $ Abs (fromString "a")
+    $ Abs (fromString "b")
+    $ Cast
+      (\(_tag, (rest, ())) -> rest)
+      (\x -> case x of Left{} -> Just (0, (x, ())); Right{} -> Just (1, (x, ())))
+    $ Field (fromString "tag") word64
+    $ Field
+      (fromString "value")
+      ( Choice
+          (Var Z)
+          [ (0, Cast Left (\case Left a -> Just a; Right{} -> Nothing) $ Var (S (S Z)))
+          , (1, Cast Right (\case Left{} -> Nothing; Right b -> Just b) $ Var (S Z))
+          ]
+      )
+    $ Unit
 
 data Documented
   = Documented
@@ -180,7 +229,7 @@ data DocumentedBody
 
 renderDocumented :: Documented -> String
 renderDocumented (Documented mDesc name params body) =
-  maybe "" (("# " ++) . Text.unpack) mDesc
+  maybe "" ((++ "\n") . ("# " ++) . Text.unpack) mDesc
     ++ "type "
     ++ Text.unpack name
     ++ (if null params then "" else foldMap ((" " ++) . Text.unpack) params)
@@ -197,11 +246,25 @@ renderDocumentedType (DocumentedStruct fields) =
   "{ "
     ++ intercalate ", " (fmap (\(name, ty) -> Text.unpack name ++ " : " ++ renderDocumentedType ty) fields)
     ++ " }"
+renderDocumentedType (DocumentedChoice x ys) =
+  "match "
+    ++ renderDocumentedType x
+    ++ " { "
+    ++ intercalate ", " (fmap (\(l, y) -> renderDocumentedLit l ++ " -> " ++ renderDocumentedType y) ys)
+    ++ " }"
+
+renderDocumentedLit :: DocumentedLit -> String
+renderDocumentedLit (DocumentedLit l) = Text.unpack l
 
 data DocumentedType
   = DocumentedName !Text
   | DocumentedStruct ![(Text, DocumentedType)]
   | DocumentedApp DocumentedType DocumentedType
+  | DocumentedChoice DocumentedType [(DocumentedLit, DocumentedType)]
+  deriving (Show)
+
+data DocumentedLit
+  = DocumentedLit !Text
   deriving (Show)
 
 documented ::
@@ -238,10 +301,17 @@ documentedType b@Named{} ctx = documented b ctx
 documentedType (Var ix) ctx = pure $ DocumentedName (getConst $ index ctx ix)
 documentedType (App f x) ctx = DocumentedApp <$> documentedType f ctx <*> documentedType x ctx
 documentedType b@Field{} ctx = DocumentedStruct <$> documentedStruct b ctx
-documentedType (Iso _to _from rest) ctx = documentedType rest ctx
+documentedType (Choice x ys) ctx =
+  DocumentedChoice
+    <$> documentedType x ctx
+    <*> traverse (bitraverse documentedLit (\y -> documentedType y ctx)) ys
+documentedType (Cast _to _from rest) ctx = documentedType rest ctx
 documentedType Unit _ctx = error "got Unit"
 documentedType Prim{} _ctx = error "got Prim"
 documentedType Abs{} _ctx = error "got Abs"
+
+documentedLit :: (IsLit a, Applicative m) => a -> m DocumentedLit
+documentedLit a = pure . DocumentedLit $ renderLit a
 
 documentedStruct ::
   MonadState (Map Text Documented) m =>
