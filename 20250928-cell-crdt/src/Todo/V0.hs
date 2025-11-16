@@ -67,22 +67,32 @@ class (Eq a, Binary a) => IsLit (a :: Type) where
 instance IsLit Word64 where
   renderLit = Text.pack . show
 
-data B (ctx :: [Ty]) :: Ty -> Type where
-  Named ::
+type family Append (xs :: [a]) (ys :: [a]) :: [a] where
+  Append '[] ys = ys
+  Append (x ': xs) ys = x ': Append xs ys
+
+data Def :: Ty -> Type where
+  Def ::
     -- | Name
     !Text ->
     -- | Description
     !Text ->
-    B ctx a ->
-    B ctx a
+    (forall ctx. Body ctx a) ->
+    Def a
+
+data Body (ctx :: [Ty]) :: Ty -> Type where
   Prim ::
     -- | Description
     !Text ->
     (HList A_BGet ctx -> Binary.Get a) ->
     (HList A_BPut ctx -> a -> Binary.Put) ->
-    B ctx (Codec a)
+    Body ctx (Codec a)
+  Body :: B ctx a -> Body ctx a
+  Param :: !Text -> Body (a ': ctx) b -> Body ctx (a `Arr` b)
+
+data B (ctx :: [Ty]) :: Ty -> Type where
   Var :: Index ctx a -> B ctx a
-  Abs :: !Text -> B (a ': ctx) b -> B ctx (a `Arr` b)
+  Ref :: Def a -> B ctx a
   App :: B ctx (a `Arr` b) -> B ctx a -> B ctx b
   Field ::
     -- | Field name
@@ -99,11 +109,14 @@ data B (ctx :: [Ty]) :: Ty -> Type where
 
 infixl 1 .@
 
+bgetBody :: Body ctx a -> HList A_BGet ctx -> BGet a
+bgetBody (Body a) ctx = bget a ctx
+bgetBody (Param _name rest) ctx = \a -> bgetBody rest (A_BGet a `HCons` ctx)
+bgetBody (Prim _desc get _put) ctx = get ctx
+
 bget :: B ctx a -> HList A_BGet ctx -> BGet a
 bget (Var ix) ctx = fromA_BGet $ index ctx ix
-bget (Named _name _desc body) ctx = bget body ctx
-bget (Prim _desc get _put) ctx = get ctx
-bget (Abs _name body) ctx = \d -> bget body (A_BGet d `HCons` ctx)
+bget (Ref (Def _name _desc body)) ctx = bgetBody body ctx
 bget (App f x) ctx =
   bget f ctx (bget x ctx)
 bget (Field _name value rest) ctx = do
@@ -124,11 +137,14 @@ bget (Choice x ys) ctx = do
           ++ ")"
     Just (_a, rest) -> bget rest ctx
 
+bputBody :: Body ctx a -> HList A_BPut ctx -> BPut a
+bputBody (Body a) ctx = bput a ctx
+bputBody (Param _name rest) ctx = \a -> bputBody rest (A_BPut a `HCons` ctx)
+bputBody (Prim _ _get put) ctx = put ctx
+
 bput :: B ctx a -> HList A_BPut ctx -> BPut a
 bput (Var ix) ctx = fromA_BPut $ index ctx ix
-bput (Named _name _desc body) ctx = bput body ctx
-bput (Prim _ _get put) ctx = put ctx
-bput (Abs _name body) ctx = \d -> bput body (A_BPut d `HCons` ctx)
+bput (Ref (Def _name _desc body)) ctx = bputBody body ctx
 bput (App f x) ctx =
   bput f ctx (bput x ctx)
 bput (Field _name value rest) ctx = \(a, b) -> do
@@ -154,9 +170,9 @@ bput (Choice x ys) ctx =
 
 type List = []
 
-word64 :: B ctx (Codec Word64)
+word64 :: Def (Codec Word64)
 word64 =
-  Named (fromString "Word64") (fromString "") $
+  Def (fromString "Word64") (fromString "") $
     Prim (fromString "an 8 byte natural number (big endian)") (const Binary.get) (const Binary.put)
 
 lengthWord64 :: [a] -> Word64
@@ -166,11 +182,11 @@ replicateMWord64 :: Applicative m => Word64 -> m a -> m [a]
 replicateMWord64 0 _ = pure []
 replicateMWord64 n ma = (:) <$> ma <*> replicateMWord64 (n - 1) ma
 
-vector :: B ctx (A Word64 `Arr` Codec a `Arr` Codec (List a))
+vector :: Def (A Word64 `Arr` Codec a `Arr` Codec (List a))
 vector =
-  Named (fromString "Vector") (fromString "") $
-    Abs (fromString "len") $
-      Abs (fromString "a") $
+  Def (fromString "Vector") (fromString "") $
+    Param (fromString "len") $
+      Param (fromString "a") $
         Prim (fromString "`len` consecutive `a`s") get put
   where
     get :: HList A_BGet (Codec a : A Word64 : ctx) -> Binary.Get (List a)
@@ -179,30 +195,33 @@ vector =
     put :: HList A_BPut (Codec a : A Word64 : ctx) -> List a -> Binary.Put
     put (HCons (A_BPut put_a) (HCons _len _ctx)) = traverse_ put_a
 
-list :: B ctx (Codec a `Arr` Codec (List a))
+list :: Def (Codec a `Arr` Codec (List a))
 list =
-  Named (fromString "List") (fromString "") $
-    Abs (fromString "a") $
-      Cast (\(_len, (xs, ())) -> xs) (\xs -> Just (lengthWord64 xs, (xs, ()))) $
-        Field (fromString "len") word64 $
-          Field (fromString "items") (vector .@ Var Z .@ Var (S Z)) $
-            Unit
+  Def (fromString "List") (fromString "") $
+    Param (fromString "a") $
+      Body $
+        Cast (\(_len, (xs, ())) -> xs) (\xs -> Just (lengthWord64 xs, (xs, ()))) $
+          Field (fromString "len") (Ref word64) $
+            Field (fromString "items") (Ref vector .@ Var Z .@ Var (S Z)) $
+              Unit
 
-set :: Ord a => B ctx (Codec a `Arr` Codec (Set a))
+set :: Ord a => Def (Codec a `Arr` Codec (Set a))
 set =
-  Named (fromString "Set") (fromString "The `List` is sorted in ascending order.") $
-    Abs (fromString "a") $
-      Cast Set.fromAscList (Just . Set.toAscList) (list .@ Var Z)
+  Def (fromString "Set") (fromString "The `List` is sorted in ascending order.") $
+    Param (fromString "a") $
+      Body $
+        Cast Set.fromAscList (Just . Set.toAscList) (Ref list .@ Var Z)
 
-either :: B ctx (Codec a `Arr` Codec b `Arr` Codec (Either a b))
+either :: Def (Codec a `Arr` Codec b `Arr` Codec (Either a b))
 either =
-  Named (fromString "Either") (fromString "")
-    $ Abs (fromString "a")
-    $ Abs (fromString "b")
+  Def (fromString "Either") (fromString "")
+    $ Param (fromString "a")
+    $ Param (fromString "b")
+    $ Body
     $ Cast
       (\(_tag, (rest, ())) -> rest)
       (\x -> case x of Left{} -> Just (0, (x, ())); Right{} -> Just (1, (x, ())))
-    $ Field (fromString "tag") word64
+    $ Field (fromString "tag") (Ref word64)
     $ Field
       (fromString "value")
       ( Choice
@@ -263,33 +282,32 @@ data DocumentedType
   | DocumentedChoice DocumentedType [(DocumentedLit, DocumentedType)]
   deriving (Show)
 
-data DocumentedLit
-  = DocumentedLit !Text
+newtype DocumentedLit
+  = DocumentedLit Text
   deriving (Show)
 
-documented ::
-  MonadState (Map Text Documented) m => B ctx a -> HList (Const Text) ctx -> m DocumentedType
-documented (Named name desc body) ctx = do
+documentedDef ::
+  MonadState (Map Text Documented) m => Def a -> m DocumentedType
+documentedDef (Def name desc body) = do
   mDef <- gets $ Map.lookup name
   case mDef of
     Just{} -> pure ()
     Nothing -> do
-      (params, body') <- documentedBody body ctx
+      (params, body') <- documentedBody body HNil
       let doc = Documented (if Text.null desc then Nothing else Just desc) name params body'
       modify $ Map.insert name doc
   pure $ DocumentedName name
-documented _ _ctx = error "expected Named"
 
 documentedBody ::
   MonadState (Map Text Documented) m =>
-  B ctx a ->
+  Body ctx a ->
   HList (Const Text) ctx ->
   m ([Text], DocumentedBody)
-documentedBody (Abs name body) ctx = do
+documentedBody (Body b) ctx = (,) [] . DocumentedType <$> documentedType b ctx
+documentedBody (Param name body) ctx = do
   (params, body') <- documentedBody body (HCons (Const name) ctx)
   pure (name : params, body')
 documentedBody (Prim desc _get _put) _ctx = pure ([], DocumentedPrim desc)
-documentedBody b ctx = (,) [] . DocumentedType <$> documentedType b ctx
 
 documentedType ::
   HasCallStack =>
@@ -297,18 +315,16 @@ documentedType ::
   B ctx a ->
   HList (Const Text) ctx ->
   m DocumentedType
-documentedType b@Named{} ctx = documented b ctx
+documentedType (Ref d) _ctx = documentedDef d
 documentedType (Var ix) ctx = pure $ DocumentedName (getConst $ index ctx ix)
 documentedType (App f x) ctx = DocumentedApp <$> documentedType f ctx <*> documentedType x ctx
 documentedType b@Field{} ctx = DocumentedStruct <$> documentedStruct b ctx
 documentedType (Choice x ys) ctx =
   DocumentedChoice
     <$> documentedType x ctx
-    <*> traverse (bitraverse documentedLit (\y -> documentedType y ctx)) ys
+    <*> traverse (bitraverse documentedLit (`documentedType` ctx)) ys
 documentedType (Cast _to _from rest) ctx = documentedType rest ctx
 documentedType Unit _ctx = error "got Unit"
-documentedType Prim{} _ctx = error "got Prim"
-documentedType Abs{} _ctx = error "got Abs"
 
 documentedLit :: (IsLit a, Applicative m) => a -> m DocumentedLit
 documentedLit a = pure . DocumentedLit $ renderLit a
