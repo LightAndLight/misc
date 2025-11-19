@@ -5,15 +5,22 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 
 module BinaryCodec where
 
+import Control.Monad (unless)
 import Control.Monad.State.Class (MonadState, gets, modify)
 import Data.Binary (Binary)
 import qualified Data.Binary as Binary
+import qualified Data.Binary.Get as Binary.Get
+import qualified Data.Binary.Put as Binary.Put
 import Data.Bitraversable (bitraverse)
+import qualified Data.ByteString as ByteString
+import Data.Coerce (Coercible, coerce)
+import Data.Fixed (E3, Fixed (..), Milli, Pico)
 import Data.Foldable (traverse_)
 import Data.Functor.Const (Const (..), getConst)
 import Data.Kind (Type)
@@ -25,7 +32,10 @@ import qualified Data.Set as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Word (Word64)
+import qualified Data.Text.Encoding as Text.Encoding
+import Data.Time.Clock (UTCTime, nominalDiffTimeToSeconds, secondsToNominalDiffTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
+import Data.Word (Word16, Word64, Word8)
 import GHC.Stack (HasCallStack)
 
 data HList (f :: a -> Type) :: [a] -> Type where
@@ -93,6 +103,7 @@ data Body (ctx :: [Ty]) :: Ty -> Type where
 data B (ctx :: [Ty]) :: Ty -> Type where
   Var :: Index ctx a -> B ctx a
   Ref :: Def a -> B ctx a
+  LiteralUtf8 :: !Text -> B ctx (Codec ())
   App :: B ctx (a `Arr` b) -> B ctx a -> B ctx b
   Field ::
     -- | Field name
@@ -117,6 +128,10 @@ bgetBody (Prim _desc get _put) ctx = get ctx
 bget :: B ctx a -> HList A_BGet ctx -> BGet a
 bget (Var ix) ctx = fromA_BGet $ index ctx ix
 bget (Ref (Def _name _desc body)) ctx = bgetBody body ctx
+bget (LiteralUtf8 expected) _ctx = do
+  let expectedBytes = Text.Encoding.encodeUtf8 expected
+  actualBytes <- Binary.Get.getByteString (ByteString.length expectedBytes)
+  unless (expectedBytes == actualBytes) . fail $ "expected UTF8 string: " ++ Text.unpack expected
 bget (App f x) ctx =
   bget f ctx (bget x ctx)
 bget (Field _name value rest) ctx = do
@@ -145,6 +160,7 @@ bputBody (Prim _ _get put) ctx = put ctx
 bput :: B ctx a -> HList A_BPut ctx -> BPut a
 bput (Var ix) ctx = fromA_BPut $ index ctx ix
 bput (Ref (Def _name _desc body)) ctx = bputBody body ctx
+bput (LiteralUtf8 expected) _ctx = \() -> Binary.Put.putByteString $ Text.Encoding.encodeUtf8 expected
 bput (App f x) ctx =
   bput f ctx (bput x ctx)
 bput (Field _name value rest) ctx = \(a, b) -> do
@@ -168,12 +184,58 @@ bput (Choice x ys) ctx =
             ++ ")"
       Just (_a, rest) -> bput rest ctx
 
+iso :: (a -> b) -> (b -> a) -> B ctx (Codec a) -> B ctx (Codec b)
+iso to from = Cast to (Just . from)
+
+newtype_ :: Coercible a b => B ctx (Codec a) -> B ctx (Codec b)
+newtype_ = iso coerce coerce
+
 type List = []
 
-word64 :: Def (Codec Word64)
-word64 =
-  Def (fromString "Word64") (fromString "") $
-    Prim (fromString "an 8 byte natural number (big endian)") (const Binary.get) (const Binary.put)
+word8 :: B ctx (Codec Word8)
+word8 = Ref def
+  where
+    def =
+      Def (fromString "Word8") (fromString "") $
+        Prim (fromString "a byte (big endian)") (const Binary.get) (const Binary.put)
+
+word16 :: B ctx (Codec Word16)
+word16 = Ref def
+  where
+    def =
+      Def (fromString "Word16") (fromString "") $
+        Prim (fromString "a 2 byte natural number (big endian)") (const Binary.get) (const Binary.put)
+
+word64 :: B ctx (Codec Word64)
+word64 = Ref def
+  where
+    def =
+      Def (fromString "Word64") (fromString "") $
+        Prim (fromString "an 8 byte natural number (big endian)") (const Binary.get) (const Binary.put)
+
+utcTime :: B ctx (Codec UTCTime)
+utcTime = Ref def
+  where
+    def =
+      Def (fromString "UTCTime") (fromString "Milliseconds since 1970-01-01T00:00Z")
+        $ Body
+        $ Cast
+          ( posixSecondsToUTCTime
+              . secondsToNominalDiffTime
+              . realToFrac @Milli @Pico
+              . MkFixed @Type @E3
+              . fromIntegral
+          )
+          ( ( \(MkFixed n) ->
+                if 0 <= n && n <= fromIntegral (maxBound @Word64)
+                  then Just $ fromIntegral @Integer @Word64 n
+                  else Nothing
+            )
+              . realToFrac @Pico @Milli
+              . nominalDiffTimeToSeconds
+              . utcTimeToPOSIXSeconds
+          )
+          word64
 
 lengthWord64 :: [a] -> Word64
 lengthWord64 = foldr (\_x -> (+) 1) 0
@@ -182,13 +244,15 @@ replicateMWord64 :: Applicative m => Word64 -> m a -> m [a]
 replicateMWord64 0 _ = pure []
 replicateMWord64 n ma = (:) <$> ma <*> replicateMWord64 (n - 1) ma
 
-vector :: Def (A Word64 `Arr` Codec a `Arr` Codec (List a))
-vector =
-  Def (fromString "Vector") (fromString "") $
-    Param (fromString "len") $
-      Param (fromString "a") $
-        Prim (fromString "`len` consecutive `a`s") get put
+vector :: B ctx (A Word64 `Arr` Codec a `Arr` Codec (List a))
+vector = Ref def
   where
+    def =
+      Def (fromString "Vector") (fromString "") $
+        Param (fromString "len") $
+          Param (fromString "a") $
+            Prim (fromString "`len` consecutive `a`s") get put
+
     get :: HList A_BGet (Codec a : A Word64 : ctx) -> Binary.Get (List a)
     get (HCons (A_BGet get_a) (HCons (A_BGet len) _ctx)) = replicateMWord64 len get_a
 
@@ -203,8 +267,8 @@ list = Ref def
         Param (fromString "a") $
           Body $
             Cast (\(_len, (xs, ())) -> xs) (\xs -> Just (lengthWord64 xs, (xs, ()))) $
-              Field (fromString "len") (Ref word64) $
-                Field (fromString "items") (Ref vector .@ Var Z .@ Var (S Z)) $
+              Field (fromString "len") word64 $
+                Field (fromString "items") (vector .@ Var Z .@ Var (S Z)) $
                   Unit
 
 set :: Ord a => B ctx (Codec a `Arr` Codec (Set a))
@@ -222,12 +286,12 @@ map = Ref def
     def =
       Def
         (fromString "Map")
-        (fromString "The `List` is sorted in ascending order on the first element of the pair") $
-        Param (fromString "k") $
-          Param (fromString "v") $
-            Body $
-              Cast Map.fromAscList (Just . Map.toAscList) $
-                list .@ (pair .@ Var (S Z) .@ Var Z)
+        (fromString "The `List` is sorted in ascending order on the first element of the pair")
+        $ Param (fromString "k")
+        $ Param (fromString "v")
+        $ Body
+        $ Cast Map.fromAscList (Just . Map.toAscList)
+        $ list .@ (pair .@ Var (S Z) .@ Var Z)
 
 pair :: B ctx (Codec a `Arr` Codec b `Arr` Codec (a, b))
 pair = Ref def
@@ -253,7 +317,7 @@ either =
     $ Cast
       (\(_tag, (rest, ())) -> rest)
       (\x -> case x of Left{} -> Just (0, (x, ())); Right{} -> Just (1, (x, ())))
-    $ Field (fromString "tag") (Ref word64)
+    $ Field (fromString "tag") word64
     $ Field
       (fromString "value")
       ( Choice
@@ -263,6 +327,27 @@ either =
           ]
       )
     $ Unit
+
+literalUtf8 :: Text -> B ctx (Codec ())
+literalUtf8 = LiteralUtf8
+
+utf8 :: B ctx (Codec Text)
+utf8 = Ref def
+  where
+    def =
+      Def (fromString "Utf8") (fromString "")
+        $ Body
+          . iso
+            (\(_len, (bytes, ())) -> Text.Encoding.decodeUtf8 $ ByteString.pack bytes)
+            ( \input ->
+                let bytes = Text.Encoding.encodeUtf8 input
+                in ( fromIntegral @Int @Word64 $ ByteString.length bytes
+                   , (ByteString.unpack bytes, ())
+                   )
+            )
+          . Field (fromString "length") word64
+          . Field (fromString "bytes") (vector .@ Var Z .@ word8)
+        $ Unit
 
 data Documented
   = Documented
@@ -292,6 +377,8 @@ renderDocumentedBody (DocumentedType ty) = " = " ++ renderDocumentedType ty
 
 renderDocumentedType :: DocumentedType -> String
 renderDocumentedType (DocumentedName n) = Text.unpack n
+renderDocumentedType (DocumentedString s) =
+  "\"" ++ Text.unpack s ++ "\""
 renderDocumentedType (DocumentedApp f x) = renderDocumentedType f ++ " " ++ renderDocumentedType x
 renderDocumentedType (DocumentedStruct fields) =
   "{ "
@@ -309,6 +396,7 @@ renderDocumentedLit (DocumentedLit l) = Text.unpack l
 
 data DocumentedType
   = DocumentedName !Text
+  | DocumentedString !Text
   | DocumentedStruct ![(Text, DocumentedType)]
   | DocumentedApp DocumentedType DocumentedType
   | DocumentedChoice DocumentedType [(DocumentedLit, DocumentedType)]
@@ -349,6 +437,7 @@ documentedType ::
   m DocumentedType
 documentedType (Ref d) _ctx = documentedDef d
 documentedType (Var ix) ctx = pure $ DocumentedName (getConst $ index ctx ix)
+documentedType (LiteralUtf8 expected) _ctx = pure $ DocumentedString expected
 documentedType (App f x) ctx = DocumentedApp <$> documentedType f ctx <*> documentedType x ctx
 documentedType b@Field{} ctx = DocumentedStruct <$> documentedStruct b ctx
 documentedType (Choice x ys) ctx =

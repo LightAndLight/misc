@@ -74,7 +74,7 @@ data State
   , commentMetadata :: !(Map CommentId CommentMetadata)
   , history :: !(Map StateId Commit)
   }
-  deriving (Show)
+  deriving (Show, Generic)
 
 stateNew :: State
 stateNew =

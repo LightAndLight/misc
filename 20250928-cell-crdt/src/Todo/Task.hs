@@ -42,7 +42,7 @@ data TaskMetadata
   = TaskMetadata
   { createdAt :: !UTCTime
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
 data Task f
   = Task

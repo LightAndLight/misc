@@ -24,6 +24,7 @@ library
         cryptohash-md5,
         directory,
         entropy,
+        generics-eot,
         hashable,
         mtl,
         text >=2.0,
