@@ -63,7 +63,7 @@ mkStateId :: Set StateId -> Change -> StateId
 mkStateId parents change = StateId . hashMD5 . runPut $ putSet parents <> putChange change
 
 data Commit = Commit {parents :: !(Set StateId), change :: !Change}
-  deriving (Show)
+  deriving (Show, Generic)
 
 data State
   = State

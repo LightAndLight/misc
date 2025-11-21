@@ -60,7 +60,7 @@ data CommentMetadata
   { createdAt :: !UTCTime
   , replyTo :: !ReplyId
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
 newtype Comment f
   = Comment

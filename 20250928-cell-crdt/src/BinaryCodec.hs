@@ -35,8 +35,10 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
 import Data.Time.Clock (UTCTime, nominalDiffTimeToSeconds, secondsToNominalDiffTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
+import Data.Void (Void, absurd)
 import Data.Word (Word16, Word64, Word8)
 import GHC.Stack (HasCallStack)
+import Generics.Eot (Eot, HasEot, fromEot, toEot)
 
 data HList (f :: a -> Type) :: [a] -> Type where
   HNil :: HList f '[]
@@ -190,6 +192,12 @@ iso to from = Cast to (Just . from)
 newtype_ :: Coercible a b => B ctx (Codec a) -> B ctx (Codec b)
 newtype_ = iso coerce coerce
 
+record ::
+  (HasEot record, Eot record ~ Either fields Void) =>
+  B ctx (Codec fields) ->
+  B ctx (Codec record)
+record = Cast (fromEot . Left) (Just . Prelude.either id absurd . toEot)
+
 type List = []
 
 word8 :: B ctx (Codec Word8)
@@ -217,25 +225,25 @@ utcTime :: B ctx (Codec UTCTime)
 utcTime = Ref def
   where
     def =
-      Def (fromString "UTCTime") (fromString "Milliseconds since 1970-01-01T00:00Z")
-        $ Body
-        $ Cast
-          ( posixSecondsToUTCTime
-              . secondsToNominalDiffTime
-              . realToFrac @Milli @Pico
-              . MkFixed @Type @E3
-              . fromIntegral
-          )
-          ( ( \(MkFixed n) ->
-                if 0 <= n && n <= fromIntegral (maxBound @Word64)
-                  then Just $ fromIntegral @Integer @Word64 n
-                  else Nothing
+      Def (fromString "UTCTime") (fromString "Milliseconds since 1970-01-01T00:00Z") $
+        Body $
+          Cast
+            ( posixSecondsToUTCTime
+                . secondsToNominalDiffTime
+                . realToFrac @Milli @Pico
+                . MkFixed @Type @E3
+                . fromIntegral
             )
-              . realToFrac @Pico @Milli
-              . nominalDiffTimeToSeconds
-              . utcTimeToPOSIXSeconds
-          )
-          word64
+            ( ( \(MkFixed n) ->
+                  if 0 <= n && n <= fromIntegral (maxBound @Word64)
+                    then Just $ fromIntegral @Integer @Word64 n
+                    else Nothing
+              )
+                . realToFrac @Pico @Milli
+                . nominalDiffTimeToSeconds
+                . utcTimeToPOSIXSeconds
+            )
+            word64
 
 lengthWord64 :: [a] -> Word64
 lengthWord64 = foldr (\_x -> (+) 1) 0
@@ -363,37 +371,6 @@ data DocumentedBody
   | DocumentedType DocumentedType
   deriving (Show)
 
-renderDocumented :: Documented -> String
-renderDocumented (Documented mDesc name params body) =
-  maybe "" ((++ "\n") . ("# " ++) . Text.unpack) mDesc
-    ++ "type "
-    ++ Text.unpack name
-    ++ (if null params then "" else foldMap ((" " ++) . Text.unpack) params)
-    ++ renderDocumentedBody body
-
-renderDocumentedBody :: DocumentedBody -> String
-renderDocumentedBody (DocumentedPrim desc) = " is \"" ++ Text.unpack desc ++ "\""
-renderDocumentedBody (DocumentedType ty) = " = " ++ renderDocumentedType ty
-
-renderDocumentedType :: DocumentedType -> String
-renderDocumentedType (DocumentedName n) = Text.unpack n
-renderDocumentedType (DocumentedString s) =
-  "\"" ++ Text.unpack s ++ "\""
-renderDocumentedType (DocumentedApp f x) = renderDocumentedType f ++ " " ++ renderDocumentedType x
-renderDocumentedType (DocumentedStruct fields) =
-  "{ "
-    ++ intercalate ", " (fmap (\(name, ty) -> Text.unpack name ++ " : " ++ renderDocumentedType ty) fields)
-    ++ " }"
-renderDocumentedType (DocumentedChoice x ys) =
-  "match "
-    ++ renderDocumentedType x
-    ++ " { "
-    ++ intercalate ", " (fmap (\(l, y) -> renderDocumentedLit l ++ " -> " ++ renderDocumentedType y) ys)
-    ++ " }"
-
-renderDocumentedLit :: DocumentedLit -> String
-renderDocumentedLit (DocumentedLit l) = Text.unpack l
-
 data DocumentedType
   = DocumentedName !Text
   | DocumentedString !Text
@@ -445,7 +422,7 @@ documentedType (Choice x ys) ctx =
     <$> documentedType x ctx
     <*> traverse (bitraverse documentedLit (`documentedType` ctx)) ys
 documentedType (Cast _to _from rest) ctx = documentedType rest ctx
-documentedType Unit _ctx = error "got Unit"
+documentedType Unit _ctx = pure $ DocumentedName (fromString "{}")
 
 documentedLit :: (IsLit a, Applicative m) => a -> m DocumentedLit
 documentedLit a = pure . DocumentedLit $ renderLit a
@@ -461,3 +438,42 @@ documentedStruct (Field name value rest) ctx = do
   pure $ (name, a) : fields
 documentedStruct Unit _ctx = pure []
 documentedStruct _ _ctx = error "Not Field or Unit"
+
+renderDocumented :: Documented -> String
+renderDocumented (Documented mDesc name params body) =
+  maybe "" ((++ "\n") . ("# " ++) . Text.unpack) mDesc
+    ++ "type "
+    ++ Text.unpack name
+    ++ (if null params then "" else foldMap ((" " ++) . Text.unpack) params)
+    ++ renderDocumentedBody body
+
+renderDocumentedBody :: DocumentedBody -> String
+renderDocumentedBody (DocumentedPrim desc) = " is \"" ++ Text.unpack desc ++ "\""
+renderDocumentedBody (DocumentedType ty) = " = " ++ renderDocumentedType ty
+
+renderDocumentedType :: DocumentedType -> String
+renderDocumentedType (DocumentedName n) = Text.unpack n
+renderDocumentedType (DocumentedString s) =
+  "\"" ++ concatMap escape (Text.unpack s) ++ "\""
+  where
+    escape '\n' = "\\n"
+    escape c = [c]
+renderDocumentedType (DocumentedApp f x) =
+  renderDocumentedType f
+    ++ " "
+    ++ (case x of DocumentedApp{} -> parens; _ -> id) (renderDocumentedType x)
+  where
+    parens a = "(" ++ a ++ ")"
+renderDocumentedType (DocumentedStruct fields) =
+  "{ "
+    ++ intercalate ", " (fmap (\(name, ty) -> Text.unpack name ++ " : " ++ renderDocumentedType ty) fields)
+    ++ " }"
+renderDocumentedType (DocumentedChoice x ys) =
+  "match "
+    ++ renderDocumentedType x
+    ++ " { "
+    ++ intercalate ", " (fmap (\(l, y) -> renderDocumentedLit l ++ " -> " ++ renderDocumentedType y) ys)
+    ++ " }"
+
+renderDocumentedLit :: DocumentedLit -> String
+renderDocumentedLit (DocumentedLit l) = Text.unpack l
