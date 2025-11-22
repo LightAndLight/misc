@@ -24,7 +24,7 @@ import Data.Fixed (E3, Fixed (..), Milli, Pico)
 import Data.Foldable (traverse_)
 import Data.Functor.Const (Const (..), getConst)
 import Data.Kind (Type)
-import Data.List (find, intercalate)
+import Data.List (find, intercalate, unsnoc)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -39,6 +39,7 @@ import Data.Void (Void, absurd)
 import Data.Word (Word16, Word64, Word8)
 import GHC.Stack (HasCallStack)
 import Generics.Eot (Eot, HasEot, fromEot, toEot)
+import qualified Pretty
 
 data HList (f :: a -> Type) :: [a] -> Type where
   HNil :: HList f '[]
@@ -439,41 +440,56 @@ documentedStruct (Field name value rest) ctx = do
 documentedStruct Unit _ctx = pure []
 documentedStruct _ _ctx = error "Not Field or Unit"
 
-renderDocumented :: Documented -> String
-renderDocumented (Documented mDesc name params body) =
-  maybe "" ((++ "\n") . ("# " ++) . Text.unpack) mDesc
-    ++ "type "
-    ++ Text.unpack name
-    ++ (if null params then "" else foldMap ((" " ++) . Text.unpack) params)
-    ++ renderDocumentedBody body
+docDocumented :: Documented -> Pretty.Doc
+docDocumented (Documented mDesc name params body) =
+  foldMap (\desc -> Pretty.line $ fromString "# " <> desc) mDesc
+    <> Pretty.line (fromString "type " <> name <> foldMap (fromString " " <>) params)
+      `Pretty.extend` docDocumentedBody body
 
-renderDocumentedBody :: DocumentedBody -> String
-renderDocumentedBody (DocumentedPrim desc) = " is \"" ++ Text.unpack desc ++ "\""
-renderDocumentedBody (DocumentedType ty) = " = " ++ renderDocumentedType ty
+docDocumentedBody :: DocumentedBody -> Pretty.Doc
+docDocumentedBody (DocumentedPrim desc) = Pretty.line $ " is \"" ++ Text.unpack desc ++ "\""
+docDocumentedBody (DocumentedType ty) = Pretty.line " = " `Pretty.extend` docDocumentedType ty
 
-renderDocumentedType :: DocumentedType -> String
-renderDocumentedType (DocumentedName n) = Text.unpack n
-renderDocumentedType (DocumentedString s) =
-  "\"" ++ concatMap escape (Text.unpack s) ++ "\""
+docDocumentedType :: DocumentedType -> Pretty.Doc
+docDocumentedType (DocumentedName n) = Pretty.line $ Text.unpack n
+docDocumentedType (DocumentedString s) =
+  Pretty.line $ "\"" ++ concatMap escape (Text.unpack s) ++ "\""
   where
     escape '\n' = "\\n"
     escape c = [c]
-renderDocumentedType (DocumentedApp f x) =
-  renderDocumentedType f
-    ++ " "
-    ++ (case x of DocumentedApp{} -> parens; _ -> id) (renderDocumentedType x)
+docDocumentedType (DocumentedApp f x) =
+  docDocumentedType f
+    `Pretty.extend` Pretty.line " "
+    `Pretty.extend` (case x of DocumentedApp{} -> parens; _ -> id) (docDocumentedType x)
   where
-    parens a = "(" ++ a ++ ")"
-renderDocumentedType (DocumentedStruct fields) =
-  "{ "
-    ++ intercalate ", " (fmap (\(name, ty) -> Text.unpack name ++ " : " ++ renderDocumentedType ty) fields)
-    ++ " }"
-renderDocumentedType (DocumentedChoice x ys) =
-  "match "
-    ++ renderDocumentedType x
-    ++ " { "
-    ++ intercalate ", " (fmap (\(l, y) -> renderDocumentedLit l ++ " -> " ++ renderDocumentedType y) ys)
-    ++ " }"
+    parens a = Pretty.line "(" `Pretty.extend` a `Pretty.extend` Pretty.line ")"
+docDocumentedType (DocumentedStruct fields) =
+  case unsnoc
+    ( fmap
+        ( \(name, ty) -> Pretty.line name `Pretty.extend` Pretty.line " : " `Pretty.extend` docDocumentedType ty
+        )
+        fields
+    ) of
+    Nothing -> Pretty.line "{}"
+    Just (start, l) ->
+      Pretty.line "{"
+        <> Pretty.indented 2 (foldMap (`Pretty.extend` Pretty.line ",") start <> l)
+        <> Pretty.line "}"
+docDocumentedType (DocumentedChoice x ys) =
+  Pretty.line "match "
+    `Pretty.extend` docDocumentedType x
+    `Pretty.extend` ( case unsnoc
+                        ( fmap
+                            (\(l, y) -> Pretty.line (renderDocumentedLit l ++ " -> ") `Pretty.extend` docDocumentedType y)
+                            ys
+                        ) of
+                        Nothing ->
+                          Pretty.line " {}"
+                        Just (start, l) ->
+                          Pretty.line " {"
+                            <> Pretty.indented 2 (foldMap (`Pretty.extend` Pretty.line ",") start <> l)
+                            <> Pretty.line "}"
+                    )
 
 renderDocumentedLit :: DocumentedLit -> String
 renderDocumentedLit (DocumentedLit l) = Text.unpack l
