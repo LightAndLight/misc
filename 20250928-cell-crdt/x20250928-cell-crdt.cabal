@@ -15,7 +15,6 @@ common warnings
 library
     import:           warnings
     build-depends:
-        attoparsec,
         barbies,
         base ^>=4.19.2.0,
         binary,

@@ -67,11 +67,8 @@ import qualified Todo
   , State (..)
   , stateChange
   , stateConflicts
-  , stateDeserialise
   , stateMerge
   , stateNew
-  , stateSave
-  , stateSerialise
   , stateThread
   )
 import qualified Todo.Comment as Comment (Comment (..))
@@ -97,6 +94,7 @@ import qualified Todo.Task as Todo
   , taskFieldNames
   , taskGetters
   )
+import qualified Todo.V0
 import qualified Todoist
 import Prelude hiding (init)
 
@@ -353,9 +351,18 @@ main = do
     Comment CommentList -> commentList (database cli)
     Comment (CommentView commentId) -> commentView (database cli) commentId
 
+stateSerialise :: FilePath -> Todo.State -> IO ()
+stateSerialise = Todo.V0.stateSerialise
+
+stateDeserialise :: FilePath -> IO Todo.State
+stateDeserialise = Todo.V0.stateDeserialise
+
+stateSave :: FilePath -> Todo.State -> IO ()
+stateSave = Todo.V0.stateSave
+
 default_ :: FilePath -> IO ()
 default_ path = do
-  state <- Todo.stateDeserialise path
+  state <- stateDeserialise path
   let
     tasks =
       sortOn (Down . Todo.createdAt . snd . snd)
@@ -389,14 +396,14 @@ renderComment (Todo.CommentId commentId, (comment, _metadata)) = do
 init :: FilePath -> Maybe InitFrom -> IO ()
 init path Nothing = do
   let state = Todo.stateNew
-  Todo.stateSerialise path state
+  stateSerialise path state
   putStrLn $ "Created " ++ path
 init dbPath (Just InitFrom{type_, path = importPath}) =
   case type_ of
     "todoist" -> do
       project <- Todoist.decodeProject importPath
       (Todoist.ImportStats numTasks numNotes, state) <- Todoist.projectToState project
-      Todo.stateSerialise dbPath state
+      stateSerialise dbPath state
       putStrLn $ "Created " ++ dbPath ++ "\n"
       putStrLn "Imported:"
       putStrLn $ "* " ++ show numTasks ++ " tasks"
@@ -407,16 +414,16 @@ init dbPath (Just InitFrom{type_, path = importPath}) =
 
 debug :: FilePath -> IO ()
 debug path = do
-  state <- Todo.stateDeserialise path
+  state <- stateDeserialise path
   print state
 
 merge :: FilePath -> FilePath -> IO ()
 merge path other = do
-  state <- Todo.stateDeserialise path
-  otherState <- Todo.stateDeserialise other
+  state <- stateDeserialise path
+  otherState <- stateDeserialise other
   let state' = Todo.stateMerge state otherState
 
-  Todo.stateSave path state'
+  stateSave path state'
   putStrLn $ "Merged " ++ other ++ " into " ++ path
 
   let conflicts = Todo.stateConflicts state'
@@ -485,10 +492,10 @@ taskNew path = do
             pure
             . validateIdentified Todo.taskFieldNames
           =<< readTask taskFile taskFileParser
-      state <- Todo.stateDeserialise path
+      state <- stateDeserialise path
 
       state' <- Todo.stateChange (Todo.NewTask task) state
-      Todo.stateSave path state'
+      stateSave path state'
 
       removeFile taskFile
       -- TODO: print task ID?
@@ -866,7 +873,7 @@ renderUpdateTask task update =
 
 taskList :: FilePath -> Maybe (Todo.Task FieldSelectors) -> IO ()
 taskList path mFilter = do
-  state <- Todo.stateDeserialise path
+  state <- stateDeserialise path
   let filteredTasks = Map.filter (maybe (const True) filterTask mFilter) (Todo.tasks state)
   let
     tasks =
@@ -919,7 +926,7 @@ viewInPager input = do
 
 taskView :: FilePath -> Todo.TaskId -> IO ()
 taskView path taskId = do
-  state <- Todo.stateDeserialise path
+  state <- stateDeserialise path
   case Map.lookup taskId (Todo.tasks state) of
     Nothing -> do
       putStrLn "Task not found"
@@ -949,7 +956,7 @@ formatYMDHMS = "%Y-%m-%dT%H:%M:%SZ"
 
 taskEdit :: FilePath -> Todo.TaskId -> IO ()
 taskEdit path taskId = do
-  state <- Todo.stateDeserialise path
+  state <- stateDeserialise path
   case Map.lookup taskId (Todo.tasks state) of
     Nothing -> do
       putStrLn "Task not found"
@@ -1003,7 +1010,7 @@ taskEdit path taskId = do
                   putStr $ renderUpdateTask task updateTask
 
                   state' <- Todo.stateChange Todo.UpdateTask{Todo.taskId, Todo.updateTask} state
-                  Todo.stateSave path state'
+                  stateSave path state'
 
                   removeFile taskFile
                   putStrLn $ "Updated task " ++ gidToBase32 (Todo.unTaskId taskId)
@@ -1012,7 +1019,7 @@ taskEdit path taskId = do
 
 labelList :: FilePath -> IO ()
 labelList path = do
-  state <- Todo.stateDeserialise path
+  state <- stateDeserialise path
   let labels = foldMap (fold . Todo.labels) $ Todo.tasks state
   for_ (Set.toAscList labels) $ \label -> do
     Text.IO.putStrLn label
@@ -1083,10 +1090,10 @@ commentNew path replyId = do
             pure
             . validateIdentified Todo.commentFieldNames
           =<< readComment commentFile commentFileParser
-      state <- Todo.stateDeserialise path
+      state <- stateDeserialise path
 
       state' <- Todo.stateChange Todo.NewComment{Todo.replyTo = replyId, Todo.comment = comment} state
-      Todo.stateSave path state'
+      stateSave path state'
 
       removeFile commentFile
       -- TODO: print comment ID?
@@ -1097,7 +1104,7 @@ commentNew path replyId = do
 
 commentList :: FilePath -> IO ()
 commentList path = do
-  state <- Todo.stateDeserialise path
+  state <- stateDeserialise path
   let comments = Todo.comments state
   let
     comments' =
@@ -1136,7 +1143,7 @@ commentPage comment =
 
 commentView :: FilePath -> Todo.CommentId -> IO ()
 commentView path commentId = do
-  state <- Todo.stateDeserialise path
+  state <- stateDeserialise path
   let
     result =
       (,)

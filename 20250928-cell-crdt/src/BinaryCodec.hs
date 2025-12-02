@@ -97,6 +97,9 @@ data Def :: Ty -> Type where
     (forall ctx. Body ctx a) ->
     Def a
 
+defBody :: Def a -> Body ctx a
+defBody (Def _name _desc body) = body
+
 data Body (ctx :: [Ty]) :: Ty -> Type where
   Prim ::
     -- | Description

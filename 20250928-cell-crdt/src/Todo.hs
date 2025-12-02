@@ -8,18 +8,14 @@ module Todo where
 
 import Barbies
 import Barbies.Constraints (Dict (..))
-import Control.Exception (Exception, throwIO)
+import Control.Exception (Exception)
 import Control.Monad (guard, replicateM)
-import qualified Data.Attoparsec.ByteString.Lazy as Attoparsec
 import Data.Binary (Binary, Word64, Word8)
 import qualified Data.Binary as Binary
-import Data.Binary.Get (runGet)
 import Data.Binary.Put (runPut)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
-import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Char (ord)
 import Data.Fixed (Milli, Pico)
 import Data.Foldable (foldl', traverse_)
 import Data.Functor.Identity (Identity (..))
@@ -29,7 +25,6 @@ import Data.Maybe (fromMaybe, maybeToList)
 import Data.Monoid (Any (..), getAny)
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.String (fromString)
 import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds, secondsToNominalDiffTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Data.Tree (Tree)
@@ -38,8 +33,6 @@ import GHC.Generics (Generic)
 import Getter (Getter (..))
 import MD5 (hashMD5)
 import StateId (StateId (..))
-import System.Directory (renameFile)
-import System.IO (IOMode (..), withFile)
 import Todo.Comment
   ( Comment
   , CommentId
@@ -621,36 +614,11 @@ getUpdate = do
     2 -> Pick <$> Binary.get
     _ -> fail $ "invalid Update tag: " ++ show tag
 
-stateSerialise :: FilePath -> State -> IO ()
-stateSerialise path state = LazyByteString.writeFile path (runPut $ stateBinaryPut state)
-
 data InvalidHeaderException = InvalidHeaderException FilePath
   deriving (Show, Exception)
 
 data UnexpectedVersion = UnexpectedVersion FilePath ByteString
   deriving (Show, Exception)
-
-stateDeserialise :: FilePath -> IO State
-stateDeserialise path =
-  withFile path ReadMode $ \handle -> do
-    input <- LazyByteString.hGetContents handle
-    case Attoparsec.parse headerParser input of
-      Attoparsec.Fail{} -> throwIO $ InvalidHeaderException path
-      Attoparsec.Done rest (version, _comment) ->
-        case ByteString.Char8.unpack version of
-          "0" -> pure $! runGet stateBinaryGet rest
-          _ -> throwIO $ UnexpectedVersion path version
-  where
-    headerParser :: Attoparsec.Parser (ByteString, ByteString)
-    headerParser =
-      (,)
-        <$ Attoparsec.string (fromString "tsk;")
-        <*> ( Attoparsec.string (fromString "version=")
-                *> Attoparsec.takeWhile (/= fromIntegral (ord ';'))
-                <* Attoparsec.string (fromString ";")
-            )
-        <*> Attoparsec.takeWhile (/= fromIntegral (ord '\n'))
-        <* Attoparsec.string (fromString "\n")
 
 stateThread :: State -> ReplyId -> [Tree (CommentId, CommentMetadata, Comment (Map StateId))]
 stateThread state = go
@@ -666,9 +634,3 @@ stateThread state = go
           ]
       in
         fmap (\x@(commentId, _, _) -> Tree.Node x $ go (ReplyComment commentId)) found
-
-stateSave :: FilePath -> State -> IO ()
-stateSave path state = do
-  let pathNew = path ++ ".new"
-  stateSerialise pathNew state
-  renameFile pathNew path

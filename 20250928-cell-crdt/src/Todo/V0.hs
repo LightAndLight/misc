@@ -9,18 +9,38 @@
 module Todo.V0 where
 
 import BinaryCodec
+import Data.Binary.Get (runGet)
+import Data.Binary.Put (runPut)
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Functor.Identity (Identity (..))
 import Data.Map.Strict (Map)
 import Data.String (fromString)
 import GID (GID)
 import MD5 (MD5)
 import StateId (StateId (..))
+import System.Directory (renameFile)
+import System.IO (IOMode (..), withFile)
 import qualified Todo
 import Todo.Comment (CommentId (..))
 import qualified Todo.Comment as Todo (Comment, CommentMetadata, ReplyId (..))
 import Todo.Task (TaskId (..))
 import qualified Todo.Task as Todo (Task, TaskMetadata, Update (..))
 import Prelude hiding (map)
+
+stateSerialise :: FilePath -> Todo.State -> IO ()
+stateSerialise path = LazyByteString.writeFile path . runPut . bputBody (defBody state) HNil
+
+stateDeserialise :: FilePath -> IO Todo.State
+stateDeserialise path =
+  withFile path ReadMode $ \handle -> do
+    input <- LazyByteString.hGetContents handle
+    pure $! runGet (bgetBody (defBody state) HNil) input
+
+stateSave :: FilePath -> Todo.State -> IO ()
+stateSave path state = do
+  let pathNew = path ++ ".new"
+  stateSerialise pathNew state
+  renameFile pathNew path
 
 state :: Def (Codec Todo.State)
 state =
