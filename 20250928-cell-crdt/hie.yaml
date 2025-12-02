@@ -9,5 +9,8 @@ cradle:
     - path: "./app/Todoist.hs"
       component: "x20250928-cell-crdt:exe:tsk"
 
+    - path: "./app/BinaryFormat.hs"
+      component: "x20250928-cell-crdt:exe:tsk-binary-format"
+
     - path: "./test"
       component: "x20250928-cell-crdt:test:x20250928-cell-crdt-tests"

@@ -5,13 +5,15 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 
 module BinaryCodec where
 
-import Control.Monad (unless)
+import Control.Monad (unless, (<=<))
+import Control.Monad.State (State, runState)
 import Control.Monad.State.Class (MonadState, gets, modify)
 import Data.Binary (Binary)
 import qualified Data.Binary as Binary
@@ -20,6 +22,8 @@ import qualified Data.Binary.Put as Binary.Put
 import Data.Bitraversable (bitraverse)
 import qualified Data.ByteString as ByteString
 import Data.Coerce (Coercible, coerce)
+import Data.DList (DList)
+import qualified Data.DList as DList
 import Data.Fixed (E3, Fixed (..), Milli, Pico)
 import Data.Foldable (traverse_)
 import Data.Functor.Const (Const (..), getConst)
@@ -27,6 +31,7 @@ import Data.Kind (Type)
 import Data.List (find, intercalate, unsnoc)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.String (fromString)
@@ -37,7 +42,6 @@ import Data.Time.Clock (UTCTime, nominalDiffTimeToSeconds, secondsToNominalDiffT
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import Data.Void (Void, absurd)
 import Data.Word (Word16, Word64, Word8)
-import GHC.Stack (HasCallStack)
 import Generics.Eot (Eot, HasEot, fromEot, toEot)
 import qualified Pretty
 
@@ -384,20 +388,44 @@ newtype DocumentedLit
   = DocumentedLit Text
   deriving (Show)
 
+data DocumentedState
+  = DocumentedState
+      -- | Definitions
+      !(Map Text (Placeholder Documented))
+      -- | Order
+      !(DList Text)
+
+data Placeholder a
+  = Missing
+  | Present a
+
+placeholderToMaybe :: Placeholder a -> Maybe a
+placeholderToMaybe Missing = Nothing
+placeholderToMaybe (Present a) = Just a
+
+runDocumented :: State DocumentedState a -> ([Documented], a)
+runDocumented ma =
+  let
+    (a, DocumentedState defs order) = runState ma (DocumentedState mempty mempty)
+    defs' = mapMaybe (placeholderToMaybe <=< (`Map.lookup` defs)) (DList.toList order)
+  in
+    (defs', a)
+
 documentedDef ::
-  MonadState (Map Text Documented) m => Def a -> m DocumentedType
+  MonadState DocumentedState m => Def a -> m DocumentedType
 documentedDef (Def name desc body) = do
-  mDef <- gets $ Map.lookup name
+  mDef <- gets $ \(DocumentedState defs _) -> Map.lookup name defs
   case mDef of
     Just{} -> pure ()
     Nothing -> do
+      modify $ \(DocumentedState defs order) -> DocumentedState (Map.insert name Missing defs) (order `DList.snoc` name)
       (params, body') <- documentedBody body HNil
       let doc = Documented (if Text.null desc then Nothing else Just desc) name params body'
-      modify $ Map.insert name doc
+      modify $ \(DocumentedState defs order) -> DocumentedState (Map.insert name (Present doc) defs) order
   pure $ DocumentedName name
 
 documentedBody ::
-  MonadState (Map Text Documented) m =>
+  MonadState DocumentedState m =>
   Body ctx a ->
   HList (Const Text) ctx ->
   m ([Text], DocumentedBody)
@@ -408,8 +436,7 @@ documentedBody (Param name body) ctx = do
 documentedBody (Prim desc _get _put) _ctx = pure ([], DocumentedPrim desc)
 
 documentedType ::
-  HasCallStack =>
-  MonadState (Map Text Documented) m =>
+  MonadState DocumentedState m =>
   B ctx a ->
   HList (Const Text) ctx ->
   m DocumentedType
@@ -429,7 +456,7 @@ documentedLit :: (IsLit a, Applicative m) => a -> m DocumentedLit
 documentedLit a = pure . DocumentedLit $ renderLit a
 
 documentedStruct ::
-  MonadState (Map Text Documented) m =>
+  MonadState DocumentedState m =>
   B ctx a ->
   HList (Const Text) ctx ->
   m [(Text, DocumentedType)]
