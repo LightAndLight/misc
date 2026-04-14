@@ -1,0 +1,4 @@
+cradle:
+  cabal:
+    - path: "app/Main.hs"
+      component: "x20260124-image-kmeans:exe:x20260124-image-kmeans"
